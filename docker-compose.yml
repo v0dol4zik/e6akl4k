@@ -1,0 +1,37 @@
+services:
+  music_bot:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      YTDLP_COOKIES_FILE: /app/cookies.txt
+    volumes:
+      - type: bind
+        source: ./downloads
+        target: /app/downloads
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./cache
+        target: /app/cache
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./cookies.txt
+        target: /app/cookies.txt
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777,exec
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
