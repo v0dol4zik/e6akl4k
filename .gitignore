@@ -1,0 +1,7 @@
+.env
+/__pycache__/
+/cache/
+/cookies.txt
+/cookies.txt.*
+/downloads/
+/musicbot

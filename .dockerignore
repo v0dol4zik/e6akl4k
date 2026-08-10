@@ -1,0 +1,10 @@
+.env
+.git
+.gitignore
+__pycache__
+cache
+cookies.txt
+cookies.txt.*
+downloads
+musicbot
+README.md
