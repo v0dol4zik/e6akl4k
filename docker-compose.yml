@@ -7,6 +7,8 @@ services:
       - .env
     environment:
       YTDLP_COOKIES_FILE: /app/cookies.txt
+      HTTP_ADDR: 0.0.0.0:8080
+      LOG_FORMAT: json
     volumes:
       - type: bind
         source: ./downloads
@@ -30,6 +32,9 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    mem_limit: 1g
+    cpus: "2.0"
+    pids_limit: 256
     logging:
       driver: json-file
       options:

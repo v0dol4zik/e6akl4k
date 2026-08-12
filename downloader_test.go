@@ -1,12 +1,70 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestDownloadRangeSelectsOnlyRequestedPlaylistItems(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake-yt-dlp")
+	entries := make([]string, 30)
+	for i := range entries {
+		entries[i] = fmt.Sprintf(`{"id":"id%d","title":"Track %d","duration":60,"playlist_index":%d,"extractor":"youtube"}`, i+1, i+1, i+1)
+	}
+	script := `#!/bin/sh
+case " $* " in
+  *" --simulate "*) printf '%s' '{"_type":"playlist","title":"List","entries":[` + strings.Join(entries, ",") + `]}' ; exit 0 ;;
+esac
+dir=''; manifest=''; progress=''; items=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --paths) dir="$2"; shift 2 ;;
+    --playlist-items) items="$2"; shift 2 ;;
+    --print-to-file)
+      template="$2"; output="$3"
+      case "$template" in after_move:*) manifest="$output" ;; before_dl:*) progress="$output" ;; esac
+      shift 3 ;;
+    *) shift ;;
+  esac
+done
+oldifs="$IFS"; IFS=,
+for item in $items; do
+  path="$dir/$(printf '%06d' "$item")_id$item.mp3"
+  printf 'audio' > "$path"
+  printf '%s\n' "$item" >> "$progress"
+  printf '{"id":"id%s","title":"Track %s","duration":60,"playlist_index":%s,"filepath":"%s","extractor":"youtube"}\n' "$item" "$item" "$item" "$path" >> "$manifest"
+done
+IFS="$oldifs"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d := downloader{bin: bin, downloadDir: dir, maxFileSize: maxFileSize, maxPlaylistTracks: 75}
+	results, err := d.downloadRange(context.Background(), "https://youtube.com/playlist?list=x", "mp3", "320", 11, 20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if len(results) > 0 {
+			d.clearSession(results[0].Session)
+		}
+	}()
+	if len(results) != 10 {
+		t.Fatalf("results=%d", len(results))
+	}
+	if results[0].Title != "Track 11" || results[9].Title != "Track 20" {
+		t.Fatalf("range=%q..%q", results[0].Title, results[9].Title)
+	}
+	if results[0].CacheKey != "youtube:id11:mp3:320" {
+		t.Fatalf("cache key=%q", results[0].CacheKey)
+	}
+}
 
 func TestMaxDurationFor(t *testing.T) {
 	d := downloader{maxFileSize: maxFileSize}

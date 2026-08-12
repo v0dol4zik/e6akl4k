@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,16 +47,32 @@ func main() {
 	if err := loadEnv(".env"); err != nil {
 		log.Fatalf("Не удалось прочитать .env: %v", err)
 	}
-	token := strings.TrimSpace(os.Getenv("BOT_TOKEN"))
-	if token == "" {
-		log.Fatal("BOT_TOKEN не задан в .env или переменных окружения")
+	if os.Getenv("LOG_FORMAT") == "json" {
+		handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+		slog.SetDefault(slog.New(handler))
+		log.SetFlags(0)
+		log.SetOutput(slogWriter{})
 	}
-
-	dl, err := newDownloader("downloads", maxFileSize)
+	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
-	bot, err := tgbotapi.NewBotAPI(token)
+
+	dl, err := newDownloader(cfg.DownloadDir, cfg.MaxFileSize)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dl.cookieConcurrency = cfg.CookieConcurrency
+	dl.maxPlaylistTracks = cfg.MaxPlaylistTracks
+	state, err := openStore(cfg.DatabasePath)
+	if err != nil {
+		log.Fatalf("Не удалось открыть SQLite: %v", err)
+	}
+	defer state.Close()
+	if err := state.cleanup(context.Background(), cfg.CacheTTL); err != nil {
+		log.Printf("Очистить старый кэш: %v", err)
+	}
+	bot, err := tgbotapi.NewBotAPI(cfg.BotToken)
 	if err != nil {
 		log.Fatalf("Не удалось подключиться к Telegram: %v", err)
 	}
@@ -64,23 +80,25 @@ func main() {
 		log.Fatalf("Не удалось удалить webhook: %v", err)
 	}
 	log.Printf("Бот @%s запущен", bot.Self.UserName)
+	registerBotCommands(bot, cfg.AdminIDs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	application := newApp(ctx, bot, dl)
-	if cacheChatIDText := strings.TrimSpace(os.Getenv("INLINE_CACHE_CHAT_ID")); cacheChatIDText != "" {
-		cacheChatID, parseErr := strconv.ParseInt(cacheChatIDText, 10, 64)
-		if parseErr != nil || cacheChatID == 0 {
-			log.Fatalf("INLINE_CACHE_CHAT_ID должен быть числовым ID чата: %q", cacheChatIDText)
-		}
-		inline, inlineErr := newInlineService(ctx, bot, dl, cacheChatID)
+	application := newAppWithServices(ctx, bot, dl, state, cfg)
+	_ = startHTTPServer(ctx, application, cfg.HTTPAddr)
+	application.startDiskMonitor(ctx)
+	if cfg.CacheChatID != 0 {
+		inline, inlineErr := newInlineService(ctx, bot, dl, cfg.CacheChatID)
 		if inlineErr != nil {
 			log.Fatalf("Не удалось запустить inline-режим: %v", inlineErr)
 		}
+		if inlineErr = inline.attachStore(state, cfg.CacheTTL); inlineErr != nil {
+			log.Fatalf("Мигрировать inline-кэш: %v", inlineErr)
+		}
 		application.inline = inline
-		log.Printf("Inline-режим включён, cache-чат: %d", cacheChatID)
+		log.Printf("Inline-режим включён, cache-чат: %d", cfg.CacheChatID)
 	} else {
-		log.Print("INLINE_CACHE_CHAT_ID не задан: inline-режим отключён")
+		log.Print("CACHE_CHAT_ID/INLINE_CACHE_CHAT_ID не задан: inline-режим отключён")
 	}
 	updates := bot.GetUpdatesChan(tgbotapi.UpdateConfig{
 		Timeout: 60,
@@ -92,10 +110,21 @@ func main() {
 		},
 	})
 	var handlers sync.WaitGroup
+	jobs := make(chan tgbotapi.Update, cfg.UpdateQueueSize)
+	for i := 0; i < cfg.UpdateWorkers; i++ {
+		handlers.Add(1)
+		go func() {
+			defer handlers.Done()
+			for update := range jobs {
+				application.handleUpdate(update)
+			}
+		}()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			bot.StopReceivingUpdates()
+			close(jobs)
 			finished := make(chan struct{})
 			go func() {
 				handlers.Wait()
@@ -103,20 +132,68 @@ func main() {
 			}()
 			select {
 			case <-finished:
-			case <-time.After(30 * time.Second):
-				log.Print("Не все обработчики успели завершиться за 30 секунд")
+			case <-time.After(cfg.ShutdownTimeout):
+				log.Printf("Не все обработчики успели завершиться за %s", cfg.ShutdownTimeout)
 			}
 			log.Print("Бот остановлен")
 			return
 		case update, ok := <-updates:
 			if !ok {
+				close(jobs)
+				handlers.Wait()
 				return
 			}
-			handlers.Add(1)
-			go func() {
-				defer handlers.Done()
-				application.handleUpdate(update)
-			}()
+			select {
+			case jobs <- update:
+			case <-ctx.Done():
+			}
 		}
 	}
+}
+
+type slogWriter struct{}
+
+func (slogWriter) Write(p []byte) (int, error) {
+	slog.Info(string(p))
+	return len(p), nil
+}
+
+func registerBotCommands(bot *tgbotapi.BotAPI, admins map[int64]bool) {
+	defaultScope := tgbotapi.NewBotCommandScopeDefault()
+	if _, err := bot.Request(tgbotapi.NewSetMyCommands(botCommands(defaultLang, false)...)); err != nil {
+		log.Printf("Установить команды: %v", err)
+	}
+	for _, lang := range languageOrder {
+		config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(defaultScope, lang, botCommands(lang, false)...)
+		if _, err := bot.Request(config); err != nil {
+			log.Printf("Установить команды для языка %s: %v", lang, err)
+		}
+	}
+	for adminID := range admins {
+		scope := tgbotapi.NewBotCommandScopeChat(adminID)
+		if _, err := bot.Request(tgbotapi.NewSetMyCommandsWithScope(scope, botCommands(defaultLang, true)...)); err != nil {
+			log.Printf("Установить админские команды %d: %v", adminID, err)
+		}
+		for _, lang := range languageOrder {
+			config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(scope, lang, botCommands(lang, true)...)
+			if _, err := bot.Request(config); err != nil {
+				log.Printf("Установить админские команды %d для языка %s: %v", adminID, lang, err)
+			}
+		}
+	}
+}
+
+func botCommands(lang string, admin bool) []tgbotapi.BotCommand {
+	commands := []tgbotapi.BotCommand{
+		{Command: "start", Description: tr("command_start", lang)},
+		{Command: "help", Description: tr("command_help", lang)},
+		{Command: "language", Description: tr("command_language", lang)},
+	}
+	if admin {
+		commands = append(commands,
+			tgbotapi.BotCommand{Command: "stats", Description: tr("command_stats", lang)},
+			tgbotapi.BotCommand{Command: "status", Description: tr("command_status", lang)},
+		)
+	}
+	return commands
 }

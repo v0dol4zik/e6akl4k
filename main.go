@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"html"
 	"log"
 	"os"
@@ -23,7 +24,9 @@ const (
 	maxTitleLength             = 200
 	maxParallelDownloads       = 2
 	maxStoredEntries           = 5000
+	maxPendingZIPEntries       = 20
 	pendingZIPTTL              = time.Hour
+	pendingURLTTL              = time.Hour
 )
 
 var (
@@ -39,9 +42,13 @@ type zipRequest struct {
 }
 
 type pendingURL struct {
-	URL    string
-	ChatID int64
-	UserID int64
+	URL        string
+	ChatID     int64
+	UserID     int64
+	Preview    mediaPreview
+	RangeStart int
+	RangeEnd   int
+	ExpiresAt  time.Time
 }
 
 type activeDownload struct {
@@ -51,31 +58,65 @@ type activeDownload struct {
 }
 
 type app struct {
-	bot        *tgbotapi.BotAPI
-	downloader *downloader
-	inline     *inlineService
-	semaphore  chan struct{}
-	ctx        context.Context
+	bot           *tgbotapi.BotAPI
+	downloader    *downloader
+	inline        *inlineService
+	ctx           context.Context
+	cfg           config
+	store         *store
+	downloads     *jobGate
+	lookups       *jobGate
+	limiter       *rateLimiter
+	inlineLimiter *rateLimiter
+	flights       flightGroup
 
-	mu         sync.Mutex
-	userLang   map[int64]string
-	urls       map[string]pendingURL
-	urlOrder   []string
-	pendingZIP map[string]zipRequest
-	zipOrder   []string
-	active     map[string]activeDownload
+	mu            sync.Mutex
+	userLang      map[int64]string
+	urls          map[string]pendingURL
+	urlOrder      []string
+	pendingZIP    map[string]zipRequest
+	zipOrder      []string
+	active        map[string]activeDownload
+	activeUser    map[int64]bool
+	cookieAlertAt time.Time
 }
 
 func newApp(ctx context.Context, bot *tgbotapi.BotAPI, downloader *downloader) *app {
+	cfg := config{DownloadWorkers: maxParallelDownloads, DownloadQueueSize: 20, LookupWorkers: 2, LookupQueueSize: 40, RateLimit: 12, RateWindow: time.Minute, CacheTTL: 180 * 24 * time.Hour, MaxFileSize: maxFileSize, MaxPlaylistTracks: maxPlaylistTracks}
+	return newAppWithServices(ctx, bot, downloader, nil, cfg)
+}
+
+func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *downloader, state *store, cfg config) *app {
+	if cfg.DownloadWorkers <= 0 {
+		cfg.DownloadWorkers = maxParallelDownloads
+	}
+	if cfg.LookupWorkers <= 0 {
+		cfg.LookupWorkers = 2
+	}
+	if cfg.RateLimit <= 0 {
+		cfg.RateLimit = 12
+	}
+	if cfg.InlineRateLimit <= 0 {
+		cfg.InlineRateLimit = 60
+	}
+	if cfg.RateWindow <= 0 {
+		cfg.RateWindow = time.Minute
+	}
 	return &app{
-		bot:        bot,
-		downloader: downloader,
-		semaphore:  make(chan struct{}, maxParallelDownloads),
-		ctx:        ctx,
-		userLang:   make(map[int64]string),
-		urls:       make(map[string]pendingURL),
-		pendingZIP: make(map[string]zipRequest),
-		active:     make(map[string]activeDownload),
+		bot:           bot,
+		downloader:    downloader,
+		ctx:           ctx,
+		cfg:           cfg,
+		store:         state,
+		downloads:     newJobGate(cfg.DownloadWorkers, cfg.DownloadQueueSize),
+		lookups:       newJobGate(cfg.LookupWorkers, cfg.LookupQueueSize),
+		limiter:       newRateLimiter(cfg.RateLimit, cfg.RateWindow),
+		inlineLimiter: newRateLimiter(cfg.InlineRateLimit, cfg.RateWindow),
+		userLang:      make(map[int64]string),
+		urls:          make(map[string]pendingURL),
+		pendingZIP:    make(map[string]zipRequest),
+		active:        make(map[string]activeDownload),
+		activeUser:    make(map[int64]bool),
 	}
 }
 
@@ -107,7 +148,7 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 		switch message.Command() {
 		case "start":
 			if lang, ok := a.getLang(userID); ok {
-				a.sendText(message.Chat.ID, tr("welcome", lang), "HTML", nil)
+				a.sendText(message.Chat.ID, a.guideText("welcome", lang), "HTML", nil)
 			} else {
 				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 			}
@@ -115,10 +156,14 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 			a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 		case "help":
 			if lang, ok := a.getLang(userID); ok {
-				a.sendText(message.Chat.ID, tr("help", lang), "", nil)
+				a.sendText(message.Chat.ID, a.guideText("help", lang), "HTML", nil)
 			} else {
 				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 			}
+		case "stats":
+			a.handleAdminStats(message)
+		case "status":
+			a.handleAdminStatus(message)
 		default:
 			handled = false
 		}
@@ -134,25 +179,23 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 		a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 		return
 	}
-	url := detectURL(message.Text)
-	if url == "" {
-		a.sendText(message.Chat.ID, tr("invalid_link", lang), "", nil)
-		return
-	}
-	info := ""
-	lowerURL := strings.ToLower(url)
-	for _, marker := range []string{"playlist", "/sets/", "list=", "/album/"} {
-		if strings.Contains(lowerURL, marker) {
-			info = tr("looks_like_playlist", lang)
-			break
+	if allowed, retry := a.limiter.allow(userID); !allowed {
+		if a.store != nil {
+			a.store.increment(a.ctx, "rate_limited")
 		}
-	}
-	key, err := a.storeURL(pendingURL{URL: url, ChatID: message.Chat.ID, UserID: userID})
-	if err != nil {
-		log.Printf("Не удалось сохранить URL: %v", err)
+		a.sendText(message.Chat.ID, tr("rate_limited", lang, "seconds", strconv.Itoa(int(retry.Seconds())+1)), "", nil)
 		return
 	}
-	a.sendText(message.Chat.ID, tr("link_received", lang, "info", info), "HTML", formatKeyboard(key, lang))
+	url := detectURL(message.Text)
+	if url != "" {
+		a.handleIncomingURL(message, url, lang)
+		return
+	}
+	if message.Chat.IsPrivate() {
+		a.handlePrivateSearch(message, message.Text, lang)
+		return
+	}
+	a.sendText(message.Chat.ID, a.guideText("invalid_link", lang), "HTML", nil)
 }
 
 func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
@@ -175,7 +218,7 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		a.setLang(callback.From.ID, lang)
 		a.safeEdit(callback, tr("language_changed", lang, "lang_name", languages[lang]), "HTML", nil)
 		if !existed {
-			a.sendText(callback.From.ID, tr("welcome", lang), "HTML", nil)
+			a.sendText(callback.From.ID, a.guideText("welcome", lang), "HTML", nil)
 		}
 	case strings.HasPrefix(data, "cancel:"):
 		a.handlePendingCancel(callback)
@@ -183,6 +226,10 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		a.handleDownloadCancel(callback)
 	case strings.HasPrefix(data, "zip:"):
 		a.handleZIPChoice(callback)
+	case strings.HasPrefix(data, "pick:"):
+		a.handleSearchPick(callback)
+	case strings.HasPrefix(data, "range:"):
+		a.handleRangeChoice(callback)
 	case strings.HasPrefix(data, "dl:"):
 		a.handleDownload(callback)
 	}
@@ -199,20 +246,39 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 	if callback.Message != nil && callback.Message.Chat != nil {
 		chatID = callback.Message.Chat.ID
 	}
+	if !a.beginUserDownload(callback.From.ID) {
+		a.sendText(chatID, tr("user_download_active", lang), "", nil)
+		return
+	}
+	defer a.finishUserDownload(callback.From.ID)
 	pending, ok := a.popURL(urlKey, callback.From.ID, chatID)
 	if !ok {
 		a.sendText(callback.From.ID, tr("action_unavailable", lang), "", nil)
 		return
 	}
 	url := pending.URL
+	historyStarted := time.Now()
+	historyOK := false
+	historyCancelled := false
 	status := a.safeEdit(callback, tr("download_starting", lang), "HTML", nil)
 
 	cancelKey, err := randomID()
 	if err != nil {
-		a.sendText(chatID, tr("download_error", lang, "error", "не удалось создать идентификатор загрузки"), "HTML", nil)
+		a.sendText(chatID, tr("download_error", lang, "error", tr("internal_id_error", lang)), "HTML", nil)
 		return
 	}
 	downloadCtx, cancel := context.WithCancel(a.ctx)
+	defer func() {
+		if a.store != nil {
+			historyStatus := "failed"
+			if historyOK {
+				historyStatus = "ok"
+			} else if historyCancelled {
+				historyStatus = "cancelled"
+			}
+			a.store.recordDownload(a.ctx, callback.From.ID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), "")
+		}
+	}()
 	a.mu.Lock()
 	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: chatID, userID: callback.From.ID}
 	a.mu.Unlock()
@@ -232,7 +298,27 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 
 	var trackStarted time.Time
 	var lastProgress time.Time
-	results, err := a.runDownload(downloadCtx, url, format, quality, func(current, total int) {
+	if !pending.Preview.IsPlaylist {
+		if handled, succeeded := a.tryCachedDownload(downloadCtx, chatID, pending, format, quality, lang, func(position int) {
+			if status != nil {
+				a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
+			}
+		}); handled {
+			historyOK = succeeded
+			if !succeeded && downloadCtx.Err() != nil {
+				historyCancelled = true
+			}
+			if status != nil && succeeded {
+				a.editStatusMessage(status, tr("download_finished", lang))
+			}
+			return
+		}
+	}
+	results, err := a.runDownloadRangeQueued(downloadCtx, url, format, quality, pending.RangeStart, pending.RangeEnd, func(position int) {
+		if status != nil {
+			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
+		}
+	}, func(current, total int) {
 		if trackStarted.IsZero() {
 			trackStarted = time.Now()
 		}
@@ -255,6 +341,14 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			historyCancelled = true
+			if a.store != nil {
+				a.store.increment(a.ctx, "downloads_cancelled")
+			}
+			return
+		}
+		if errors.Is(err, errQueueFull) {
+			a.sendText(chatID, tr("queue_full", lang), "", nil)
 			return
 		}
 		var tooLarge playlistTooLargeError
@@ -262,7 +356,8 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 			a.sendText(chatID, tr("playlist_too_large", lang, "count", strconv.Itoa(tooLarge.Count), "limit", strconv.Itoa(tooLarge.Limit)), "", nil)
 			return
 		}
-		log.Printf("Ошибка загрузки %s: %v", url, err)
+		log.Printf("Ошибка загрузки source=%s user_id=%d: %v", sourceHost(url), callback.From.ID, err)
+		a.reportDownloadFailure(err.Error())
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return
 	}
@@ -272,9 +367,14 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 			reason = results[0].Error
 			a.downloader.clearSession(results[0].Session)
 		}
+		a.reportDownloadFailure(reason)
 		a.sendText(chatID, tr("nothing_downloaded", lang, "error", reason), "", nil)
 		return
 	}
+	if a.store != nil {
+		a.store.increment(a.ctx, "downloads_ok")
+	}
+	historyOK = true
 
 	validCount := 0
 	for _, result := range results {
@@ -334,23 +434,35 @@ func (a *app) handleZIPChoice(callback *tgbotapi.CallbackQuery) {
 }
 
 func (a *app) runDownload(ctx context.Context, url, format, quality string, progress downloadProgress) ([]downloadResult, error) {
-	select {
-	case a.semaphore <- struct{}{}:
-		defer func() { <-a.semaphore }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	return a.downloader.download(ctx, url, format, quality, progress)
+	return a.runDownloadRange(ctx, url, format, quality, 0, 0, progress)
 }
 
 func (a *app) runInlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
-	select {
-	case a.semaphore <- struct{}{}:
-		defer func() { <-a.semaphore }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	_, release, err := a.lookups.acquire(ctx)
+	if err != nil {
+		if errors.Is(err, errQueueFull) && a.store != nil {
+			a.store.increment(a.ctx, "queue_rejected")
+		}
+		return nil, err
 	}
+	defer release()
 	return a.downloader.inlineLookup(ctx, query)
+}
+
+func (a *app) runDownloadRange(ctx context.Context, url, format, quality string, start, end int, progress downloadProgress) ([]downloadResult, error) {
+	return a.runDownloadRangeQueued(ctx, url, format, quality, start, end, nil, progress)
+}
+
+func (a *app) runDownloadRangeQueued(ctx context.Context, url, format, quality string, start, end int, queued func(int), progress downloadProgress) ([]downloadResult, error) {
+	_, release, err := a.downloads.acquireNotify(ctx, queued)
+	if err != nil {
+		if errors.Is(err, errQueueFull) && a.store != nil {
+			a.store.increment(a.ctx, "queue_rejected")
+		}
+		return nil, err
+	}
+	defer release()
+	return a.downloader.downloadRange(ctx, url, format, quality, start, end, progress)
 }
 
 func (a *app) handleDownloadCancel(callback *tgbotapi.CallbackQuery) {
@@ -390,7 +502,12 @@ func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, fo
 	}
 	defer a.downloader.clearSession(session)
 
-	sent := 0
+	type batchAudio struct {
+		index  int
+		result downloadResult
+		size   int64
+	}
+	items := make([]batchAudio, 0, len(results))
 	for i, result := range results {
 		idx, total := strconv.Itoa(i+1), strconv.Itoa(len(results))
 		if result.Error != "" {
@@ -402,27 +519,73 @@ func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, fo
 			a.sendText(chatID, tr("file_not_found", lang, "idx", idx, "total", total, "name", filepath.Base(result.FilePath)), "", nil)
 			continue
 		}
-		if info.Size() > maxFileSize {
+		if info.Size() > a.fileLimit() {
 			a.sendText(chatID, tr("file_too_big", lang, "idx", idx, "total", total, "title", html.EscapeString(shortenRunes(result.Title, maxTitleLength)), "size", humanSize(info.Size(), lang)), "HTML", nil)
 			continue
 		}
-		audio := tgbotapi.NewAudio(chatID, tgbotapi.FilePath(result.FilePath))
-		audio.Caption = buildCaption(result, info.Size(), format, lang, i+1, len(results))
-		audio.ParseMode = "HTML"
-		audio.Title = firstNonEmpty(result.Title, strings.TrimSuffix(filepath.Base(result.FilePath), filepath.Ext(result.FilePath)))
-		audio.Performer = result.Artist
-		if _, err := a.bot.Send(audio); err != nil {
-			log.Printf("Не удалось отправить %s: %v", result.FilePath, err)
-			a.sendText(chatID, tr("send_failed", lang, "idx", idx, "total", total, "error", html.EscapeString(err.Error())), "HTML", nil)
+		items = append(items, batchAudio{index: i, result: result, size: info.Size()})
+	}
+	sent := 0
+	for start := 0; start < len(items); start += 10 {
+		end := min(start+10, len(items))
+		batch := items[start:end]
+		media := make([]interface{}, 0, len(batch))
+		for _, item := range batch {
+			input := tgbotapi.NewInputMediaAudio(tgbotapi.FilePath(item.result.FilePath))
+			input.Caption = buildCaption(item.result, item.size, format, lang, item.index+1, len(results))
+			input.ParseMode = "HTML"
+			input.Title = firstNonEmpty(item.result.Title, strings.TrimSuffix(filepath.Base(item.result.FilePath), filepath.Ext(item.result.FilePath)))
+			input.Performer = item.result.Artist
+			input.Duration = inlineDurationSeconds(item.result.Duration)
+			media = append(media, input)
+		}
+		var delivered []tgbotapi.Message
+		var sendErr error
+		if len(batch) == 1 {
+			audio := tgbotapi.NewAudio(chatID, tgbotapi.FilePath(batch[0].result.FilePath))
+			audio.Caption, audio.ParseMode = buildCaption(batch[0].result, batch[0].size, format, lang, batch[0].index+1, len(results)), "HTML"
+			audio.Title, audio.Performer = batch[0].result.Title, batch[0].result.Artist
+			message, err := a.bot.Send(audio)
+			sendErr = err
+			delivered = []tgbotapi.Message{message}
+		} else {
+			delivered, sendErr = a.bot.SendMediaGroup(tgbotapi.NewMediaGroup(chatID, media))
+		}
+		if sendErr != nil {
+			log.Printf("Не удалось отправить группу аудио: %v", sendErr)
+			for _, item := range batch {
+				audio := tgbotapi.NewAudio(chatID, tgbotapi.FilePath(item.result.FilePath))
+				audio.Title, audio.Performer = item.result.Title, item.result.Artist
+				audio.Caption, audio.ParseMode = buildCaption(item.result, item.size, format, lang, item.index+1, len(results)), "HTML"
+				message, err := a.bot.Send(audio)
+				if err != nil {
+					a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(err.Error())), "HTML", nil)
+					continue
+				}
+				delivered = []tgbotapi.Message{message}
+				a.cacheDeliveredAudio(item.result, format, item.size, delivered[0])
+				sent++
+			}
 			continue
 		}
-		sent++
+		for i, message := range delivered {
+			if i < len(batch) {
+				a.cacheDeliveredAudio(batch[i].result, format, batch[i].size, message)
+				sent++
+			}
+		}
 	}
 	summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(sent), "total", strconv.Itoa(len(results)))
 	if sent < len(results) {
 		summary += tr("some_failed_suffix", lang)
 	}
 	a.sendText(chatID, summary, "", nil)
+}
+
+func (a *app) cacheDeliveredAudio(result downloadResult, format string, size int64, delivered tgbotapi.Message) {
+	if a.store != nil && result.CacheKey != "" && delivered.Audio != nil {
+		_ = a.store.putCachedAudio(a.ctx, cachedAudio{Key: result.CacheKey, FileID: delivered.Audio.FileID, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Size: size})
+	}
 }
 
 func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, lang string) {
@@ -433,58 +596,93 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 	defer a.downloader.clearSession(session)
 
 	valid := make([]downloadResult, 0, len(results))
-	var totalSize int64
 	for _, result := range results {
 		if result.Error == "" && regularFileExists(result.FilePath) {
 			valid = append(valid, result)
-			if info, err := os.Stat(result.FilePath); err == nil {
-				totalSize += info.Size()
-			}
 		}
 	}
 	if len(valid) == 0 {
 		a.sendText(chatID, tr("no_files_for_zip", lang), "", nil)
 		return
 	}
-	if totalSize > maxFileSize {
-		a.sendText(chatID, tr("zip_too_big", lang, "size", humanSize(totalSize, lang)), "", nil)
-		return
-	}
 	a.sendText(chatID, tr("zipping", lang, "count", strconv.Itoa(len(valid))), "", nil)
-
-	zipID, err := randomID()
-	if err != nil {
-		a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-		return
-	}
-	zipPath := filepath.Join(filepath.Dir(valid[0].FilePath), "playlist_"+zipID+".zip")
-	if err := createZIP(zipPath, valid); err != nil {
-		log.Printf("Ошибка создания ZIP: %v", err)
-		a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-		return
-	}
-	info, err := os.Stat(zipPath)
-	if err != nil {
-		a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-		return
-	}
-	if info.Size() > maxFileSize {
-		a.sendText(chatID, tr("zip_too_big", lang, "size", humanSize(info.Size(), lang)), "", nil)
-		return
-	}
+	chunks := splitResultsBySize(valid, a.fileLimit()*9/10)
 	skipped := len(results) - len(valid)
 	skippedLine := ""
 	if skipped > 0 {
 		skippedLine = tr("zip_caption_skipped", lang, "skipped", strconv.Itoa(skipped))
 	}
-	document := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(zipPath))
-	document.Caption = tr("zip_caption", lang, "count", strconv.Itoa(len(valid)), "size", humanSize(info.Size(), lang), "fmt", strings.ToUpper(format), "skipped", skippedLine)
-	document.ParseMode = "HTML"
-	if _, err := a.bot.Send(document); err != nil {
-		a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-		return
+	for part, chunk := range chunks {
+		zipID, err := randomID()
+		if err != nil {
+			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+			return
+		}
+		zipPath := filepath.Join(filepath.Dir(valid[0].FilePath), fmt.Sprintf("playlist_%02d_of_%02d_%s.zip", part+1, len(chunks), zipID))
+		if err := createZIP(zipPath, chunk); err != nil {
+			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+			return
+		}
+		info, err := os.Stat(zipPath)
+		if err != nil {
+			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+			return
+		}
+		if info.Size() > a.fileLimit() {
+			a.sendText(chatID, tr("zip_too_big", lang, "size", humanSize(info.Size(), lang)), "", nil)
+			return
+		}
+		document := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(zipPath))
+		partLine := ""
+		if len(chunks) > 1 {
+			partLine = tr("zip_part", lang, "part", strconv.Itoa(part+1), "total", strconv.Itoa(len(chunks)))
+		}
+		document.Caption = tr("zip_caption", lang, "count", strconv.Itoa(len(chunk)), "size", humanSize(info.Size(), lang), "fmt", strings.ToUpper(format), "skipped", skippedLine+partLine)
+		document.ParseMode = "HTML"
+		if _, err := a.bot.Send(document); err != nil {
+			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+			return
+		}
 	}
 	a.sendText(chatID, tr("zip_sent", lang), "", nil)
+}
+
+func splitResultsBySize(results []downloadResult, limit int64) [][]downloadResult {
+	var chunks [][]downloadResult
+	var current []downloadResult
+	var size int64
+	for _, result := range results {
+		info, err := os.Stat(result.FilePath)
+		if err != nil {
+			continue
+		}
+		if len(current) > 0 && size+info.Size() > limit {
+			chunks = append(chunks, current)
+			current = nil
+			size = 0
+		}
+		current = append(current, result)
+		size += info.Size()
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+func (a *app) fileLimit() int64 {
+	if a.cfg.MaxFileSize > 0 && a.cfg.MaxFileSize <= maxFileSize {
+		return a.cfg.MaxFileSize
+	}
+	return maxFileSize
+}
+
+func (a *app) guideText(key, lang string) string {
+	username := "bot_username"
+	if a.bot != nil && a.bot.Self.UserName != "" {
+		username = a.bot.Self.UserName
+	}
+	return tr(key, lang, "username", html.EscapeString(username))
 }
 
 func (a *app) sendText(chatID int64, text, parseMode string, markup *tgbotapi.InlineKeyboardMarkup) *tgbotapi.Message {

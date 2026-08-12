@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS build
+FROM golang:1.26.5-bookworm AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -9,30 +9,50 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/musicbo
 FROM debian:bookworm-slim
 
 ARG TARGETARCH
+ARG YTDLP_VERSION=2026.07.04
+ARG DENO_VERSION=2.9.5
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg passwd python3 unzip \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get --print-uris --yes install ffmpeg passwd python3 unzip \
+       | sed -n "s/^'\\([^']*\\)' \\([^ ]*\\).*/\\1 \\2/p" \
+       | xargs -r -n 2 -P 8 sh -c 'curl -fsSL --retry 3 --retry-delay 1 "$1" -o "/var/cache/apt/archives/$2"' sh \
+    && apt-get install -y --no-install-recommends ffmpeg passwd python3 unzip \
     && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && case "$ARCH" in \
          amd64) DENO_ASSET=deno-x86_64-unknown-linux-gnu.zip ;; \
          arm64) DENO_ASSET=deno-aarch64-unknown-linux-gnu.zip ;; \
          *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
        esac \
-    && curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o /usr/local/bin/yt-dlp \
-    && curl -fsSL "https://github.com/denoland/deno/releases/latest/download/${DENO_ASSET}" -o /tmp/deno.zip \
+    && curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" -o /tmp/yt-dlp \
+    && curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/SHA2-256SUMS" -o /tmp/yt-dlp.sha256 \
+    && (cd /tmp && grep ' yt-dlp$' yt-dlp.sha256 | sha256sum -c -) \
+    && install -m 0755 /tmp/yt-dlp /usr/local/bin/yt-dlp \
+    && curl -fsSL "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/${DENO_ASSET}" -o "/tmp/${DENO_ASSET}" \
+    && curl -fsSL "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/${DENO_ASSET}.sha256sum" -o "/tmp/${DENO_ASSET}.sha256sum" \
+    && (cd /tmp && sha256sum -c "${DENO_ASSET}.sha256sum") \
+    && mv "/tmp/${DENO_ASSET}" /tmp/deno.zip \
     && unzip -q /tmp/deno.zip -d /usr/local/bin \
     && chmod 0755 /usr/local/bin/yt-dlp /usr/local/bin/deno \
     && yt-dlp --version \
     && deno --version \
-    && rm -f /tmp/deno.zip \
-    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /tmp/deno.zip /tmp/yt-dlp /tmp/yt-dlp.sha256 "/tmp/${DENO_ASSET}.sha256sum" \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin musicbot \
     && mkdir -p /app/downloads /app/cache \
     && chown -R musicbot:musicbot /app
 
 WORKDIR /app
 ENV HOME=/home/musicbot \
-    XDG_CACHE_HOME=/app/cache
+    XDG_CACHE_HOME=/app/cache \
+    XDG_DATA_HOME=/app/cache \
+    HTTP_ADDR=0.0.0.0:8080 \
+    LOG_FORMAT=json
 COPY --from=build /out/musicbot /usr/local/bin/musicbot
 USER 10001:10001
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+    CMD ["curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
 
 CMD ["musicbot"]

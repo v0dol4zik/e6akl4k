@@ -48,6 +48,7 @@ type downloadResult struct {
 	Duration string
 	Error    string
 	Session  string
+	CacheKey string
 }
 
 type mediaInfo struct {
@@ -65,7 +66,23 @@ type mediaInfo struct {
 	URL            string       `json:"url"`
 	Thumbnail      string       `json:"thumbnail"`
 	PlaylistIndex  int          `json:"playlist_index"`
+	Extractor      string       `json:"extractor"`
+	ExtractorKey   string       `json:"extractor_key"`
 	Entries        []*mediaInfo `json:"entries"`
+}
+
+type mediaPreview struct {
+	URL             string
+	Title           string
+	Artist          string
+	Duration        string
+	DurationSeconds int
+	TrackCount      int
+	IsPlaylist      bool
+	Estimated128    int64
+	Estimated320    int64
+	SourceID        string
+	Extractor       string
 }
 
 func (d *downloader) inlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
@@ -127,12 +144,14 @@ func (m *mediaInfo) resultMetadata() (string, string, string) {
 }
 
 type downloader struct {
-	bin            string
-	downloadDir    string
-	cookiesFile    string
-	maxFileSize    int64
-	cookieLock     chan struct{}
-	cookieLockOnce sync.Once
+	bin               string
+	downloadDir       string
+	cookiesFile       string
+	maxFileSize       int64
+	cookieLock        chan struct{}
+	cookieLockOnce    sync.Once
+	cookieConcurrency int
+	maxPlaylistTracks int
 }
 
 type downloadProgress func(completed, total int)
@@ -199,11 +218,55 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 	}
 
 	return &downloader{
-		bin:         bin,
-		downloadDir: absoluteDir,
-		cookiesFile: cookiesFile,
-		maxFileSize: maxFileSize,
+		bin:               bin,
+		downloadDir:       absoluteDir,
+		cookiesFile:       cookiesFile,
+		maxFileSize:       maxFileSize,
+		cookieConcurrency: 1,
+		maxPlaylistTracks: maxPlaylistTracks,
 	}, nil
+}
+
+func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, error) {
+	info, stderr, err := d.probe(ctx, url)
+	if err != nil {
+		if ctx.Err() != nil {
+			return mediaPreview{}, ctx.Err()
+		}
+		return mediaPreview{}, errors.New(humanizeError(firstNonEmpty(stderr, err.Error())))
+	}
+	preview := mediaPreview{URL: url}
+	preview.SourceID = info.ID
+	preview.Extractor = firstNonEmpty(info.Extractor, info.ExtractorKey)
+	preview.Title, preview.Artist, preview.Duration = info.resultMetadata()
+	preview.DurationSeconds = int(info.Duration)
+	preview.IsPlaylist = info.Type == "playlist" || len(info.Entries) > 0
+	if preview.IsPlaylist {
+		preview.TrackCount = len(info.Entries)
+		preview.DurationSeconds = 0
+		for _, entry := range info.Entries {
+			if entry != nil {
+				preview.DurationSeconds += int(entry.Duration)
+			}
+		}
+		preview.Duration = secondsToHMS(preview.DurationSeconds)
+	} else {
+		preview.TrackCount = 1
+	}
+	preview.Estimated128 = estimateAudioSize(preview.DurationSeconds, "mp3", "128")
+	preview.Estimated320 = estimateAudioSize(preview.DurationSeconds, "mp3", "320")
+	return preview, nil
+}
+
+func estimateAudioSize(seconds int, format, quality string) int64 {
+	if seconds <= 0 {
+		return 0
+	}
+	rate := mbPerMinute[strings.ToLower(format)+":"+strings.ToLower(quality)]
+	if rate == 0 {
+		rate = defaultMBPerMinute
+	}
+	return int64(float64(seconds) / 60 * rate * 1024 * 1024)
 }
 
 func (d *downloader) maxDurationFor(format, quality string) int {
@@ -220,6 +283,10 @@ func (d *downloader) maxDurationFor(format, quality string) int {
 }
 
 func (d *downloader) download(ctx context.Context, url, format, quality string, progress downloadProgress) ([]downloadResult, error) {
+	return d.downloadRange(ctx, url, format, quality, 0, 0, progress)
+}
+
+func (d *downloader) downloadRange(ctx context.Context, url, format, quality string, rangeStart, rangeEnd int, progress downloadProgress) ([]downloadResult, error) {
 	session, err := randomID()
 	if err != nil {
 		return nil, err
@@ -254,25 +321,51 @@ func (d *downloader) download(ctx context.Context, url, format, quality string, 
 	if len(entries) == 0 {
 		return []downloadResult{{Error: humanizeError(firstNonEmpty(probeErrors, "Плейлист пуст или недоступен.")), Session: session}}, nil
 	}
-	if err := validatePlaylistSize(len(entries)); err != nil {
+	start, end := 1, len(entries)
+	if isPlaylist && rangeStart > 0 {
+		start = rangeStart
+	}
+	if isPlaylist && rangeEnd > 0 {
+		end = rangeEnd
+	}
+	if start < 1 {
+		start = 1
+	}
+	if end > len(entries) {
+		end = len(entries)
+	}
+	if start > end {
+		return nil, errors.New("выбран пустой диапазон плейлиста")
+	}
+	selectionCount := end - start + 1
+	limit := d.maxPlaylistTracks
+	if limit <= 0 {
+		limit = maxPlaylistTracks
+	}
+	if selectionCount > limit {
+		return nil, playlistTooLargeError{Count: selectionCount, Limit: limit}
+	}
+	if err := validatePlaylistSizeWithLimit(selectionCount, limit); err != nil {
 		return nil, err
 	}
 
 	maxDuration := d.maxDurationFor(format, quality)
-	results := make([]downloadResult, len(entries))
-	selected := make([]int, 0, len(entries))
-	for i, entry := range entries {
+	results := make([]downloadResult, selectionCount)
+	selected := make([]int, 0, selectionCount)
+	for original := start; original <= end; original++ {
+		i := original - start
+		entry := entries[original-1]
 		if entry == nil {
 			results[i] = downloadResult{Error: "Трек пропущен: недоступен или заблокирован (см. логи)", Session: session}
 			continue
 		}
 		title, artist, duration := entry.resultMetadata()
-		results[i] = downloadResult{Title: title, Artist: artist, Duration: duration, Session: session}
+		results[i] = downloadResult{Title: title, Artist: artist, Duration: duration, Session: session, CacheKey: sourceCacheKey(firstNonEmpty(entry.Extractor, entry.ExtractorKey), entry.ID, format, quality)}
 		if entry.Duration > 0 && int(entry.Duration) > maxDuration {
 			results[i].Error = fmt.Sprintf("«%s» — %s, это дольше %s: файл не влезет в лимит Telegram.", title, secondsToHMS(int(entry.Duration)), secondsToHMS(maxDuration))
 			continue
 		}
-		selected = append(selected, i+1)
+		selected = append(selected, original)
 	}
 
 	if len(selected) == 0 {
@@ -280,7 +373,7 @@ func (d *downloader) download(ctx context.Context, url, format, quality string, 
 	}
 
 	manifest := filepath.Join(sessionDir, "manifest.jsonl")
-	downloadErrors, runErr := d.runDownload(ctx, url, format, quality, sessionDir, manifest, selected, isPlaylist, progress, len(entries))
+	downloadErrors, runErr := d.runDownload(ctx, url, format, quality, sessionDir, manifest, selected, isPlaylist, progress, len(selected))
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -292,6 +385,7 @@ func (d *downloader) download(ctx context.Context, url, format, quality string, 
 	used := make([]bool, len(downloaded))
 	for _, position := range selected {
 		entry := entries[position-1]
+		resultIndex := position - start
 		match := -1
 		for j := range downloaded {
 			if used[j] {
@@ -307,17 +401,17 @@ func (d *downloader) download(ctx context.Context, url, format, quality string, 
 			}
 		}
 		if match < 0 {
-			reason := firstNonEmpty(downloadErrors, errorText(runErr), "Файл не найден: "+results[position-1].Title)
-			results[position-1].Error = humanizeError(reason)
+			reason := firstNonEmpty(downloadErrors, errorText(runErr), "Файл не найден: "+results[resultIndex].Title)
+			results[resultIndex].Error = humanizeError(reason)
 			continue
 		}
 		used[match] = true
 		path, valid := d.validAudioPath(sessionDir, downloaded[match].FilePath)
 		if !valid {
-			results[position-1].Error = "Файл не найден: " + results[position-1].Title
+			results[resultIndex].Error = "Файл не найден: " + results[resultIndex].Title
 			continue
 		}
-		results[position-1].FilePath = path
+		results[resultIndex].FilePath = path
 	}
 
 	for _, result := range results {
@@ -330,8 +424,12 @@ func (d *downloader) download(ctx context.Context, url, format, quality string, 
 }
 
 func validatePlaylistSize(count int) error {
-	if count > maxPlaylistTracks {
-		return playlistTooLargeError{Count: count, Limit: maxPlaylistTracks}
+	return validatePlaylistSizeWithLimit(count, maxPlaylistTracks)
+}
+
+func validatePlaylistSizeWithLimit(count, limit int) error {
+	if count > limit {
+		return playlistTooLargeError{Count: count, Limit: limit}
 	}
 	return nil
 }
@@ -499,7 +597,13 @@ func (d *downloader) acquireCookieLock(ctx context.Context) (func(), error) {
 	if d.cookiesFile == "" {
 		return func() {}, nil
 	}
-	d.cookieLockOnce.Do(func() { d.cookieLock = make(chan struct{}, 1) })
+	d.cookieLockOnce.Do(func() {
+		limit := d.cookieConcurrency
+		if limit <= 0 {
+			limit = 1
+		}
+		d.cookieLock = make(chan struct{}, limit)
+	})
 	select {
 	case d.cookieLock <- struct{}{}:
 		return func() { <-d.cookieLock }, nil
@@ -528,7 +632,7 @@ func clearAbandonedSessions(root string) {
 		return
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || len(entry.Name()) != 8 {
+		if !entry.IsDir() || (len(entry.Name()) != 8 && len(entry.Name()) != 16) {
 			continue
 		}
 		if _, err := hex.DecodeString(entry.Name()); err != nil {
@@ -563,7 +667,7 @@ func (d *downloader) validAudioPath(sessionDir, path string) (string, bool) {
 }
 
 func (d *downloader) clearSession(session string) {
-	if len(session) != 8 {
+	if len(session) != 8 && len(session) != 16 {
 		return
 	}
 	if _, err := hex.DecodeString(session); err != nil {
@@ -697,7 +801,7 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 func (b *limitedBuffer) String() string { return b.buf.String() }
 
 func randomID() (string, error) {
-	buf := make([]byte, 4)
+	buf := make([]byte, 8)
 	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
 		return "", err
 	}

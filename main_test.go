@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,11 +25,22 @@ func TestPendingURLIsBoundToOwnerAndChat(t *testing.T) {
 	if _, ok := a.popURL(key, 10, -21); ok {
 		t.Fatal("URL was consumed from another chat")
 	}
-	if got, ok := a.popURL(key, 10, -20); !ok || got != want {
+	if got, ok := a.popURL(key, 10, -20); !ok || got.URL != want.URL || got.UserID != want.UserID || got.ChatID != want.ChatID || got.ExpiresAt.IsZero() {
 		t.Fatalf("owner could not consume URL: got %#v, ok %v", got, ok)
 	}
 	if _, ok := a.popURL(key, 10, -20); ok {
 		t.Fatal("URL was consumed twice")
+	}
+}
+
+func TestPendingURLExpires(t *testing.T) {
+	a := newApp(context.Background(), nil, nil)
+	a.urls["old"] = pendingURL{URL: "https://youtu.be/example", UserID: 10, ChatID: 20, ExpiresAt: time.Now().Add(-time.Second)}
+	if _, ok := a.getURL("old", 10, 20); ok {
+		t.Fatal("expired URL returned")
+	}
+	if _, exists := a.urls["old"]; exists {
+		t.Fatal("expired URL retained")
 	}
 }
 
@@ -143,5 +155,21 @@ func TestCreateZIPKeepsDuplicateTracks(t *testing.T) {
 	defer reader.Close()
 	if len(reader.File) != 2 || reader.File[0].Name == reader.File[1].Name {
 		t.Fatalf("duplicate files were not preserved: %#v", reader.File)
+	}
+}
+
+func TestSplitResultsBySizeCreatesParts(t *testing.T) {
+	dir := t.TempDir()
+	var results []downloadResult
+	for i := 0; i < 5; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("%d.mp3", i))
+		if err := os.WriteFile(path, make([]byte, 6), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, downloadResult{FilePath: path})
+	}
+	parts := splitResultsBySize(results, 12)
+	if len(parts) != 3 || len(parts[0]) != 2 || len(parts[2]) != 1 {
+		t.Fatalf("parts=%#v", parts)
 	}
 }

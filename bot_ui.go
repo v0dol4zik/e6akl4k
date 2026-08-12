@@ -55,6 +55,56 @@ func downloadCancelKeyboard(key, lang string) *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
+func rangeKeyboard(key string, count, limit int, lang string) *tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 10)
+	effective := min(count, limit)
+	if count <= limit {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_all", lang), "range:all:"+key)))
+	}
+	if effective >= 10 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_10", lang), "range:10:"+key)))
+	}
+	if effective >= 25 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_25", lang), "range:25:"+key)))
+	}
+	if count > limit {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_limit", lang, "limit", strconv.Itoa(limit)), "range:75:"+key)))
+	}
+	var rangeRow []tgbotapi.InlineKeyboardButton
+	for start := 11; start <= effective; start += 10 {
+		end := min(start+9, effective)
+		label := tr("btn_range_custom", lang, "start", strconv.Itoa(start), "end", strconv.Itoa(end))
+		rangeRow = append(rangeRow, tgbotapi.NewInlineKeyboardButtonData(label, "range:"+strconv.Itoa(start)+"-"+strconv.Itoa(end)+":"+key))
+		if len(rangeRow) == 2 {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(rangeRow...))
+			rangeRow = nil
+		}
+	}
+	if len(rangeRow) > 0 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(rangeRow...))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)))
+	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	return &markup
+}
+
+func searchKeyboard(keys []string, candidates []inlineCandidate, lang string) *tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(keys))
+	for i, key := range keys {
+		label := candidates[i].Title
+		if candidates[i].Artist != "" {
+			label = candidates[i].Artist + " — " + label
+		}
+		if candidates[i].Duration != "" {
+			label += " · " + candidates[i].Duration
+		}
+		label = shortenRunes(label, 58)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(label, "pick:"+key)))
+	}
+	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	return &markup
+}
+
 func formatETA(duration time.Duration, lang string) string {
 	if duration < time.Minute {
 		return tr("eta_less_minute", lang)

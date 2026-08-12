@@ -163,6 +163,22 @@ if [[ "$($SUDO docker inspect --format '{{.State.Running}}' "$container_id")" !=
   echo "Контейнер перезапускается из-за ошибки. Проверь: sudo docker compose -f '$COMPOSE_FILE' logs --tail=100" >&2
   exit 1
 fi
+health_status="starting"
+for _ in $(seq 1 20); do
+  health_status="$($SUDO docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id")"
+  if [[ "$health_status" == "healthy" || "$health_status" == "none" ]]; then
+    break
+  fi
+  if [[ "$health_status" == "unhealthy" ]]; then
+    echo "Контейнер не прошёл healthcheck. Проверь: sudo docker compose -f '$COMPOSE_FILE' logs --tail=100" >&2
+    exit 1
+  fi
+  sleep 3
+done
+if [[ "$health_status" != "healthy" && "$health_status" != "none" ]]; then
+  echo "Healthcheck не успел перейти в healthy (статус: $health_status)." >&2
+  exit 1
+fi
 compose ps
 
 echo "Бот развернут. Логи: sudo docker compose -f '$COMPOSE_FILE' logs -f"

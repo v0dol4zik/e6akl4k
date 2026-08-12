@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"html"
 	"log"
-	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -45,6 +43,13 @@ func (a *app) handleInlineQuery(query *tgbotapi.InlineQuery) {
 		case <-ctx.Done():
 			return
 		}
+	}
+	if allowed, _ := a.inlineLimiter.allow(query.From.ID); !allowed {
+		if a.store != nil {
+			a.store.increment(a.ctx, "rate_limited")
+		}
+		a.answerInline(query.ID, nil, lang)
+		return
 	}
 	candidates, err := a.runInlineLookup(ctx, text)
 	if err != nil {
@@ -129,9 +134,29 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 	}
 	lang := a.inlineLang(chosen.From)
 	if fileID := a.inline.cachedFileID(candidate.CacheKey); fileID != "" {
+		if a.store != nil {
+			a.store.increment(a.ctx, "cache_hits")
+		}
 		a.editInlineAudio(chosen.InlineMessageID, fileID, candidate, lang)
 		return
 	}
+	if !a.beginUserDownload(chosen.From.ID) {
+		a.editInlineError(chosen.InlineMessageID, tr("user_download_active", lang))
+		return
+	}
+	defer a.finishUserDownload(chosen.From.ID)
+	inlineOK := false
+	inlineCancelled := false
+	inlineFailure := "inline download failed"
+	defer func() {
+		if inlineOK && a.store != nil {
+			a.store.increment(a.ctx, "downloads_ok")
+		} else if inlineCancelled && a.store != nil {
+			a.store.increment(a.ctx, "downloads_cancelled")
+		} else if !inlineOK {
+			a.reportDownloadFailure(inlineFailure)
+		}
+	}()
 
 	downloadCtx, cancel := context.WithCancel(a.ctx)
 	if !a.inline.setActive(chosen.ResultID, inlineActiveDownload{
@@ -148,74 +173,31 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 		a.inline.clearActive(chosen.ResultID)
 	}()
 
-	results, err := a.runDownload(downloadCtx, candidate.URL, "mp3", "320", nil)
+	parts := strings.Split(candidate.CacheKey, ":")
+	sourceID := ""
+	if len(parts) >= 2 {
+		sourceID = parts[1]
+	}
+	pending := pendingURL{URL: candidate.URL, Preview: mediaPreview{SourceID: sourceID, Extractor: "youtube"}}
+	entry, err := a.ensureCachedAudio(downloadCtx, pending, "mp3", "320", nil)
 	if err != nil {
+		inlineFailure = err.Error()
+		inlineCancelled = errors.Is(err, context.Canceled)
 		if !errors.Is(err, context.Canceled) {
 			a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", html.EscapeString(err.Error())))
 		}
 		return
 	}
-	session := ""
-	if len(results) > 0 {
-		session = results[0].Session
-	}
-	defer a.downloader.clearSession(session)
-
-	var result *downloadResult
-	for i := range results {
-		if results[i].Error == "" && regularFileExists(results[i].FilePath) {
-			result = &results[i]
-			break
-		}
-	}
-	if result == nil {
-		reason := tr("unknown_error", lang)
-		for _, item := range results {
-			if item.Error != "" {
-				reason = item.Error
-				break
-			}
-		}
-		a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", html.EscapeString(reason)))
-		return
-	}
-	info, err := os.Stat(result.FilePath)
-	if err != nil {
-		a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", html.EscapeString(err.Error())))
-		return
-	}
-	if info.Size() > maxFileSize {
-		a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", tr("inline_too_big", lang, "size", humanSize(info.Size(), lang))))
-		return
-	}
-
-	fileID, err := a.uploadInlineAudio(*result)
-	if err != nil {
-		a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", html.EscapeString(err.Error())))
-		return
-	}
-	if err := a.inline.cacheFileID(candidate.CacheKey, fileID); err != nil {
+	alias := entry
+	alias.Key = candidate.CacheKey
+	if err := a.store.putCachedAudio(a.ctx, alias); err != nil {
 		log.Printf("Сохранить inline file_id: %v", err)
 	}
-	candidate.Title = firstNonEmpty(result.Title, candidate.Title)
-	candidate.Artist = firstNonEmpty(result.Artist, candidate.Artist)
-	candidate.Duration = firstNonEmpty(result.Duration, candidate.Duration)
-	a.editInlineAudio(chosen.InlineMessageID, fileID, candidate, lang)
-}
-
-func (a *app) uploadInlineAudio(result downloadResult) (string, error) {
-	audio := tgbotapi.NewAudio(a.inline.cacheChatID, tgbotapi.FilePath(result.FilePath))
-	audio.Title = result.Title
-	audio.Performer = result.Artist
-	audio.Duration = inlineDurationSeconds(result.Duration)
-	sent, err := a.bot.Send(audio)
-	if err != nil {
-		return "", fmt.Errorf("загрузить трек в cache-канал: %w", err)
-	}
-	if sent.Audio == nil || sent.Audio.FileID == "" {
-		return "", errors.New("Telegram не вернул file_id аудио")
-	}
-	return sent.Audio.FileID, nil
+	candidate.Title = firstNonEmpty(entry.Title, candidate.Title)
+	candidate.Artist = firstNonEmpty(entry.Artist, candidate.Artist)
+	candidate.Duration = firstNonEmpty(entry.Duration, candidate.Duration)
+	a.editInlineAudio(chosen.InlineMessageID, entry.FileID, candidate, lang)
+	inlineOK = true
 }
 
 func (a *app) editInlineAudio(inlineMessageID, fileID string, candidate inlineCandidate, lang string) {

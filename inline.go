@@ -55,6 +55,8 @@ type inlineService struct {
 	cacheChatID   int64
 	placeholderID string
 	cachePath     string
+	store         *store
+	cacheTTL      time.Duration
 
 	mu          sync.Mutex
 	candidates  map[string]inlineCandidate
@@ -194,12 +196,20 @@ func (s *inlineService) loadCache() error {
 }
 
 func (s *inlineService) cachedFileID(key string) string {
+	if s.store != nil {
+		if entry, ok := s.store.cachedAudio(context.Background(), key, s.cacheTTL); ok {
+			return entry.FileID
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.fileIDs[key]
 }
 
 func (s *inlineService) cacheFileID(key, fileID string) error {
+	if s.store != nil {
+		return s.store.putCachedAudio(context.Background(), cachedAudio{Key: key, FileID: fileID, Format: "mp3", Quality: "320"})
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fileIDs[key] = fileID
@@ -228,6 +238,31 @@ func (s *inlineService) cacheFileID(key, fileID string) error {
 		return err
 	}
 	return os.Rename(temporaryPath, s.cachePath)
+}
+
+func (s *inlineService) attachStore(state *store, ttl time.Duration) error {
+	if state == nil {
+		return nil
+	}
+	s.mu.Lock()
+	legacy := make(map[string]string, len(s.fileIDs))
+	for key, value := range s.fileIDs {
+		legacy[key] = value
+	}
+	s.store, s.cacheTTL = state, ttl
+	s.fileIDs = make(map[string]string)
+	s.mu.Unlock()
+	for key, fileID := range legacy {
+		if _, ok := state.cachedAudio(context.Background(), key, ttl); !ok {
+			if err := state.putCachedAudio(context.Background(), cachedAudio{Key: key, FileID: fileID, Format: "mp3", Quality: "320"}); err != nil {
+				return err
+			}
+		}
+	}
+	if len(legacy) > 0 {
+		_ = os.Rename(s.cachePath, s.cachePath+".migrated")
+	}
+	return nil
 }
 
 func (s *inlineService) storeCandidate(candidate inlineCandidate) (string, error) {
