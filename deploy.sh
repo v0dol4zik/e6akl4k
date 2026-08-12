@@ -160,13 +160,18 @@ backup_dir="$PROJECT_DIR/backups"
 $SUDO mkdir -p "$backup_dir"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 database_path="$PROJECT_DIR/cache/musicbot.db"
+database_backup="$backup_dir/musicbot-$timestamp.db"
+env_backup="$backup_dir/env-$timestamp"
+cookies_backup="$backup_dir/cookies-$timestamp.txt"
+backup_files=("$env_backup" "$cookies_backup")
 if [[ -f "$database_path" ]]; then
-	$SUDO sqlite3 "$database_path" ".backup '$backup_dir/musicbot-$timestamp.db'"
+	$SUDO sqlite3 "$database_path" ".backup '$database_backup'"
+	backup_files+=("$database_backup")
 fi
-$SUDO cp --reflink=auto --preserve=mode,timestamps "$env_file" "$backup_dir/env-$timestamp"
-$SUDO cp --reflink=auto --preserve=mode,timestamps "$cookies_file" "$backup_dir/cookies-$timestamp.txt"
+$SUDO cp --reflink=auto --preserve=mode,timestamps "$env_file" "$env_backup"
+$SUDO cp --reflink=auto --preserve=mode,timestamps "$cookies_file" "$cookies_backup"
+$SUDO chmod 0600 "${backup_files[@]}"
 $SUDO chmod 0700 "$backup_dir"
-$SUDO chmod 0600 "$backup_dir"/*
 
 previous_image="$(compose images -q music_bot 2>/dev/null | head -n1 || true)"
 rollback_image=""
