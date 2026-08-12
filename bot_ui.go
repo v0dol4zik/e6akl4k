@@ -40,10 +40,11 @@ func formatKeyboard(key, lang string) *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
-func zipKeyboard(key, lang string) *tgbotapi.InlineKeyboardMarkup {
+func deliveryKeyboard(key, format, quality, lang string) *tgbotapi.InlineKeyboardMarkup {
 	markup := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_zip_yes", lang), "zip:yes:"+key)),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_zip_no", lang), "zip:no:"+key)),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_zip_yes", lang), "delivery:zip:"+format+":"+quality+":"+key)),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_zip_no", lang), "delivery:individual:"+format+":"+quality+":"+key)),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)),
 	)
 	return &markup
 }
@@ -68,7 +69,7 @@ func rangeKeyboard(key string, count, limit int, lang string) *tgbotapi.InlineKe
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_25", lang), "range:25:"+key)))
 	}
 	if count > limit {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_limit", lang, "limit", strconv.Itoa(limit)), "range:75:"+key)))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_limit", lang, "limit", strconv.Itoa(limit)), "range:limit:"+key)))
 	}
 	var rangeRow []tgbotapi.InlineKeyboardButton
 	for start := 11; start <= effective; start += 10 {
@@ -86,6 +87,22 @@ func rangeKeyboard(key string, count, limit int, lang string) *tgbotapi.InlineKe
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)))
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &markup
+}
+
+func validDownloadOption(format, quality string) bool {
+	switch strings.ToLower(format) {
+	case "mp3":
+		return quality == "best" || quality == "128" || quality == "320"
+	case "flac", "m4a", "ogg":
+		return quality == "best"
+	default:
+		return false
+	}
+}
+
+func telegramAudioFormat(format string) bool {
+	format = strings.ToLower(format)
+	return format == "mp3" || format == "m4a"
 }
 
 func searchKeyboard(keys []string, candidates []inlineCandidate, lang string) *tgbotapi.InlineKeyboardMarkup {

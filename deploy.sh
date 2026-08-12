@@ -86,7 +86,7 @@ $SUDO chown "$OWNER_UID:$OWNER_GID" "$env_file"
 $SUDO chmod 0600 "$env_file"
 
 $SUDO apt-get update
-$SUDO apt-get install -y ca-certificates curl
+$SUDO apt-get install -y ca-certificates curl sqlite3
 
 install_docker() {
   docker_arch="$(dpkg --print-architecture)"
@@ -147,13 +147,57 @@ compose() {
   $SUDO docker compose --project-directory "$PROJECT_DIR" -f "$COMPOSE_FILE" "$@"
 }
 
+compose_with_image() {
+  if [[ -n "$SUDO" ]]; then
+    $SUDO env MUSICBOT_IMAGE="$1" docker compose --project-directory "$PROJECT_DIR" -f "$COMPOSE_FILE" "${@:2}"
+  else
+    MUSICBOT_IMAGE="$1" docker compose --project-directory "$PROJECT_DIR" -f "$COMPOSE_FILE" "${@:2}"
+  fi
+}
+
 compose config --quiet
-compose up -d --build --remove-orphans
+backup_dir="$PROJECT_DIR/backups"
+$SUDO mkdir -p "$backup_dir"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+database_path="$PROJECT_DIR/cache/musicbot.db"
+if [[ -f "$database_path" ]]; then
+	$SUDO sqlite3 "$database_path" ".backup '$backup_dir/musicbot-$timestamp.db'"
+fi
+$SUDO cp --reflink=auto --preserve=mode,timestamps "$env_file" "$backup_dir/env-$timestamp"
+$SUDO cp --reflink=auto --preserve=mode,timestamps "$cookies_file" "$backup_dir/cookies-$timestamp.txt"
+$SUDO chmod 0700 "$backup_dir"
+$SUDO chmod 0600 "$backup_dir"/*
+
+previous_image="$(compose images -q music_bot 2>/dev/null | head -n1 || true)"
+rollback_image=""
+if [[ -n "$previous_image" ]]; then
+	rollback_image="musicbot:rollback-$timestamp"
+	$SUDO docker image tag "$previous_image" "$rollback_image"
+fi
+
+rollback() {
+	if [[ -z "$rollback_image" ]]; then
+		echo "Предыдущий образ отсутствует — автоматический rollback невозможен." >&2
+		return
+	fi
+	echo "Возвращаю предыдущий Docker-образ $rollback_image…" >&2
+	compose_with_image "$rollback_image" up -d --no-build --remove-orphans || true
+}
+
+if ! compose build; then
+	echo "Новый образ не собрался; запущенный контейнер не изменён." >&2
+	exit 1
+fi
+if ! compose up -d --no-build --remove-orphans; then
+	rollback
+	exit 1
+fi
 sleep 8
 container_id="$(compose ps -q music_bot)"
 if [[ -z "$container_id" ]] \
   || [[ "$($SUDO docker inspect --format '{{.State.Running}}' "$container_id")" != "true" ]]; then
   echo "Контейнер не смог стабильно запуститься. Проверь: sudo docker compose -f '$COMPOSE_FILE' logs --tail=100" >&2
+	rollback
   exit 1
 fi
 restart_count="$($SUDO docker inspect --format '{{.RestartCount}}' "$container_id")"
@@ -161,6 +205,7 @@ sleep 5
 if [[ "$($SUDO docker inspect --format '{{.State.Running}}' "$container_id")" != "true" ]] \
   || (( $($SUDO docker inspect --format '{{.RestartCount}}' "$container_id") > restart_count )); then
   echo "Контейнер перезапускается из-за ошибки. Проверь: sudo docker compose -f '$COMPOSE_FILE' logs --tail=100" >&2
+	rollback
   exit 1
 fi
 health_status="starting"
@@ -171,14 +216,17 @@ for _ in $(seq 1 20); do
   fi
   if [[ "$health_status" == "unhealthy" ]]; then
     echo "Контейнер не прошёл healthcheck. Проверь: sudo docker compose -f '$COMPOSE_FILE' logs --tail=100" >&2
+	rollback
     exit 1
   fi
   sleep 3
 done
-if [[ "$health_status" != "healthy" && "$health_status" != "none" ]]; then
+if [[ "$health_status" != "healthy" ]]; then
   echo "Healthcheck не успел перейти в healthy (статус: $health_status)." >&2
+	rollback
   exit 1
 fi
 compose ps
 
 echo "Бот развернут. Логи: sudo docker compose -f '$COMPOSE_FILE' logs -f"
+echo "Резервные копии: $backup_dir"

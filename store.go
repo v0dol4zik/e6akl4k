@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "modernc.org/sqlite"
 )
 
@@ -22,21 +24,23 @@ type cachedAudio struct {
 	Format    string
 	Quality   string
 	Size      int64
+	MediaType string
 	UpdatedAt time.Time
 }
 
 type statsSnapshot struct {
-	StartedAt       time.Time
-	DownloadsOK     int64
-	DownloadsFailed int64
-	CacheHits       int64
-	Searches        int64
-	RateLimited     int64
-	QueueRejected   int64
-	CookieErrors    int64
-	Cancelled       int64
-	UniqueUsers     int64
-	CachedTracks    int64
+	StartedAt        time.Time
+	DownloadsOK      int64
+	DownloadsPartial int64
+	DownloadsFailed  int64
+	CacheHits        int64
+	Searches         int64
+	RateLimited      int64
+	QueueRejected    int64
+	CookieErrors     int64
+	Cancelled        int64
+	UniqueUsers      int64
+	CachedTracks     int64
 }
 
 type store struct {
@@ -83,6 +87,7 @@ CREATE TABLE IF NOT EXISTS audio_cache (
   format TEXT NOT NULL DEFAULT '',
   quality TEXT NOT NULL DEFAULT '',
   size INTEGER NOT NULL DEFAULT 0,
+  media_type TEXT NOT NULL DEFAULT 'audio',
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS counters (
@@ -103,11 +108,26 @@ CREATE TABLE IF NOT EXISTS download_history (
   error TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS telegram_updates (
+  update_id INTEGER PRIMARY KEY,
+  payload BLOB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS telegram_updates_status_id ON telegram_updates(status, update_id);
 CREATE INDEX IF NOT EXISTS download_history_created_at ON download_history(created_at);
 INSERT OR IGNORE INTO metadata(name, value) VALUES ('started_at', CAST(unixepoch() AS TEXT));
 CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE audio_cache ADD COLUMN media_type TEXT NOT NULL DEFAULT 'audio'`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 func (s *store) recordDownload(ctx context.Context, userID int64, source, format, status string, elapsed time.Duration, message string) {
@@ -134,8 +154,8 @@ ON CONFLICT(user_id) DO UPDATE SET language=excluded.language, updated_at=exclud
 func (s *store) cachedAudio(ctx context.Context, key string, ttl time.Duration) (cachedAudio, bool) {
 	var entry cachedAudio
 	var updated int64
-	err := s.db.QueryRowContext(ctx, `SELECT cache_key,file_id,title,artist,duration,format,quality,size,updated_at
-FROM audio_cache WHERE cache_key=?`, key).Scan(&entry.Key, &entry.FileID, &entry.Title, &entry.Artist, &entry.Duration, &entry.Format, &entry.Quality, &entry.Size, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT cache_key,file_id,title,artist,duration,format,quality,size,media_type,updated_at
+FROM audio_cache WHERE cache_key=?`, key).Scan(&entry.Key, &entry.FileID, &entry.Title, &entry.Artist, &entry.Duration, &entry.Format, &entry.Quality, &entry.Size, &entry.MediaType, &updated)
 	if err != nil {
 		return cachedAudio{}, false
 	}
@@ -151,10 +171,14 @@ func (s *store) putCachedAudio(ctx context.Context, entry cachedAudio) error {
 	if entry.Key == "" || entry.FileID == "" {
 		return errors.New("пустой cache key или file_id")
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO audio_cache(cache_key,file_id,title,artist,duration,format,quality,size,updated_at)
-VALUES(?,?,?,?,?,?,?,?,unixepoch()) ON CONFLICT(cache_key) DO UPDATE SET file_id=excluded.file_id,title=excluded.title,
-artist=excluded.artist,duration=excluded.duration,format=excluded.format,quality=excluded.quality,size=excluded.size,updated_at=excluded.updated_at`,
-		entry.Key, entry.FileID, entry.Title, entry.Artist, entry.Duration, entry.Format, entry.Quality, entry.Size)
+	mediaType := entry.MediaType
+	if mediaType == "" {
+		mediaType = "audio"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audio_cache(cache_key,file_id,title,artist,duration,format,quality,size,media_type,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,unixepoch()) ON CONFLICT(cache_key) DO UPDATE SET file_id=excluded.file_id,title=excluded.title,
+artist=excluded.artist,duration=excluded.duration,format=excluded.format,quality=excluded.quality,size=excluded.size,media_type=excluded.media_type,updated_at=excluded.updated_at`,
+		entry.Key, entry.FileID, entry.Title, entry.Artist, entry.Duration, entry.Format, entry.Quality, entry.Size, mediaType)
 	return err
 }
 
@@ -189,6 +213,8 @@ func (s *store) stats(ctx context.Context) (statsSnapshot, error) {
 		switch name {
 		case "downloads_ok":
 			snapshot.DownloadsOK = value
+		case "downloads_partial":
+			snapshot.DownloadsPartial = value
 		case "downloads_failed":
 			snapshot.DownloadsFailed = value
 		case "cache_hits":
@@ -222,6 +248,58 @@ func (s *store) cleanup(ctx context.Context, ttl time.Duration) error {
 	if err == nil {
 		_, err = s.db.ExecContext(ctx, `DELETE FROM download_history WHERE created_at < ?`, time.Now().Add(-90*24*time.Hour).Unix())
 	}
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `DELETE FROM telegram_updates WHERE status='done' AND updated_at < ?`, time.Now().Add(-7*24*time.Hour).Unix())
+	}
+	return err
+}
+
+func (s *store) persistUpdate(ctx context.Context, update tgbotapi.Update) (bool, error) {
+	payload, err := json.Marshal(update)
+	if err != nil {
+		return false, err
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO telegram_updates(update_id,payload,status,created_at,updated_at)
+VALUES(?,?,'pending',unixepoch(),unixepoch())`, update.UpdateID, payload)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
+}
+
+func (s *store) pendingUpdates(ctx context.Context) ([]tgbotapi.Update, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM telegram_updates WHERE status='pending' ORDER BY update_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var updates []tgbotapi.Update
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var update tgbotapi.Update
+		if err := json.Unmarshal(payload, &update); err != nil {
+			return nil, err
+		}
+		updates = append(updates, update)
+	}
+	return updates, rows.Err()
+}
+
+func (s *store) finishUpdate(ctx context.Context, updateID int, success bool) error {
+	status := "done"
+	if !success {
+		status = "pending"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE telegram_updates SET status=?,updated_at=unixepoch() WHERE update_id=?`, status, updateID)
+	return err
+}
+
+func (s *store) discardPendingUpdates(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM telegram_updates WHERE status='pending'`)
 	return err
 }
 

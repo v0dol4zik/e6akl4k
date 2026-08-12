@@ -58,7 +58,7 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 	if status != nil {
 		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, text, *keyboard)
 		edit.ParseMode = "HTML"
-		if _, err := a.bot.Send(edit); err == nil {
+		if _, err := sendTelegram(a.bot, edit); err == nil {
 			return
 		}
 	}
@@ -112,7 +112,7 @@ func (a *app) presentSearchResults(chatID, userID int64, query, lang string, sta
 	if status != nil {
 		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, prefix, *keyboard)
 		edit.ParseMode = "HTML"
-		if _, err := a.bot.Send(edit); err == nil {
+		if _, err := sendTelegram(a.bot, edit); err == nil {
 			return
 		}
 	}
@@ -155,7 +155,7 @@ func (a *app) handleRangeChoice(callback *tgbotapi.CallbackQuery) {
 		end = min(min(10, a.cfg.MaxPlaylistTracks), end)
 	case "25":
 		end = min(min(25, a.cfg.MaxPlaylistTracks), end)
-	case "75":
+	case "limit", "75":
 		end = min(a.cfg.MaxPlaylistTracks, end)
 	case "all":
 		if end > a.cfg.MaxPlaylistTracks {
@@ -286,7 +286,6 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return true, false
 	}
-	a.store.increment(a.ctx, "downloads_ok")
 	return true, true
 }
 
@@ -325,13 +324,23 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 		if info.Size() > a.fileLimit() {
 			return cachedAudio{}, fmt.Errorf("файл слишком большой (%s)", humanSize(info.Size(), defaultLang))
 		}
-		audio := tgbotapi.NewAudio(a.cfg.CacheChatID, tgbotapi.FilePath(result.FilePath))
-		audio.Title, audio.Performer = result.Title, result.Artist
-		sent, sendErr := a.bot.Send(audio)
-		if sendErr != nil || sent.Audio == nil {
-			return cachedAudio{}, firstError(sendErr, errors.New("Telegram не вернул audio file_id"))
+		entry := cachedAudio{Key: urlKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: quality, Size: info.Size()}
+		if telegramAudioFormat(format) {
+			audio := tgbotapi.NewAudio(a.cfg.CacheChatID, tgbotapi.FilePath(result.FilePath))
+			audio.Title, audio.Performer = result.Title, result.Artist
+			sent, sendErr := sendTelegram(a.bot, audio)
+			if sendErr != nil || sent.Audio == nil {
+				return cachedAudio{}, firstError(sendErr, errors.New("Telegram не вернул audio file_id"))
+			}
+			entry.FileID, entry.MediaType = sent.Audio.FileID, "audio"
+		} else {
+			document := tgbotapi.NewDocument(a.cfg.CacheChatID, tgbotapi.FilePath(result.FilePath))
+			sent, sendErr := sendTelegram(a.bot, document)
+			if sendErr != nil || sent.Document == nil {
+				return cachedAudio{}, firstError(sendErr, errors.New("Telegram не вернул document file_id"))
+			}
+			entry.FileID, entry.MediaType = sent.Document.FileID, "document"
 		}
-		entry := cachedAudio{Key: urlKey, FileID: sent.Audio.FileID, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: quality, Size: info.Size()}
 		if putErr := a.store.putCachedAudio(ctx, entry); putErr != nil {
 			return cachedAudio{}, putErr
 		}
@@ -354,11 +363,18 @@ func sourceHost(raw string) string {
 
 func (a *app) sendCachedAudio(chatID int64, entry cachedAudio, lang string) error {
 	result := downloadResult{Title: entry.Title, Artist: entry.Artist, Duration: entry.Duration}
+	if entry.MediaType == "document" || !telegramAudioFormat(entry.Format) {
+		document := tgbotapi.NewDocument(chatID, tgbotapi.FileID(entry.FileID))
+		document.Caption = buildCaption(result, entry.Size, entry.Format, lang, 1, 1)
+		document.ParseMode = "HTML"
+		_, err := sendTelegram(a.bot, document)
+		return err
+	}
 	audio := tgbotapi.NewAudio(chatID, tgbotapi.FileID(entry.FileID))
 	audio.Title, audio.Performer = entry.Title, entry.Artist
 	audio.Caption = buildCaption(result, entry.Size, entry.Format, lang, 1, 1)
 	audio.ParseMode = "HTML"
-	_, err := a.bot.Send(audio)
+	_, err := sendTelegram(a.bot, audio)
 	return err
 }
 
@@ -383,7 +399,7 @@ func (a *app) editStatusMessage(message *tgbotapi.Message, text string) {
 	}
 	edit := tgbotapi.NewEditMessageText(message.Chat.ID, message.MessageID, text)
 	edit.ParseMode = "HTML"
-	_, _ = a.bot.Send(edit)
+	_, _ = sendTelegram(a.bot, edit)
 }
 
 func (a *app) handleQueueError(chatID int64, lang string, err error) {
@@ -412,6 +428,7 @@ func (a *app) handleAdminStats(message *tgbotapi.Message) {
 		"users", strconv.FormatInt(stats.UniqueUsers, 10),
 		"cached", strconv.FormatInt(stats.CachedTracks, 10),
 		"ok", strconv.FormatInt(stats.DownloadsOK, 10),
+		"partial", strconv.FormatInt(stats.DownloadsPartial, 10),
 		"failed", strconv.FormatInt(stats.DownloadsFailed, 10),
 		"cancelled", strconv.FormatInt(stats.Cancelled, 10),
 		"cookies", strconv.FormatInt(stats.CookieErrors, 10),
@@ -429,6 +446,7 @@ func (a *app) handleAdminStatus(message *tgbotapi.Message) {
 	lang := a.langOrDefault(message.From.ID)
 	da, dw, dc := a.downloads.snapshot()
 	la, lw, lc := a.lookups.snapshot()
+	aa, aw, ac := a.archives.snapshot()
 	text := tr("admin_status", lang,
 		"downloads_active", strconv.Itoa(da),
 		"downloads_capacity", strconv.Itoa(dc),
@@ -436,6 +454,9 @@ func (a *app) handleAdminStatus(message *tgbotapi.Message) {
 		"lookups_active", strconv.Itoa(la),
 		"lookups_capacity", strconv.Itoa(lc),
 		"lookups_waiting", strconv.Itoa(lw),
+		"archives_active", strconv.Itoa(aa),
+		"archives_capacity", strconv.Itoa(ac),
+		"archives_waiting", strconv.Itoa(aw),
 		"active_users", strconv.Itoa(a.activeUserCount()))
 	a.sendText(message.Chat.ID, text, "HTML", nil)
 }

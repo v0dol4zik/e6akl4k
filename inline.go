@@ -164,7 +164,7 @@ func (s *inlineService) uploadPlaceholder(ctx context.Context) (string, error) {
 	audio := tgbotapi.NewAudio(s.cacheChatID, tgbotapi.FilePath(path))
 	audio.Title = "Downloading…"
 	audio.Performer = "e6akl4k bot"
-	sent, err := s.bot.Send(audio)
+	sent, err := sendTelegram(s.bot, audio)
 	if err != nil {
 		return "", fmt.Errorf("загрузить placeholder в cache-канал: %w", err)
 	}

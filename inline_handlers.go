@@ -103,7 +103,7 @@ func (a *app) answerInline(queryID string, results []interface{}, lang string) {
 		SwitchPMText:      tr("inline_switch_pm", lang),
 		SwitchPMParameter: "inline_help",
 	}
-	if _, err := a.bot.Request(config); err != nil {
+	if _, err := requestTelegram(a.bot, config); err != nil {
 		log.Printf("Ответить на inline query: %v", err)
 	}
 }
@@ -137,7 +137,9 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 		if a.store != nil {
 			a.store.increment(a.ctx, "cache_hits")
 		}
-		a.editInlineAudio(chosen.InlineMessageID, fileID, candidate, lang)
+		if err := a.editInlineAudio(chosen.InlineMessageID, fileID, candidate, lang); err != nil {
+			log.Printf("Заменить inline placeholder на аудио: %v", err)
+		}
 		return
 	}
 	if !a.beginUserDownload(chosen.From.ID) {
@@ -196,11 +198,15 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 	candidate.Title = firstNonEmpty(entry.Title, candidate.Title)
 	candidate.Artist = firstNonEmpty(entry.Artist, candidate.Artist)
 	candidate.Duration = firstNonEmpty(entry.Duration, candidate.Duration)
-	a.editInlineAudio(chosen.InlineMessageID, entry.FileID, candidate, lang)
+	if err := a.editInlineAudio(chosen.InlineMessageID, entry.FileID, candidate, lang); err != nil {
+		inlineFailure = err.Error()
+		log.Printf("Заменить inline placeholder на аудио: %v", err)
+		return
+	}
 	inlineOK = true
 }
 
-func (a *app) editInlineAudio(inlineMessageID, fileID string, candidate inlineCandidate, lang string) {
+func (a *app) editInlineAudio(inlineMessageID, fileID string, candidate inlineCandidate, lang string) error {
 	media := tgbotapi.NewInputMediaAudio(tgbotapi.FileID(fileID))
 	media.Title = candidate.Title
 	media.Performer = candidate.Artist
@@ -211,9 +217,8 @@ func (a *app) editInlineAudio(inlineMessageID, fileID string, candidate inlineCa
 		BaseEdit: tgbotapi.BaseEdit{InlineMessageID: inlineMessageID, ReplyMarkup: emptyInlineKeyboard()},
 		Media:    media,
 	}
-	if _, err := a.bot.Request(edit); err != nil {
-		log.Printf("Заменить inline placeholder на аудио: %v", err)
-	}
+	_, err := requestTelegram(a.bot, edit)
+	return err
 }
 
 func (a *app) editInlineError(inlineMessageID, text string) {
@@ -222,7 +227,7 @@ func (a *app) editInlineError(inlineMessageID, text string) {
 		Caption:   text,
 		ParseMode: "HTML",
 	}
-	if _, err := a.bot.Request(edit); err != nil {
+	if _, err := requestTelegram(a.bot, edit); err != nil {
 		log.Printf("Обновить ошибку inline-загрузки: %v", err)
 	}
 }

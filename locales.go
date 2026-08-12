@@ -29,8 +29,8 @@ var texts = map[string]map[string]string{
 		"en": "👋 <b>Hi! I'm the e6akl4k music bot.</b>\n\n🔎 You can now search for music <b>without a link</b>. Send an artist and title in our private chat, for example:\n<code>Daft Punk — Get Lucky</code>\n\n🔗 Or send a track or playlist link and I'll show its details and available formats.\n\n🌐 Search from any chat: <code>@{username} song name</code>\n\nSee every feature and example: /help",
 	},
 	"help": {
-		"ru": "🎧 <b>Что умеет бот</b>\n\n🔎 <b>Поиск по названию</b>\nОтправь в личный чат исполнителя и название:\n<code>Daft Punk — Get Lucky</code>\nЯ покажу несколько вариантов. Выбери нужный, затем формат и качество.\n\n🔗 <b>Загрузка по ссылке</b>\nПришли ссылку YouTube, YouTube Music, SoundCloud, Bandcamp, VK, Mixcloud, Audiomack или другого поддерживаемого источника. До загрузки я покажу название, длительность и примерный размер.\n\n🎶 <b>Ссылки музыкальных сервисов</b>\nSpotify, Apple Music, Deezer, Tidal и Яндекс Музыка используются для поиска по метаданным. Я покажу похожие версии с YouTube — проверь и подтверди совпадение.\n\n📚 <b>Плейлисты</b>\nМожно выбрать весь плейлист, первые 10/25/75 треков или показанный диапазон. Большие наборы можно отправить ZIP-архивами; слишком большой архив делится на части.\n\n🌐 <b>Inline-поиск в любом чате</b>\nНапиши:\n<code>@{username} название песни</code>\nВыбери результат — аудио появится прямо в этом чате.\n\n⚙️ <b>Форматы</b>\nMP3 128/320/VBR, FLAC, M4A и OGG. Если загрузка попала в очередь, я покажу её позицию. Активную загрузку можно отменить кнопкой. Повторные запросы обслуживаются из кэша автоматически.\n\n/language — сменить язык",
-		"en": "🎧 <b>What the bot can do</b>\n\n🔎 <b>Search by title</b>\nSend an artist and title in our private chat:\n<code>Daft Punk — Get Lucky</code>\nI'll show several results. Choose the right match, then its format and quality.\n\n🔗 <b>Download from a link</b>\nSend a YouTube, YouTube Music, SoundCloud, Bandcamp, VK, Mixcloud, Audiomack, or another supported link. Before downloading, I'll show the title, duration, and estimated size.\n\n🎶 <b>Music-service links</b>\nSpotify, Apple Music, Deezer, Tidal, and Yandex Music links are used to search by metadata. I'll show matching YouTube versions so you can verify and confirm the right one.\n\n📚 <b>Playlists</b>\nChoose the entire playlist, the first 10/25/75 tracks, or one of the displayed ranges. Large sets can be sent as ZIP archives; oversized archives are split automatically.\n\n🌐 <b>Inline search from any chat</b>\nType:\n<code>@{username} song name</code>\nChoose a result and the audio will appear directly in that chat.\n\n⚙️ <b>Formats</b>\nMP3 128/320/VBR, FLAC, M4A, and OGG. If a download is queued, I'll show its position. An active download can be cancelled with its button. Repeated requests are served from cache automatically.\n\n/language — change language",
+		"ru": "🎧 <b>Что умеет бот</b>\n\n🔎 <b>Поиск по названию</b>\nОтправь в личный чат исполнителя и название:\n<code>Daft Punk — Get Lucky</code>\nЯ покажу несколько вариантов. Выбери нужный, затем формат и качество.\n\n🔗 <b>Загрузка по ссылке</b>\nПришли ссылку YouTube, YouTube Music, SoundCloud, Bandcamp, VK, Mixcloud или Audiomack. До загрузки я покажу название, длительность и примерный размер.\n\n🎶 <b>Ссылки музыкальных сервисов</b>\nSpotify, Apple Music, Deezer, Tidal и Яндекс Музыка используются для поиска по метаданным. Я покажу похожие версии с YouTube — проверь и подтверди совпадение.\n\n📚 <b>Плейлисты</b>\nМожно выбрать весь плейлист в пределах лимита, первые 10/25 треков или показанный диапазон. Для большого набора способ отправки выбирается до загрузки: отдельные файлы приходят частями, ZIP автоматически делится.\n\n🌐 <b>Inline-поиск в любом чате</b>\nНапиши:\n<code>@{username} название песни</code>\nВыбери результат — аудио появится прямо в этом чате.\n\n⚙️ <b>Форматы</b>\nMP3 128/320/VBR и M4A отправляются как музыка. FLAC и OGG отправляются файлами; FLAC не улучшает качество исходника. Если загрузка попала в очередь, я покажу её позицию. Активную загрузку можно отменить кнопкой. Повторные запросы обслуживаются из кэша автоматически.\n\n/language — сменить язык",
+		"en": "🎧 <b>What the bot can do</b>\n\n🔎 <b>Search by title</b>\nSend an artist and title in our private chat:\n<code>Daft Punk — Get Lucky</code>\nI'll show several results. Choose the right match, then its format and quality.\n\n🔗 <b>Download from a link</b>\nSend a YouTube, YouTube Music, SoundCloud, Bandcamp, VK, Mixcloud, or Audiomack link. Before downloading, I'll show the title, duration, and estimated size.\n\n🎶 <b>Music-service links</b>\nSpotify, Apple Music, Deezer, Tidal, and Yandex Music links are used to search by metadata. I'll show matching YouTube versions so you can verify and confirm the right one.\n\n📚 <b>Playlists</b>\nChoose the entire playlist within the configured limit, the first 10/25 tracks, or one of the displayed ranges. For large sets, choose delivery before downloading: individual files arrive in batches and ZIP archives are split automatically.\n\n🌐 <b>Inline search from any chat</b>\nType:\n<code>@{username} song name</code>\nChoose a result and the audio will appear directly in that chat.\n\n⚙️ <b>Formats</b>\nMP3 128/320/VBR and M4A are sent as music. FLAC and OGG are sent as files; converting to FLAC cannot improve the source. If a download is queued, I'll show its position. An active download can be cancelled with its button. Repeated requests are served from cache automatically.\n\n/language — change language",
 	},
 	"invalid_link": {
 		"ru": "В группе отправь мне ссылку на трек или плейлист. Для поиска по названию используй <code>@{username} название песни</code> или открой личный чат с ботом.",
@@ -61,6 +61,7 @@ var texts = map[string]map[string]string{
 	"btn_range_custom":     {"ru": "🎵 {start}–{end}", "en": "🎵 {start}–{end}"},
 	"queue_full":           {"ru": "⚠️ очередь сейчас заполнена. Попробуй немного позже.", "en": "⚠️ the queue is full. Please try again later."},
 	"queued":               {"ru": "🕒 <b>загрузка в очереди</b>\nпозиция: {position}", "en": "🕒 <b>download queued</b>\nposition: {position}"},
+	"archive_queued":       {"ru": "🕒 <b>архивация в очереди</b>\nпозиция: {position}", "en": "🕒 <b>archiving queued</b>\nposition: {position}"},
 	"rate_limited":         {"ru": "⏳ слишком много запросов. Попробуй через {seconds} сек.", "en": "⏳ too many requests. Try again in {seconds} sec."},
 	"user_download_active": {"ru": "⏳ у тебя уже есть активная или ожидающая загрузка.", "en": "⏳ you already have an active or queued download."},
 	"looks_like_playlist": {
@@ -74,7 +75,7 @@ var texts = map[string]map[string]string{
 	"btn_mp3_best": {"ru": "🎵 MP3 (лучшее качество)", "en": "🎵 MP3 (best quality)"},
 	"btn_mp3_128":  {"ru": "🎵 MP3 (128 kbps)", "en": "🎵 MP3 (128 kbps)"},
 	"btn_mp3_320":  {"ru": "🎵 MP3 (320 kbps)", "en": "🎵 MP3 (320 kbps)"},
-	"btn_flac":     {"ru": "🎼 FLAC (без потерь)", "en": "🎼 FLAC (lossless)"},
+	"btn_flac":     {"ru": "🎼 FLAC (конвертация)", "en": "🎼 FLAC (converted)"},
 	"btn_m4a":      {"ru": "🎤 M4A (AAC)", "en": "🎤 M4A (AAC)"},
 	"btn_ogg":      {"ru": "🎧 OGG Vorbis", "en": "🎧 OGG Vorbis"},
 	"btn_cancel":   {"ru": "❌ отмена", "en": "❌ cancel"},
@@ -128,6 +129,10 @@ var texts = map[string]map[string]string{
 		"ru": "⏳ <b>скачиваю плейлист…</b>\nтекущий трек: <b>{current}/{total}</b>\nосталось: {eta}",
 		"en": "⏳ <b>downloading playlist…</b>\ncurrent track: <b>{current}/{total}</b>\nremaining: {eta}",
 	},
+	"download_batch": {
+		"ru": "⏳ <b>скачиваю и сразу отправляю плейлист…</b>\nтреки: <b>{start}–{end}</b> из {total}",
+		"en": "⏳ <b>downloading and sending the playlist in batches…</b>\ntracks: <b>{start}–{end}</b> of {total}",
+	},
 	"eta_calculating":           {"ru": "рассчитываю…", "en": "calculating…"},
 	"eta_less_minute":           {"ru": "меньше минуты", "en": "less than a minute"},
 	"eta_minutes":               {"ru": "около {count} мин.", "en": "about {count} min."},
@@ -145,6 +150,10 @@ var texts = map[string]map[string]string{
 	"downloaded_count": {
 		"ru": "📦 скачано треков: <b>{count}</b>. как отправить?",
 		"en": "📦 downloaded tracks: <b>{count}</b>. how should I send them?",
+	},
+	"choose_delivery": {
+		"ru": "📦 <b>Как отправить выбранный плейлист?</b>\nСпособ нужно выбрать до загрузки, чтобы бот не держал готовые файлы в ожидании.",
+		"en": "📦 <b>How should I send the selected playlist?</b>\nChoose before downloading so the bot does not keep completed files waiting on disk.",
 	},
 	"send_error": {
 		"ru": "⚠️ [{idx}/{total}] <b>ошибка:</b> <code>{error}</code>",
@@ -197,12 +206,12 @@ var texts = map[string]map[string]string{
 		"en": "❌ error while creating the archive: <code>{error}</code>",
 	},
 	"admin_stats": {
-		"ru": "📊 <b>Статистика</b>\nПользователи: {users}\nТреки в кэше: {cached}\nУспешно: {ok}\nОшибки: {failed}\nОтменено: {cancelled}\nОшибки cookies: {cookies}\nПопадания в кэш: {hits}\nПоиски: {searches}\nОграничено rate limit: {limited}\nОтклонено очередью: {rejected}",
-		"en": "📊 <b>Statistics</b>\nUsers: {users}\nCached tracks: {cached}\nSuccessful: {ok}\nFailed: {failed}\nCancelled: {cancelled}\nCookie errors: {cookies}\nCache hits: {hits}\nSearches: {searches}\nRate limited: {limited}\nRejected by queue: {rejected}",
+		"ru": "📊 <b>Статистика</b>\nПользователи: {users}\nТреки в кэше: {cached}\nУспешно доставлено: {ok}\nЧастично: {partial}\nОшибки: {failed}\nОтменено: {cancelled}\nОшибки cookies: {cookies}\nПопадания в кэш: {hits}\nПоиски: {searches}\nОграничено rate limit: {limited}\nОтклонено очередью: {rejected}",
+		"en": "📊 <b>Statistics</b>\nUsers: {users}\nDelivered successfully: {ok}\nPartially delivered: {partial}\nCached tracks: {cached}\nFailed: {failed}\nCancelled: {cancelled}\nCookie errors: {cookies}\nCache hits: {hits}\nSearches: {searches}\nRate limited: {limited}\nRejected by queue: {rejected}",
 	},
 	"admin_status": {
-		"ru": "🟢 <b>Бот работает</b>\nЗагрузки: {downloads_active}/{downloads_capacity}, в очереди {downloads_waiting}\nПоиск: {lookups_active}/{lookups_capacity}, в очереди {lookups_waiting}\nАктивных пользователей: {active_users}",
-		"en": "🟢 <b>Bot is running</b>\nDownloads: {downloads_active}/{downloads_capacity}, queued {downloads_waiting}\nSearches: {lookups_active}/{lookups_capacity}, queued {lookups_waiting}\nActive users: {active_users}",
+		"ru": "🟢 <b>Бот работает</b>\nЗагрузки: {downloads_active}/{downloads_capacity}, в очереди {downloads_waiting}\nПоиск: {lookups_active}/{lookups_capacity}, в очереди {lookups_waiting}\nАрхивация: {archives_active}/{archives_capacity}, в очереди {archives_waiting}\nАктивных пользователей: {active_users}",
+		"en": "🟢 <b>Bot is running</b>\nDownloads: {downloads_active}/{downloads_capacity}, queued {downloads_waiting}\nSearches: {lookups_active}/{lookups_capacity}, queued {lookups_waiting}\nArchives: {archives_active}/{archives_capacity}, queued {archives_waiting}\nActive users: {active_users}",
 	},
 	"admin_stats_error": {
 		"ru": "❌ Не удалось получить статистику: {error}",

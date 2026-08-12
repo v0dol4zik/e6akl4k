@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func TestStorePersistsLanguageCacheStatsAndHistory(t *testing.T) {
@@ -17,7 +19,7 @@ func TestStorePersistsLanguageCacheStatsAndHistory(t *testing.T) {
 	if err := state.setLanguage(ctx, 42, "en"); err != nil {
 		t.Fatal(err)
 	}
-	entry := cachedAudio{Key: "youtube:id:mp3:320", FileID: "file-id", Title: "Track", Artist: "Artist", Format: "mp3", Quality: "320", Size: 123}
+	entry := cachedAudio{Key: "youtube:id:flac:best", FileID: "file-id", Title: "Track", Artist: "Artist", Format: "flac", Quality: "best", Size: 123, MediaType: "document"}
 	if err := state.putCachedAudio(ctx, entry); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +37,7 @@ func TestStorePersistsLanguageCacheStatsAndHistory(t *testing.T) {
 	if lang, ok := state.language(ctx, 42); !ok || lang != "en" {
 		t.Fatalf("language=%q ok=%v", lang, ok)
 	}
-	if got, ok := state.cachedAudio(ctx, entry.Key, time.Hour); !ok || got.FileID != entry.FileID || got.Title != entry.Title {
+	if got, ok := state.cachedAudio(ctx, entry.Key, time.Hour); !ok || got.FileID != entry.FileID || got.Title != entry.Title || got.MediaType != "document" {
 		t.Fatalf("cache=%#v ok=%v", got, ok)
 	}
 	stats, err := state.stats(ctx)
@@ -48,6 +50,51 @@ func TestStorePersistsLanguageCacheStatsAndHistory(t *testing.T) {
 	var history int
 	if err := state.db.QueryRow(`SELECT count(*) FROM download_history WHERE user_id=42 AND status='ok'`).Scan(&history); err != nil || history != 1 {
 		t.Fatalf("history=%d err=%v", history, err)
+	}
+}
+
+func TestStorePersistsPendingTelegramUpdates(t *testing.T) {
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	update := tgbotapi.Update{UpdateID: 123, Message: &tgbotapi.Message{Text: "hello"}}
+	inserted, err := state.persistUpdate(context.Background(), update)
+	if err != nil || !inserted {
+		t.Fatalf("persist inserted=%v err=%v", inserted, err)
+	}
+	inserted, err = state.persistUpdate(context.Background(), update)
+	if err != nil || inserted {
+		t.Fatalf("duplicate inserted=%v err=%v", inserted, err)
+	}
+	pending, err := state.pendingUpdates(context.Background())
+	if err != nil || len(pending) != 1 || pending[0].UpdateID != 123 {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	if err := state.finishUpdate(context.Background(), 123, true); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = state.pendingUpdates(context.Background())
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("finished update still pending: %#v err=%v", pending, err)
+	}
+}
+
+func TestStoreCanExplicitlyDiscardPendingTelegramUpdates(t *testing.T) {
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if _, err := state.persistUpdate(context.Background(), tgbotapi.Update{UpdateID: 321}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.discardPendingUpdates(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := state.pendingUpdates(context.Background()); err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%#v err=%v", pending, err)
 	}
 }
 

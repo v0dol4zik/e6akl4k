@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
 )
 
 func createZIP(path string, results []downloadResult) (returnErr error) {
@@ -36,12 +38,14 @@ func createZIP(path string, results []downloadResult) (returnErr error) {
 		if result.Artist != "" {
 			name = result.Artist + " - " + name
 		}
-		name = unsafeName.ReplaceAllString(name+extension, "_")
-		if used[name] {
-			name = fmt.Sprintf("%02d - %s", i+1, name)
+		name = sanitizeArchiveName(name + extension)
+		baseName := name
+		for duplicate := 1; used[name]; duplicate++ {
+			name = fmt.Sprintf("%02d-%02d - %s", i+1, duplicate, baseName)
 		}
 		used[name] = true
-		entry, err := writer.Create(name)
+		header := &zip.FileHeader{Name: name, Method: zip.Store}
+		entry, err := writer.CreateHeader(header)
 		if err != nil {
 			return err
 		}
@@ -59,4 +63,19 @@ func createZIP(path string, results []downloadResult) (returnErr error) {
 		}
 	}
 	return nil
+}
+
+func sanitizeArchiveName(name string) string {
+	name = unsafeName.ReplaceAllString(name, "_")
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, name)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "track"
+	}
+	return shortenRunes(name, 180)
 }

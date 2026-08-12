@@ -141,3 +141,43 @@ func TestManifestLineCount(t *testing.T) {
 		t.Fatalf("manifestLineCount() = %d, want 2", got)
 	}
 }
+
+func TestLookupCookiesUseIsolatedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cookies := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(cookies, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := &downloader{downloadDir: dir, cookiesFile: cookies, cookieConcurrency: 1}
+	if err := d.refreshCookieSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	release, err := d.acquireCookieLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := os.WriteFile(cookies, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, cleanup, err := d.lookupCookieFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	data, err := os.ReadFile(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "original" || snapshot == cookies {
+		t.Fatalf("snapshot=%q content=%q", snapshot, data)
+	}
+}
+
+func TestArgsBeforeSeparator(t *testing.T) {
+	got := argsBeforeSeparator([]string{"--format", "audio", "--", "https://example.test"}, "--cookies", "snapshot.txt")
+	want := []string{"--format", "audio", "--cookies", "snapshot.txt", "--", "https://example.test"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args=%#v, want %#v", got, want)
+	}
+}

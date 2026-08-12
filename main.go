@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,8 +25,6 @@ const (
 	maxTitleLength             = 200
 	maxParallelDownloads       = 2
 	maxStoredEntries           = 5000
-	maxPendingZIPEntries       = 20
-	pendingZIPTTL              = time.Hour
 	pendingURLTTL              = time.Hour
 )
 
@@ -34,11 +33,9 @@ var (
 	unsafeName = regexp.MustCompile(`[<>:"/\\|?*]`)
 )
 
-type zipRequest struct {
-	Results []downloadResult
-	Format  string
-	ChatID  int64
-	UserID  int64
+type deliveryReport struct {
+	Delivered int
+	Failed    int
 }
 
 type pendingURL struct {
@@ -48,6 +45,7 @@ type pendingURL struct {
 	Preview    mediaPreview
 	RangeStart int
 	RangeEnd   int
+	Delivery   string
 	ExpiresAt  time.Time
 }
 
@@ -66,6 +64,7 @@ type app struct {
 	store         *store
 	downloads     *jobGate
 	lookups       *jobGate
+	archives      *jobGate
 	limiter       *rateLimiter
 	inlineLimiter *rateLimiter
 	flights       flightGroup
@@ -74,8 +73,6 @@ type app struct {
 	userLang      map[int64]string
 	urls          map[string]pendingURL
 	urlOrder      []string
-	pendingZIP    map[string]zipRequest
-	zipOrder      []string
 	active        map[string]activeDownload
 	activeUser    map[int64]bool
 	cookieAlertAt time.Time
@@ -110,20 +107,28 @@ func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *d
 		store:         state,
 		downloads:     newJobGate(cfg.DownloadWorkers, cfg.DownloadQueueSize),
 		lookups:       newJobGate(cfg.LookupWorkers, cfg.LookupQueueSize),
+		archives:      newJobGate(cfg.ArchiveWorkers, cfg.ArchiveQueueSize),
 		limiter:       newRateLimiter(cfg.RateLimit, cfg.RateWindow),
 		inlineLimiter: newRateLimiter(cfg.InlineRateLimit, cfg.RateWindow),
 		userLang:      make(map[int64]string),
 		urls:          make(map[string]pendingURL),
-		pendingZIP:    make(map[string]zipRequest),
 		active:        make(map[string]activeDownload),
 		activeUser:    make(map[int64]bool),
 	}
 }
 
-func (a *app) handleUpdate(update tgbotapi.Update) {
+func (a *app) handleUpdate(update tgbotapi.Update) (success bool) {
+	if a.ctx.Err() != nil {
+		return false
+	}
+	success = true
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			log.Printf("Паника при обработке update %d: %v", update.UpdateID, recovered)
+			success = false
+			log.Printf("Паника при обработке update %d: %v\n%s", update.UpdateID, recovered, debug.Stack())
+		}
+		if a.ctx.Err() != nil {
+			success = false
 		}
 	}()
 	switch {
@@ -136,6 +141,7 @@ func (a *app) handleUpdate(update tgbotapi.Update) {
 	case update.Message != nil:
 		a.handleMessage(update.Message)
 	}
+	return success
 }
 
 func (a *app) handleMessage(message *tgbotapi.Message) {
@@ -202,7 +208,7 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 	if callback.From == nil {
 		return
 	}
-	if _, err := a.bot.Request(tgbotapi.NewCallback(callback.ID, "")); err != nil {
+	if _, err := requestTelegram(a.bot, tgbotapi.NewCallback(callback.ID, "")); err != nil {
 		log.Printf("Не удалось ответить на callback: %v", err)
 	}
 	data := callback.Data
@@ -224,8 +230,8 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		a.handlePendingCancel(callback)
 	case strings.HasPrefix(data, "cancel_download:"):
 		a.handleDownloadCancel(callback)
-	case strings.HasPrefix(data, "zip:"):
-		a.handleZIPChoice(callback)
+	case strings.HasPrefix(data, "delivery:"):
+		a.handleDeliveryChoice(callback)
 	case strings.HasPrefix(data, "pick:"):
 		a.handleSearchPick(callback)
 	case strings.HasPrefix(data, "range:"):
@@ -241,10 +247,17 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 		return
 	}
 	format, quality, urlKey := parts[1], parts[2], parts[3]
+	if !validDownloadOption(format, quality) {
+		return
+	}
 	lang := a.langOrDefault(callback.From.ID)
 	chatID := callback.From.ID
 	if callback.Message != nil && callback.Message.Chat != nil {
 		chatID = callback.Message.Chat.ID
+	}
+	if pending, ok := a.getURL(urlKey, callback.From.ID, chatID); ok && pending.Preview.IsPlaylist && selectedTrackCount(pending) > playlistZIPThreshold && pending.Delivery == "" {
+		a.safeEdit(callback, tr("choose_delivery", lang), "HTML", deliveryKeyboard(urlKey, format, quality, lang))
+		return
 	}
 	if !a.beginUserDownload(callback.From.ID) {
 		a.sendText(chatID, tr("user_download_active", lang), "", nil)
@@ -258,8 +271,8 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 	}
 	url := pending.URL
 	historyStarted := time.Now()
-	historyOK := false
-	historyCancelled := false
+	historyStatus := "failed"
+	historyError := ""
 	status := a.safeEdit(callback, tr("download_starting", lang), "HTML", nil)
 
 	cancelKey, err := randomID()
@@ -270,13 +283,7 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 	downloadCtx, cancel := context.WithCancel(a.ctx)
 	defer func() {
 		if a.store != nil {
-			historyStatus := "failed"
-			if historyOK {
-				historyStatus = "ok"
-			} else if historyCancelled {
-				historyStatus = "cancelled"
-			}
-			a.store.recordDownload(a.ctx, callback.From.ID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), "")
+			a.store.recordDownload(a.ctx, callback.From.ID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), historyError)
 		}
 	}()
 	a.mu.Lock()
@@ -291,7 +298,7 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 	if status != nil {
 		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, tr("download_starting", lang), *downloadCancelKeyboard(cancelKey, lang))
 		edit.ParseMode = "HTML"
-		if sent, sendErr := a.bot.Send(edit); sendErr == nil {
+		if sent, sendErr := sendTelegram(a.bot, edit); sendErr == nil {
 			status = &sent
 		}
 	}
@@ -304,15 +311,46 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 				a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
 			}
 		}); handled {
-			historyOK = succeeded
+			if succeeded {
+				historyStatus = "delivered"
+				a.recordDeliveryMetrics(deliveryReport{Delivered: 1})
+			}
 			if !succeeded && downloadCtx.Err() != nil {
-				historyCancelled = true
+				historyStatus = "cancelled"
 			}
 			if status != nil && succeeded {
 				a.editStatusMessage(status, tr("download_finished", lang))
 			}
 			return
 		}
+	}
+	if pending.Preview.IsPlaylist && pending.Delivery == "individual" && selectedTrackCount(pending) > playlistZIPThreshold {
+		report, batchErr := a.downloadAndSendPlaylistBatches(downloadCtx, chatID, pending, format, quality, lang, status)
+		historyStatus = deliveryStatus(report)
+		historyError = deliveryError(report)
+		a.recordDeliveryMetrics(report)
+		if batchErr != nil {
+			historyError = batchErr.Error()
+			if errors.Is(batchErr, context.Canceled) {
+				historyStatus = "cancelled"
+				if a.store != nil {
+					a.store.increment(a.ctx, "downloads_cancelled")
+				}
+				return
+			}
+			if errors.Is(batchErr, errQueueFull) {
+				if report.Delivered == 0 {
+					a.restoreURL(urlKey, pending)
+					a.safeEdit(callback, tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
+				} else {
+					a.sendText(chatID, tr("queue_full", lang), "", nil)
+				}
+				return
+			}
+			a.reportDownloadFailure(batchErr.Error())
+			a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(batchErr.Error())), "HTML", nil)
+		}
+		return
 	}
 	results, err := a.runDownloadRangeQueued(downloadCtx, url, format, quality, pending.RangeStart, pending.RangeEnd, func(position int) {
 		if status != nil {
@@ -335,20 +373,22 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 		text := tr("download_progress", lang, "current", strconv.Itoa(current), "total", strconv.Itoa(total), "eta", eta)
 		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, text, *downloadCancelKeyboard(cancelKey, lang))
 		edit.ParseMode = "HTML"
-		if _, err := a.bot.Send(edit); err != nil {
+		if _, err := sendTelegram(a.bot, edit); err != nil {
 			log.Printf("Не удалось обновить прогресс загрузки: %v", err)
 		}
 	})
 	if err != nil {
+		historyError = err.Error()
 		if errors.Is(err, context.Canceled) {
-			historyCancelled = true
+			historyStatus = "cancelled"
 			if a.store != nil {
 				a.store.increment(a.ctx, "downloads_cancelled")
 			}
 			return
 		}
 		if errors.Is(err, errQueueFull) {
-			a.sendText(chatID, tr("queue_full", lang), "", nil)
+			a.restoreURL(urlKey, pending)
+			a.safeEdit(callback, tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
 			return
 		}
 		var tooLarge playlistTooLargeError
@@ -368,69 +408,140 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 			a.downloader.clearSession(results[0].Session)
 		}
 		a.reportDownloadFailure(reason)
+		historyError = reason
 		a.sendText(chatID, tr("nothing_downloaded", lang, "error", reason), "", nil)
 		return
 	}
-	if a.store != nil {
-		a.store.increment(a.ctx, "downloads_ok")
-	}
-	historyOK = true
-
 	validCount := 0
 	for _, result := range results {
 		if result.Error == "" && regularFileExists(result.FilePath) {
 			validCount++
 		}
 	}
-	if validCount > playlistZIPThreshold {
-		key, err := a.storeZIP(zipRequest{Results: results, Format: format, ChatID: chatID, UserID: callback.From.ID})
-		if err != nil {
+	if validCount > playlistZIPThreshold && pending.Delivery == "zip" {
+		_, releaseArchive, queueErr := a.archives.acquireNotify(downloadCtx, func(position int) {
+			a.editStatusMessage(status, tr("archive_queued", lang, "position", strconv.Itoa(position)))
+		})
+		if queueErr != nil {
+			historyError = queueErr.Error()
 			a.downloader.clearSession(results[0].Session)
-			a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+			a.restoreURL(urlKey, pending)
+			a.handleQueueError(chatID, lang, queueErr)
 			return
 		}
-		text := tr("downloaded_count", lang, "count", strconv.Itoa(validCount))
-		markup := zipKeyboard(key, lang)
-		if status != nil {
-			edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, text, *markup)
-			edit.ParseMode = "HTML"
-			if _, err := a.bot.Send(edit); err == nil {
-				return
-			}
-		}
-		a.sendText(chatID, text, "HTML", markup)
+		defer releaseArchive()
+		report := a.sendResultsAsZIP(chatID, results, format, lang)
+		historyStatus = deliveryStatus(report)
+		historyError = deliveryError(report)
+		a.recordDeliveryMetrics(report)
 		return
 	}
 	if status != nil {
 		edit := tgbotapi.NewEditMessageText(status.Chat.ID, status.MessageID, tr("download_finished", lang))
 		edit.ParseMode = "HTML"
-		if _, err := a.bot.Send(edit); err != nil {
+		if _, err := sendTelegram(a.bot, edit); err != nil {
 			log.Printf("Не удалось обновить статус загрузки: %v", err)
 		}
 	}
-	a.sendResultsIndividually(chatID, results, format, lang)
+	report := a.sendResultsIndividually(chatID, results, format, lang)
+	historyStatus = deliveryStatus(report)
+	historyError = deliveryError(report)
+	a.recordDeliveryMetrics(report)
 }
 
-func (a *app) handleZIPChoice(callback *tgbotapi.CallbackQuery) {
-	parts := strings.SplitN(callback.Data, ":", 3)
-	if len(parts) != 3 {
+func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, status *tgbotapi.Message) (deliveryReport, error) {
+	start, end := pending.RangeStart, pending.RangeEnd
+	if start <= 0 {
+		start = 1
+	}
+	if end <= 0 || end > pending.Preview.TrackCount {
+		end = pending.Preview.TrackCount
+	}
+	report := deliveryReport{}
+	for batchStart := start; batchStart <= end; batchStart += 10 {
+		batchEnd := min(batchStart+9, end)
+		a.editStatusMessage(status, tr("download_batch", lang, "start", strconv.Itoa(batchStart), "end", strconv.Itoa(batchEnd), "total", strconv.Itoa(end)))
+		results, err := a.runDownloadRangeQueued(ctx, pending.URL, format, quality, batchStart, batchEnd, func(position int) {
+			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
+		}, nil)
+		if err != nil {
+			return report, err
+		}
+		batchReport := a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, false)
+		report.Delivered += batchReport.Delivered
+		report.Failed += batchReport.Failed
+	}
+	summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(report.Delivered), "total", strconv.Itoa(report.Delivered+report.Failed))
+	if report.Failed > 0 {
+		summary += tr("some_failed_suffix", lang)
+	}
+	a.sendText(chatID, summary, "", nil)
+	return report, nil
+}
+
+func deliveryStatus(report deliveryReport) string {
+	if report.Delivered > 0 && report.Failed == 0 {
+		return "delivered"
+	}
+	if report.Delivered > 0 {
+		return "partial"
+	}
+	return "delivery_failed"
+}
+
+func deliveryError(report deliveryReport) string {
+	if report.Failed == 0 {
+		return ""
+	}
+	return fmt.Sprintf("не доставлено треков: %d", report.Failed)
+}
+
+func (a *app) recordDeliveryMetrics(report deliveryReport) {
+	if a.store == nil {
+		return
+	}
+	switch deliveryStatus(report) {
+	case "delivered":
+		a.store.increment(a.ctx, "downloads_ok")
+	case "partial":
+		a.store.increment(a.ctx, "downloads_partial")
+	case "delivery_failed":
+		a.store.increment(a.ctx, "downloads_failed")
+	}
+}
+
+func selectedTrackCount(pending pendingURL) int {
+	if !pending.Preview.IsPlaylist {
+		return 1
+	}
+	start, end := pending.RangeStart, pending.RangeEnd
+	if start <= 0 {
+		start = 1
+	}
+	if end <= 0 || end > pending.Preview.TrackCount {
+		end = pending.Preview.TrackCount
+	}
+	if end < start {
+		return 0
+	}
+	return end - start + 1
+}
+
+func (a *app) handleDeliveryChoice(callback *tgbotapi.CallbackQuery) {
+	parts := strings.SplitN(callback.Data, ":", 5)
+	if len(parts) != 5 || (parts[1] != "zip" && parts[1] != "individual") || !validDownloadOption(parts[2], parts[3]) {
 		return
 	}
 	chatID := callback.From.ID
 	if callback.Message != nil && callback.Message.Chat != nil {
 		chatID = callback.Message.Chat.ID
 	}
-	request, ok := a.popZIP(parts[2], callback.From.ID, chatID)
-	lang := a.langOrDefault(callback.From.ID)
-	if !ok {
-		a.sendText(callback.From.ID, tr("action_unavailable", lang), "", nil)
+	if _, ok := a.setURLDelivery(parts[4], callback.From.ID, chatID, parts[1]); !ok {
+		a.sendText(callback.From.ID, tr("action_unavailable", a.langOrDefault(callback.From.ID)), "", nil)
 		return
 	}
-	if parts[1] == "yes" {
-		a.sendResultsAsZIP(request.ChatID, request.Results, request.Format, lang)
-	} else {
-		a.sendResultsIndividually(request.ChatID, request.Results, request.Format, lang)
-	}
+	callback.Data = "dl:" + parts[2] + ":" + parts[3] + ":" + parts[4]
+	a.handleDownload(callback)
 }
 
 func (a *app) runDownload(ctx context.Context, url, format, quality string, progress downloadProgress) ([]downloadResult, error) {
@@ -495,7 +606,11 @@ func (a *app) handlePendingCancel(callback *tgbotapi.CallbackQuery) {
 	a.safeEdit(callback, tr("cancelled", lang), "", nil)
 }
 
-func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, format, lang string) {
+func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, format, lang string) deliveryReport {
+	return a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, true)
+}
+
+func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloadResult, format, lang string, showSummary bool) deliveryReport {
 	session := ""
 	if len(results) > 0 {
 		session = results[0].Session
@@ -525,6 +640,29 @@ func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, fo
 		}
 		items = append(items, batchAudio{index: i, result: result, size: info.Size()})
 	}
+	if !telegramAudioFormat(format) {
+		sent := 0
+		for _, item := range items {
+			document := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(item.result.FilePath))
+			document.Caption = buildCaption(item.result, item.size, format, lang, item.index+1, len(results))
+			document.ParseMode = "HTML"
+			message, err := sendTelegram(a.bot, document)
+			if err != nil {
+				a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(err.Error())), "HTML", nil)
+				continue
+			}
+			a.cacheDeliveredAudio(item.result, format, item.size, message)
+			sent++
+		}
+		summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(sent), "total", strconv.Itoa(len(results)))
+		if sent < len(results) {
+			summary += tr("some_failed_suffix", lang)
+		}
+		if showSummary {
+			a.sendText(chatID, summary, "", nil)
+		}
+		return deliveryReport{Delivered: sent, Failed: len(results) - sent}
+	}
 	sent := 0
 	for start := 0; start < len(items); start += 10 {
 		end := min(start+10, len(items))
@@ -545,19 +683,25 @@ func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, fo
 			audio := tgbotapi.NewAudio(chatID, tgbotapi.FilePath(batch[0].result.FilePath))
 			audio.Caption, audio.ParseMode = buildCaption(batch[0].result, batch[0].size, format, lang, batch[0].index+1, len(results)), "HTML"
 			audio.Title, audio.Performer = batch[0].result.Title, batch[0].result.Artist
-			message, err := a.bot.Send(audio)
+			message, err := sendTelegram(a.bot, audio)
 			sendErr = err
 			delivered = []tgbotapi.Message{message}
 		} else {
-			delivered, sendErr = a.bot.SendMediaGroup(tgbotapi.NewMediaGroup(chatID, media))
+			delivered, sendErr = sendMediaGroupTelegram(a.bot, tgbotapi.NewMediaGroup(chatID, media))
 		}
 		if sendErr != nil {
 			log.Printf("Не удалось отправить группу аудио: %v", sendErr)
+			if !canFallbackToIndividual(sendErr) {
+				for _, item := range batch {
+					a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(sendErr.Error())), "HTML", nil)
+				}
+				continue
+			}
 			for _, item := range batch {
 				audio := tgbotapi.NewAudio(chatID, tgbotapi.FilePath(item.result.FilePath))
 				audio.Title, audio.Performer = item.result.Title, item.result.Artist
 				audio.Caption, audio.ParseMode = buildCaption(item.result, item.size, format, lang, item.index+1, len(results)), "HTML"
-				message, err := a.bot.Send(audio)
+				message, err := sendTelegram(a.bot, audio)
 				if err != nil {
 					a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(err.Error())), "HTML", nil)
 					continue
@@ -579,16 +723,28 @@ func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, fo
 	if sent < len(results) {
 		summary += tr("some_failed_suffix", lang)
 	}
-	a.sendText(chatID, summary, "", nil)
+	if showSummary {
+		a.sendText(chatID, summary, "", nil)
+	}
+	return deliveryReport{Delivered: sent, Failed: len(results) - sent}
 }
 
 func (a *app) cacheDeliveredAudio(result downloadResult, format string, size int64, delivered tgbotapi.Message) {
-	if a.store != nil && result.CacheKey != "" && delivered.Audio != nil {
-		_ = a.store.putCachedAudio(a.ctx, cachedAudio{Key: result.CacheKey, FileID: delivered.Audio.FileID, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Size: size})
+	if a.store == nil || result.CacheKey == "" {
+		return
+	}
+	entry := cachedAudio{Key: result.CacheKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Size: size}
+	if delivered.Audio != nil {
+		entry.FileID, entry.MediaType = delivered.Audio.FileID, "audio"
+	} else if delivered.Document != nil {
+		entry.FileID, entry.MediaType = delivered.Document.FileID, "document"
+	}
+	if entry.FileID != "" {
+		_ = a.store.putCachedAudio(a.ctx, entry)
 	}
 }
 
-func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, lang string) {
+func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, lang string) deliveryReport {
 	session := ""
 	if len(results) > 0 {
 		session = results[0].Session
@@ -603,10 +759,11 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 	}
 	if len(valid) == 0 {
 		a.sendText(chatID, tr("no_files_for_zip", lang), "", nil)
-		return
+		return deliveryReport{Failed: len(results)}
 	}
 	a.sendText(chatID, tr("zipping", lang, "count", strconv.Itoa(len(valid))), "", nil)
 	chunks := splitResultsBySize(valid, a.fileLimit()*9/10)
+	delivered := 0
 	skipped := len(results) - len(valid)
 	skippedLine := ""
 	if skipped > 0 {
@@ -616,21 +773,21 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		zipID, err := randomID()
 		if err != nil {
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
 		zipPath := filepath.Join(filepath.Dir(valid[0].FilePath), fmt.Sprintf("playlist_%02d_of_%02d_%s.zip", part+1, len(chunks), zipID))
 		if err := createZIP(zipPath, chunk); err != nil {
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
 		info, err := os.Stat(zipPath)
 		if err != nil {
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
 		if info.Size() > a.fileLimit() {
 			a.sendText(chatID, tr("zip_too_big", lang, "size", humanSize(info.Size(), lang)), "", nil)
-			return
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
 		document := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(zipPath))
 		partLine := ""
@@ -639,12 +796,14 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		}
 		document.Caption = tr("zip_caption", lang, "count", strconv.Itoa(len(chunk)), "size", humanSize(info.Size(), lang), "fmt", strings.ToUpper(format), "skipped", skippedLine+partLine)
 		document.ParseMode = "HTML"
-		if _, err := a.bot.Send(document); err != nil {
+		if _, err := sendTelegram(a.bot, document); err != nil {
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
+		delivered += len(chunk)
 	}
 	a.sendText(chatID, tr("zip_sent", lang), "", nil)
+	return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 }
 
 func splitResultsBySize(results []downloadResult, limit int64) [][]downloadResult {
@@ -691,7 +850,7 @@ func (a *app) sendText(chatID int64, text, parseMode string, markup *tgbotapi.In
 	if markup != nil {
 		message.ReplyMarkup = *markup
 	}
-	sent, err := a.bot.Send(message)
+	sent, err := sendTelegram(a.bot, message)
 	if err != nil {
 		log.Printf("Не удалось отправить сообщение в чат %d: %v", chatID, err)
 		return nil
@@ -704,7 +863,7 @@ func (a *app) safeEdit(callback *tgbotapi.CallbackQuery, text, parseMode string,
 		config := tgbotapi.NewEditMessageText(callback.Message.Chat.ID, callback.Message.MessageID, text)
 		config.ParseMode = parseMode
 		config.ReplyMarkup = markup
-		message, err := a.bot.Send(config)
+		message, err := sendTelegram(a.bot, config)
 		if err == nil {
 			return &message
 		}

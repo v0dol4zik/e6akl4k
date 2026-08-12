@@ -5,6 +5,8 @@ import (
 	"context"
 	"log"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,6 +15,11 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+)
+
+const (
+	telegramRequestTimeout = 30 * time.Second
+	telegramUploadTimeout  = 30 * time.Minute
 )
 
 func loadEnv(path string) error {
@@ -72,11 +79,20 @@ func main() {
 	if err := state.cleanup(context.Background(), cfg.CacheTTL); err != nil {
 		log.Printf("Очистить старый кэш: %v", err)
 	}
-	bot, err := tgbotapi.NewBotAPI(cfg.BotToken)
+	telegramHTTP := &http.Client{
+		Transport: deadlineTransport{base: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		}, requestLimit: telegramRequestTimeout, uploadLimit: telegramUploadTimeout, pollLimit: 75 * time.Second},
+	}
+	bot, err := tgbotapi.NewBotAPIWithClient(cfg.BotToken, tgbotapi.APIEndpoint, telegramHTTP)
 	if err != nil {
 		log.Fatalf("Не удалось подключиться к Telegram: %v", err)
 	}
-	if _, err := bot.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: true}); err != nil {
+	if _, err := bot.Request(tgbotapi.DeleteWebhookConfig{DropPendingUpdates: cfg.DropPendingUpdates}); err != nil {
 		log.Fatalf("Не удалось удалить webhook: %v", err)
 	}
 	log.Printf("Бот @%s запущен", bot.Self.UserName)
@@ -100,31 +116,54 @@ func main() {
 	} else {
 		log.Print("CACHE_CHAT_ID/INLINE_CACHE_CHAT_ID не задан: inline-режим отключён")
 	}
-	updates := bot.GetUpdatesChan(tgbotapi.UpdateConfig{
-		Timeout: 60,
-		AllowedUpdates: []string{
-			tgbotapi.UpdateTypeMessage,
-			tgbotapi.UpdateTypeCallbackQuery,
-			tgbotapi.UpdateTypeInlineQuery,
-			tgbotapi.UpdateTypeChosenInlineResult,
-		},
-	})
 	var handlers sync.WaitGroup
-	jobs := make(chan tgbotapi.Update, cfg.UpdateQueueSize)
+	dispatcher := newUpdateDispatcher(cfg.UpdateQueueSize)
 	for i := 0; i < cfg.UpdateWorkers; i++ {
 		handlers.Add(1)
 		go func() {
 			defer handlers.Done()
-			for update := range jobs {
-				application.handleUpdate(update)
+			for {
+				key, job, ok := dispatcher.take()
+				if !ok {
+					return
+				}
+				success := application.handleUpdate(job.update)
+				if job.complete != nil {
+					job.complete(success)
+				}
+				dispatcher.done(key)
 			}
 		}()
 	}
+	persistedComplete := func(updateID int) func(bool) {
+		return func(success bool) {
+			if err := state.finishUpdate(context.Background(), updateID, success); err != nil {
+				log.Printf("Завершить сохранённый update %d: %v", updateID, err)
+			}
+		}
+	}
+	if cfg.DropPendingUpdates {
+		if err := state.discardPendingUpdates(ctx); err != nil {
+			log.Fatalf("Сбросить локальную очередь Telegram updates: %v", err)
+		}
+	}
+	pendingUpdates, err := state.pendingUpdates(ctx)
+	if err != nil {
+		log.Fatalf("Прочитать незавершённые Telegram updates: %v", err)
+	}
+	for _, pending := range pendingUpdates {
+		if !dispatcher.submit(ctx, pending, persistedComplete(pending.UpdateID)) {
+			break
+		}
+	}
+	if len(pendingUpdates) > 0 {
+		log.Printf("Восстановлено незавершённых Telegram updates: %d", len(pendingUpdates))
+	}
+	updates := startUpdatePoller(ctx, bot, state)
 	for {
 		select {
 		case <-ctx.Done():
-			bot.StopReceivingUpdates()
-			close(jobs)
+			dispatcher.close()
 			finished := make(chan struct{})
 			go func() {
 				handlers.Wait()
@@ -139,16 +178,58 @@ func main() {
 			return
 		case update, ok := <-updates:
 			if !ok {
-				close(jobs)
+				dispatcher.close()
 				handlers.Wait()
 				return
 			}
-			select {
-			case jobs <- update:
-			case <-ctx.Done():
-			}
+			_ = dispatcher.submit(ctx, update, persistedComplete(update.UpdateID))
 		}
 	}
+}
+
+func startUpdatePoller(ctx context.Context, bot *tgbotapi.BotAPI, state *store) <-chan tgbotapi.Update {
+	result := make(chan tgbotapi.Update)
+	config := tgbotapi.UpdateConfig{
+		Timeout: 60,
+		AllowedUpdates: []string{
+			tgbotapi.UpdateTypeMessage,
+			tgbotapi.UpdateTypeCallbackQuery,
+			tgbotapi.UpdateTypeInlineQuery,
+			tgbotapi.UpdateTypeChosenInlineResult,
+		},
+	}
+	go func() {
+		defer close(result)
+		for ctx.Err() == nil {
+			updates, err := bot.GetUpdates(config)
+			if err != nil {
+				log.Printf("Получить Telegram updates: %v", err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(3 * time.Second):
+				}
+				continue
+			}
+			for _, update := range updates {
+				inserted, err := state.persistUpdate(ctx, update)
+				if err != nil {
+					log.Printf("Сохранить Telegram update %d: %v", update.UpdateID, err)
+					break
+				}
+				config.Offset = update.UpdateID + 1
+				if !inserted {
+					continue
+				}
+				select {
+				case result <- update:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return result
 }
 
 type slogWriter struct{}

@@ -64,6 +64,21 @@ func (a *app) setURLRange(key string, userID, chatID int64, start, end int) (pen
 	return request, true
 }
 
+func (a *app) setURLDelivery(key string, userID, chatID int64, delivery string) (pendingURL, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	request, ok := a.urls[key]
+	if !ok || request.UserID != userID || request.ChatID != chatID || time.Now().After(request.ExpiresAt) {
+		if ok && time.Now().After(request.ExpiresAt) {
+			delete(a.urls, key)
+		}
+		return pendingURL{}, false
+	}
+	request.Delivery = delivery
+	a.urls[key] = request
+	return request, true
+}
+
 func (a *app) beginUserDownload(userID int64) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -113,57 +128,12 @@ func (a *app) popURL(key string, userID, chatID int64) (pendingURL, bool) {
 	return request, true
 }
 
-func (a *app) storeZIP(request zipRequest) (string, error) {
-	key, err := randomID()
-	if err != nil {
-		return "", err
-	}
+func (a *app) restoreURL(key string, request pendingURL) {
 	a.mu.Lock()
-	a.pendingZIP[key] = request
-	a.zipOrder = append(a.zipOrder, key)
-	var evicted []zipRequest
-	for len(a.zipOrder) > maxPendingZIPEntries {
-		oldKey := a.zipOrder[0]
-		a.zipOrder = a.zipOrder[1:]
-		if old, ok := a.pendingZIP[oldKey]; ok {
-			evicted = append(evicted, old)
-		}
-		delete(a.pendingZIP, oldKey)
+	if _, exists := a.urls[key]; !exists && time.Now().Before(request.ExpiresAt) {
+		a.urls[key] = request
 	}
 	a.mu.Unlock()
-	for _, old := range evicted {
-		if len(old.Results) > 0 {
-			a.downloader.clearSession(old.Results[0].Session)
-		}
-	}
-	time.AfterFunc(pendingZIPTTL, func() { a.expireZIP(key) })
-	return key, nil
-}
-
-func (a *app) expireZIP(key string) {
-	request, ok := a.removeZIP(key)
-	if ok && len(request.Results) > 0 {
-		a.downloader.clearSession(request.Results[0].Session)
-	}
-}
-
-func (a *app) popZIP(key string, userID, chatID int64) (zipRequest, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	request, ok := a.pendingZIP[key]
-	if !ok || request.UserID != userID || request.ChatID != chatID {
-		return zipRequest{}, false
-	}
-	delete(a.pendingZIP, key)
-	return request, true
-}
-
-func (a *app) removeZIP(key string) (zipRequest, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	request, ok := a.pendingZIP[key]
-	delete(a.pendingZIP, key)
-	return request, ok
 }
 
 func (a *app) getActiveDownload(key string, userID, chatID int64) (activeDownload, bool) {

@@ -151,6 +151,8 @@ type downloader struct {
 	cookieLock        chan struct{}
 	cookieLockOnce    sync.Once
 	cookieConcurrency int
+	cookieSnapshotMu  sync.RWMutex
+	cookieSnapshot    []byte
 	maxPlaylistTracks int
 }
 
@@ -216,15 +218,20 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 		cookiesFile, _ = filepath.Abs(cookiesFile)
 		log.Printf("Использую cookies из %s", cookiesFile)
 	}
-
-	return &downloader{
+	d := &downloader{
 		bin:               bin,
 		downloadDir:       absoluteDir,
 		cookiesFile:       cookiesFile,
 		maxFileSize:       maxFileSize,
 		cookieConcurrency: 1,
 		maxPlaylistTracks: maxPlaylistTracks,
-	}, nil
+	}
+	if cookiesFile != "" {
+		if err := d.refreshCookieSnapshot(); err != nil {
+			return nil, fmt.Errorf("прочитать cookies: %w", err)
+		}
+	}
+	return d, nil
 }
 
 func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, error) {
@@ -490,6 +497,14 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 		return nil, "", err
 	}
 	defer release()
+	if d.cookiesFile != "" {
+		args = argsBeforeSeparator(args, "--cookies", d.cookiesFile)
+		defer func() {
+			if err := d.refreshCookieSnapshot(); err != nil {
+				log.Printf("Не удалось обновить snapshot cookies: %v", err)
+			}
+		}()
+	}
 	cmd := exec.CommandContext(ctx, d.bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -558,18 +573,18 @@ func (d *downloader) commonArgs() []string {
 		"--extractor-args", "vk:force_mobile=1",
 		"--add-headers", "Accept-Language:en-US,en;q=0.9",
 	}
-	if d.cookiesFile != "" {
-		args = append(args, "--cookies", d.cookiesFile)
-	}
 	return args
 }
 
 func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, error) {
-	release, err := d.acquireCookieLock(ctx)
+	cookies, cleanup, err := d.lookupCookieFile()
 	if err != nil {
 		return nil, "", err
 	}
-	defer release()
+	defer cleanup()
+	if cookies != "" {
+		args = argsBeforeSeparator(args, "--cookies", cookies)
+	}
 	cmd := exec.CommandContext(ctx, d.bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -591,6 +606,62 @@ func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, e
 		log.Printf("yt-dlp завершился с ошибкой: %v: %s", err, firstLine(stderr.String()))
 	}
 	return stdout.Bytes(), stderr.String(), err
+}
+
+func (d *downloader) lookupCookieFile() (string, func(), error) {
+	if d.cookiesFile == "" {
+		return "", func() {}, nil
+	}
+	d.cookieSnapshotMu.RLock()
+	snapshot := append([]byte(nil), d.cookieSnapshot...)
+	d.cookieSnapshotMu.RUnlock()
+	file, err := os.CreateTemp(d.downloadDir, ".cookies-readonly-*.txt")
+	if err != nil {
+		return "", func() {}, err
+	}
+	path := file.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if _, err := file.Write(snapshot); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return path, cleanup, nil
+}
+
+func (d *downloader) refreshCookieSnapshot() error {
+	if d.cookiesFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(d.cookiesFile)
+	if err != nil {
+		return err
+	}
+	d.cookieSnapshotMu.Lock()
+	d.cookieSnapshot = data
+	d.cookieSnapshotMu.Unlock()
+	return nil
+}
+
+func argsBeforeSeparator(args []string, values ...string) []string {
+	for i, arg := range args {
+		if arg == "--" {
+			result := make([]string, 0, len(args)+len(values))
+			result = append(result, args[:i]...)
+			result = append(result, values...)
+			return append(result, args[i:]...)
+		}
+	}
+	return append(args, values...)
 }
 
 func (d *downloader) acquireCookieLock(ctx context.Context) (func(), error) {

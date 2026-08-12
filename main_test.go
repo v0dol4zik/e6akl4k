@@ -44,24 +44,6 @@ func TestPendingURLExpires(t *testing.T) {
 	}
 }
 
-func TestPendingZIPIsBoundToOwnerAndChat(t *testing.T) {
-	a := newApp(context.Background(), nil, nil)
-	want := zipRequest{Format: "mp3", UserID: 10, ChatID: -20}
-	key, err := a.storeZIP(want)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := a.popZIP(key, 11, -20); ok {
-		t.Fatal("another user consumed the ZIP request")
-	}
-	if _, ok := a.popZIP(key, 10, -21); ok {
-		t.Fatal("ZIP request was consumed from another chat")
-	}
-	if got, ok := a.popZIP(key, 10, -20); !ok || got.Format != want.Format {
-		t.Fatalf("owner could not consume ZIP request: got %#v, ok %v", got, ok)
-	}
-}
-
 func TestActiveDownloadIsBoundToOwnerAndChat(t *testing.T) {
 	a := newApp(context.Background(), nil, nil)
 	a.active["download"] = activeDownload{userID: 10, chatID: -20}
@@ -171,5 +153,27 @@ func TestSplitResultsBySizeCreatesParts(t *testing.T) {
 	parts := splitResultsBySize(results, 12)
 	if len(parts) != 3 || len(parts[0]) != 2 || len(parts[2]) != 1 {
 		t.Fatalf("parts=%#v", parts)
+	}
+}
+
+func TestDownloadOptionAndTelegramMediaType(t *testing.T) {
+	if !validDownloadOption("mp3", "320") || !validDownloadOption("flac", "best") || validDownloadOption("flac", "320") || validDownloadOption("exe", "best") {
+		t.Fatal("invalid download option validation")
+	}
+	if !telegramAudioFormat("mp3") || !telegramAudioFormat("m4a") || telegramAudioFormat("flac") || telegramAudioFormat("ogg") {
+		t.Fatal("invalid Telegram media classification")
+	}
+}
+
+func TestDeliveryStatusAndError(t *testing.T) {
+	if got := deliveryStatus(deliveryReport{Delivered: 2}); got != "delivered" {
+		t.Fatalf("delivered status=%q", got)
+	}
+	partial := deliveryReport{Delivered: 1, Failed: 2}
+	if got := deliveryStatus(partial); got != "partial" || !strings.Contains(deliveryError(partial), "2") {
+		t.Fatalf("partial status=%q error=%q", got, deliveryError(partial))
+	}
+	if got := deliveryStatus(deliveryReport{Failed: 1}); got != "delivery_failed" {
+		t.Fatalf("failed status=%q", got)
 	}
 }

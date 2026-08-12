@@ -1,5 +1,6 @@
 services:
   music_bot:
+    image: ${MUSICBOT_IMAGE:-musicbot:latest}
     build: .
     restart: unless-stopped
     init: true

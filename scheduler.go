@@ -10,14 +10,26 @@ import (
 var errQueueFull = errors.New("очередь заполнена")
 
 type jobGate struct {
-	workers chan struct{}
-	queue   chan struct{}
-	mu      sync.Mutex
-	waiting int
+	mu          sync.Mutex
+	workerLimit int
+	queueLimit  int
+	active      int
+	waiters     []*gateWaiter
+}
+
+type gateWaiter struct {
+	ready   chan struct{}
+	granted bool
 }
 
 func newJobGate(workers, queue int) *jobGate {
-	return &jobGate{workers: make(chan struct{}, workers), queue: make(chan struct{}, queue)}
+	if workers < 1 {
+		workers = 1
+	}
+	if queue < 0 {
+		queue = 0
+	}
+	return &jobGate{workerLimit: workers, queueLimit: queue}
 }
 
 func (g *jobGate) acquire(ctx context.Context) (int, func(), error) {
@@ -25,44 +37,73 @@ func (g *jobGate) acquire(ctx context.Context) (int, func(), error) {
 }
 
 func (g *jobGate) acquireNotify(ctx context.Context, queued func(int)) (int, func(), error) {
-	select {
-	case g.workers <- struct{}{}:
-		return 0, func() { <-g.workers }, nil
-	default:
-	}
-	position := 0
-	select {
-	case g.queue <- struct{}{}:
-		g.mu.Lock()
-		g.waiting++
-		position = g.waiting
+	g.mu.Lock()
+	if g.active < g.workerLimit && len(g.waiters) == 0 {
+		g.active++
 		g.mu.Unlock()
-		if queued != nil {
-			queued(position)
-		}
-	default:
+		return 0, g.releaseFunc(), nil
+	}
+	if len(g.waiters) >= g.queueLimit {
+		g.mu.Unlock()
 		return 0, nil, errQueueFull
 	}
+	waiter := &gateWaiter{ready: make(chan struct{})}
+	g.waiters = append(g.waiters, waiter)
+	position := len(g.waiters)
+	g.mu.Unlock()
+	if queued != nil {
+		queued(position)
+	}
 	select {
-	case g.workers <- struct{}{}:
-		<-g.queue
-		g.mu.Lock()
-		g.waiting--
-		g.mu.Unlock()
-		return position, func() { <-g.workers }, nil
+	case <-waiter.ready:
+		return position, g.releaseFunc(), nil
 	case <-ctx.Done():
-		<-g.queue
 		g.mu.Lock()
-		g.waiting--
+		if waiter.granted {
+			g.active--
+			g.grantNextLocked()
+		} else {
+			for i, queuedWaiter := range g.waiters {
+				if queuedWaiter == waiter {
+					g.waiters = append(g.waiters[:i], g.waiters[i+1:]...)
+					break
+				}
+			}
+		}
 		g.mu.Unlock()
 		return position, nil, ctx.Err()
 	}
 }
 
+func (g *jobGate) releaseFunc() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			if g.active > 0 {
+				g.active--
+			}
+			g.grantNextLocked()
+			g.mu.Unlock()
+		})
+	}
+}
+
+func (g *jobGate) grantNextLocked() {
+	if g.active >= g.workerLimit || len(g.waiters) == 0 {
+		return
+	}
+	waiter := g.waiters[0]
+	g.waiters = g.waiters[1:]
+	g.active++
+	waiter.granted = true
+	close(waiter.ready)
+}
+
 func (g *jobGate) snapshot() (active, waiting, capacity int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return len(g.workers), g.waiting, cap(g.workers)
+	return g.active, len(g.waiters), g.workerLimit
 }
 
 type rateBucket struct {

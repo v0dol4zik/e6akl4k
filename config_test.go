@@ -24,8 +24,8 @@ func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
 	_ = os.Setenv("CACHE_CHAT_ID", "-1001")
 	_ = os.Setenv("DOWNLOAD_WORKERS", "4")
 	_ = os.Setenv("RATE_WINDOW", "2m")
-	_ = os.Setenv("ADMIN_IDS", "10, 20,invalid")
-	_ = os.Setenv("MAX_FILE_SIZE", "9999999999")
+	_ = os.Setenv("ADMIN_IDS", "10, 20")
+	_ = os.Setenv("MAX_FILE_SIZE", "52428800")
 	_ = os.Setenv("XDG_DATA_HOME", t.TempDir())
 	cfg, err := loadConfig()
 	if err != nil {
@@ -36,6 +36,28 @@ func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
 	}
 	if cfg.MaxFileSize != maxFileSize {
 		t.Fatalf("unbounded file size=%d", cfg.MaxFileSize)
+	}
+}
+
+func TestLoadConfigRejectsInvalidEnvironment(t *testing.T) {
+	oldToken, tokenOK := os.LookupEnv("BOT_TOKEN")
+	oldWorkers, workersOK := os.LookupEnv("DOWNLOAD_WORKERS")
+	t.Cleanup(func() {
+		if tokenOK {
+			_ = os.Setenv("BOT_TOKEN", oldToken)
+		} else {
+			_ = os.Unsetenv("BOT_TOKEN")
+		}
+		if workersOK {
+			_ = os.Setenv("DOWNLOAD_WORKERS", oldWorkers)
+		} else {
+			_ = os.Unsetenv("DOWNLOAD_WORKERS")
+		}
+	})
+	_ = os.Setenv("BOT_TOKEN", "token")
+	_ = os.Setenv("DOWNLOAD_WORKERS", "many")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("invalid DOWNLOAD_WORKERS was silently accepted")
 	}
 }
 

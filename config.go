@@ -10,52 +10,100 @@ import (
 )
 
 type config struct {
-	BotToken          string
-	DownloadDir       string
-	DatabasePath      string
-	CacheChatID       int64
-	HTTPAddr          string
-	DownloadWorkers   int
-	DownloadQueueSize int
-	LookupWorkers     int
-	LookupQueueSize   int
-	UpdateWorkers     int
-	UpdateQueueSize   int
-	RateLimit         int
-	InlineRateLimit   int
-	RateWindow        time.Duration
-	CookieConcurrency int
-	AdminIDs          map[int64]bool
-	CacheTTL          time.Duration
-	MaxPlaylistTracks int
-	MaxFileSize       int64
-	ShutdownTimeout   time.Duration
-	DiskWarningBytes  int64
-	DiskCheckInterval time.Duration
+	BotToken           string
+	DownloadDir        string
+	DatabasePath       string
+	CacheChatID        int64
+	HTTPAddr           string
+	DownloadWorkers    int
+	DownloadQueueSize  int
+	LookupWorkers      int
+	LookupQueueSize    int
+	ArchiveWorkers     int
+	ArchiveQueueSize   int
+	UpdateWorkers      int
+	UpdateQueueSize    int
+	RateLimit          int
+	InlineRateLimit    int
+	RateWindow         time.Duration
+	CookieConcurrency  int
+	AdminIDs           map[int64]bool
+	CacheTTL           time.Duration
+	MaxPlaylistTracks  int
+	MaxFileSize        int64
+	ShutdownTimeout    time.Duration
+	DiskWarningBytes   int64
+	DiskCheckInterval  time.Duration
+	DropPendingUpdates bool
 }
 
 func loadConfig() (config, error) {
 	cfg := config{
-		BotToken:          strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		DownloadDir:       envString("DOWNLOAD_DIR", "downloads"),
-		HTTPAddr:          envString("HTTP_ADDR", "127.0.0.1:8080"),
-		DownloadWorkers:   envInt("DOWNLOAD_WORKERS", maxParallelDownloads, 1, 32),
-		DownloadQueueSize: envInt("DOWNLOAD_QUEUE_SIZE", 20, 0, 10000),
-		LookupWorkers:     envInt("LOOKUP_WORKERS", 2, 1, 32),
-		LookupQueueSize:   envInt("LOOKUP_QUEUE_SIZE", 40, 0, 10000),
-		UpdateWorkers:     envInt("UPDATE_WORKERS", 32, 1, 256),
-		UpdateQueueSize:   envInt("UPDATE_QUEUE_SIZE", 256, 1, 10000),
-		RateLimit:         envInt("RATE_LIMIT", 12, 1, 10000),
-		InlineRateLimit:   envInt("INLINE_RATE_LIMIT", 60, 1, 10000),
-		RateWindow:        envDuration("RATE_WINDOW", time.Minute),
-		CookieConcurrency: envInt("YTDLP_COOKIE_CONCURRENCY", 1, 1, 32),
-		CacheTTL:          envDuration("CACHE_TTL", 180*24*time.Hour),
-		MaxPlaylistTracks: envInt("MAX_PLAYLIST_TRACKS", maxPlaylistTracks, 1, 1000),
-		MaxFileSize:       envInt64("MAX_FILE_SIZE", maxFileSize, 1024*1024, maxFileSize),
-		ShutdownTimeout:   envDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		DiskWarningBytes:  envInt64("DISK_WARNING_BYTES", 512*1024*1024, 10*1024*1024, 100*1024*1024*1024),
-		DiskCheckInterval: envDuration("DISK_CHECK_INTERVAL", 10*time.Minute),
-		AdminIDs:          parseIDSet(os.Getenv("ADMIN_IDS")),
+		BotToken:    strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		DownloadDir: envString("DOWNLOAD_DIR", "downloads"),
+		HTTPAddr:    envString("HTTP_ADDR", "127.0.0.1:8080"),
+		AdminIDs:    make(map[int64]bool),
+	}
+	var err error
+	if cfg.DownloadWorkers, err = strictEnvInt("DOWNLOAD_WORKERS", maxParallelDownloads, 1, 32); err != nil {
+		return config{}, err
+	}
+	if cfg.DownloadQueueSize, err = strictEnvInt("DOWNLOAD_QUEUE_SIZE", 20, 0, 10000); err != nil {
+		return config{}, err
+	}
+	if cfg.LookupWorkers, err = strictEnvInt("LOOKUP_WORKERS", 2, 1, 32); err != nil {
+		return config{}, err
+	}
+	if cfg.LookupQueueSize, err = strictEnvInt("LOOKUP_QUEUE_SIZE", 40, 0, 10000); err != nil {
+		return config{}, err
+	}
+	if cfg.ArchiveWorkers, err = strictEnvInt("ARCHIVE_WORKERS", 1, 1, 8); err != nil {
+		return config{}, err
+	}
+	if cfg.ArchiveQueueSize, err = strictEnvInt("ARCHIVE_QUEUE_SIZE", 10, 0, 1000); err != nil {
+		return config{}, err
+	}
+	if cfg.UpdateWorkers, err = strictEnvInt("UPDATE_WORKERS", 32, 1, 256); err != nil {
+		return config{}, err
+	}
+	if cfg.UpdateQueueSize, err = strictEnvInt("UPDATE_QUEUE_SIZE", 256, 1, 10000); err != nil {
+		return config{}, err
+	}
+	if cfg.RateLimit, err = strictEnvInt("RATE_LIMIT", 12, 1, 10000); err != nil {
+		return config{}, err
+	}
+	if cfg.InlineRateLimit, err = strictEnvInt("INLINE_RATE_LIMIT", 60, 1, 10000); err != nil {
+		return config{}, err
+	}
+	if cfg.CookieConcurrency, err = strictEnvInt("YTDLP_COOKIE_CONCURRENCY", 1, 1, 32); err != nil {
+		return config{}, err
+	}
+	if cfg.MaxPlaylistTracks, err = strictEnvInt("MAX_PLAYLIST_TRACKS", maxPlaylistTracks, 1, 1000); err != nil {
+		return config{}, err
+	}
+	if cfg.MaxFileSize, err = strictEnvInt64("MAX_FILE_SIZE", maxFileSize, 1024*1024, maxFileSize); err != nil {
+		return config{}, err
+	}
+	if cfg.RateWindow, err = strictEnvDuration("RATE_WINDOW", time.Minute); err != nil {
+		return config{}, err
+	}
+	if cfg.CacheTTL, err = strictEnvDuration("CACHE_TTL", 180*24*time.Hour); err != nil {
+		return config{}, err
+	}
+	if cfg.ShutdownTimeout, err = strictEnvDuration("SHUTDOWN_TIMEOUT", 30*time.Second); err != nil {
+		return config{}, err
+	}
+	if cfg.DiskCheckInterval, err = strictEnvDuration("DISK_CHECK_INTERVAL", 10*time.Minute); err != nil {
+		return config{}, err
+	}
+	if cfg.DiskWarningBytes, err = strictEnvInt64("DISK_WARNING_BYTES", 512*1024*1024, 10*1024*1024, 100*1024*1024*1024); err != nil {
+		return config{}, err
+	}
+	if cfg.DropPendingUpdates, err = strictEnvBool("DROP_PENDING_UPDATES", false); err != nil {
+		return config{}, err
+	}
+	if cfg.AdminIDs, err = strictIDSet("ADMIN_IDS", os.Getenv("ADMIN_IDS")); err != nil {
+		return config{}, err
 	}
 	if cfg.BotToken == "" {
 		return config{}, fmt.Errorf("BOT_TOKEN не задан в .env или переменных окружения")
@@ -73,6 +121,54 @@ func loadConfig() (config, error) {
 	return cfg, nil
 }
 
+func strictEnvInt(key string, fallback, min, max int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < min || parsed > max {
+		return 0, fmt.Errorf("%s должен быть целым числом от %d до %d: %q", key, min, max, value)
+	}
+	return parsed, nil
+}
+
+func strictEnvInt64(key string, fallback, min, max int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < min || parsed > max {
+		return 0, fmt.Errorf("%s должен быть целым числом от %d до %d: %q", key, min, max, value)
+	}
+	return parsed, nil
+}
+
+func strictEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s должен быть положительной длительностью: %q", key, value)
+	}
+	return parsed, nil
+}
+
+func strictEnvBool(key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s должен быть true или false: %q", key, value)
+	}
+	return parsed, nil
+}
+
 func envString(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value
@@ -80,36 +176,18 @@ func envString(key, fallback string) string {
 	return fallback
 }
 
-func envInt(key string, fallback, min, max int) int {
-	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key)))
-	if err != nil || value < min || value > max {
-		return fallback
-	}
-	return value
-}
-
-func envInt64(key string, fallback, min, max int64) int64 {
-	value, err := strconv.ParseInt(strings.TrimSpace(os.Getenv(key)), 10, 64)
-	if err != nil || value < min || value > max {
-		return fallback
-	}
-	return value
-}
-
-func envDuration(key string, fallback time.Duration) time.Duration {
-	value, err := time.ParseDuration(strings.TrimSpace(os.Getenv(key)))
-	if err != nil || value <= 0 {
-		return fallback
-	}
-	return value
-}
-
-func parseIDSet(value string) map[int64]bool {
+func strictIDSet(key, value string) (map[int64]bool, error) {
 	result := make(map[int64]bool)
 	for _, item := range strings.Split(value, ",") {
-		if id, err := strconv.ParseInt(strings.TrimSpace(item), 10, 64); err == nil && id != 0 {
-			result[id] = true
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
 		}
+		id, err := strconv.ParseInt(item, 10, 64)
+		if err != nil || id == 0 {
+			return nil, fmt.Errorf("%s содержит некорректный Telegram ID: %q", key, item)
+		}
+		result[id] = true
 	}
-	return result
+	return result, nil
 }

@@ -59,6 +59,42 @@ func TestCachedDownloadUsesTelegramFileID(t *testing.T) {
 	}
 }
 
+func TestCachedFLACUsesTelegramDocument(t *testing.T) {
+	var documentCalls atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch filepath.Base(r.URL.Path) {
+		case "getMe":
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+		case "sendDocument":
+			documentCalls.Add(1)
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"document":{"file_id":"flac-file","file_unique_id":"u"}}}`)
+		default:
+			fmt.Fprint(w, `{"ok":true,"result":true}`)
+		}
+	})
+	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	pending := pendingURL{URL: "https://youtu.be/id", Preview: mediaPreview{SourceID: "id", Extractor: "youtube"}}
+	key := sourceCacheKey("youtube", "id", "flac", "best")
+	if err := state.putCachedAudio(context.Background(), cachedAudio{Key: key, FileID: "flac-file", Title: "Track", Format: "flac", MediaType: "document"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour}
+	app := newAppWithServices(context.Background(), bot, &downloader{downloadDir: t.TempDir()}, state, cfg)
+	handled, succeeded := app.tryCachedDownload(context.Background(), 10, pending, "flac", "best", "en", nil)
+	if !handled || !succeeded || documentCalls.Load() != 1 {
+		t.Fatalf("handled=%v succeeded=%v document calls=%d", handled, succeeded, documentCalls.Load())
+	}
+}
+
 func TestCachedCallbackFlow(t *testing.T) {
 	var sendAudioCalls atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +137,7 @@ func TestCachedCallbackFlow(t *testing.T) {
 		t.Fatalf("sendAudio calls=%d", sendAudioCalls.Load())
 	}
 	var historyStatus string
-	if err := state.db.QueryRow(`SELECT status FROM download_history ORDER BY id DESC LIMIT 1`).Scan(&historyStatus); err != nil || historyStatus != "ok" {
+	if err := state.db.QueryRow(`SELECT status FROM download_history ORDER BY id DESC LIMIT 1`).Scan(&historyStatus); err != nil || historyStatus != "delivered" {
 		t.Fatalf("history=%q err=%v", historyStatus, err)
 	}
 }

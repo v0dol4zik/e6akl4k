@@ -21,6 +21,8 @@ type healthReport struct {
 	QueuedDownloads int    `json:"queued_downloads"`
 	ActiveLookups   int    `json:"active_lookups"`
 	QueuedLookups   int    `json:"queued_lookups"`
+	ActiveArchives  int    `json:"active_archives"`
+	QueuedArchives  int    `json:"queued_archives"`
 }
 
 func (a *app) health(ctx context.Context) (healthReport, bool) {
@@ -49,6 +51,7 @@ func (a *app) health(ctx context.Context) (healthReport, bool) {
 	}
 	report.ActiveDownloads, report.QueuedDownloads, _ = a.downloads.snapshot()
 	report.ActiveLookups, report.QueuedLookups, _ = a.lookups.snapshot()
+	report.ActiveArchives, report.QueuedArchives, _ = a.archives.snapshot()
 	if !ok {
 		report.Status = "degraded"
 	}
@@ -91,9 +94,10 @@ func observabilityHandler(a *app) http.Handler {
 		}
 		da, dw, _ := a.downloads.snapshot()
 		la, lw, _ := a.lookups.snapshot()
+		aa, aw, _ := a.archives.snapshot()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = fmt.Fprintf(w, "musicbot_downloads_total{result=\"ok\"} %d\nmusicbot_downloads_total{result=\"failed\"} %d\nmusicbot_downloads_total{result=\"cancelled\"} %d\nmusicbot_youtube_cookie_errors_total %d\nmusicbot_cache_hits_total %d\nmusicbot_searches_total %d\nmusicbot_rate_limited_total %d\nmusicbot_queue_rejected_total %d\nmusicbot_users %d\nmusicbot_cached_tracks %d\nmusicbot_downloads_active %d\nmusicbot_downloads_queued %d\nmusicbot_lookups_active %d\nmusicbot_lookups_queued %d\n",
-			stats.DownloadsOK, stats.DownloadsFailed, stats.Cancelled, stats.CookieErrors, stats.CacheHits, stats.Searches, stats.RateLimited, stats.QueueRejected, stats.UniqueUsers, stats.CachedTracks, da, dw, la, lw)
+		_, _ = fmt.Fprintf(w, "musicbot_downloads_total{result=\"ok\"} %d\nmusicbot_downloads_total{result=\"partial\"} %d\nmusicbot_downloads_total{result=\"failed\"} %d\nmusicbot_downloads_total{result=\"cancelled\"} %d\nmusicbot_youtube_cookie_errors_total %d\nmusicbot_cache_hits_total %d\nmusicbot_searches_total %d\nmusicbot_rate_limited_total %d\nmusicbot_queue_rejected_total %d\nmusicbot_users %d\nmusicbot_cached_tracks %d\nmusicbot_downloads_active %d\nmusicbot_downloads_queued %d\nmusicbot_lookups_active %d\nmusicbot_lookups_queued %d\nmusicbot_archives_active %d\nmusicbot_archives_queued %d\n",
+			stats.DownloadsOK, stats.DownloadsPartial, stats.DownloadsFailed, stats.Cancelled, stats.CookieErrors, stats.CacheHits, stats.Searches, stats.RateLimited, stats.QueueRejected, stats.UniqueUsers, stats.CachedTracks, da, dw, la, lw, aa, aw)
 	})
 	return mux
 }
