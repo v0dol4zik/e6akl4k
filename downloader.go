@@ -148,9 +148,6 @@ type downloader struct {
 	downloadDir       string
 	cookiesFile       string
 	maxFileSize       int64
-	cookieLock        chan struct{}
-	cookieLockOnce    sync.Once
-	cookieConcurrency int
 	cookieSnapshotMu  sync.RWMutex
 	cookieSnapshot    []byte
 	maxPlaylistTracks int
@@ -210,9 +207,9 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("cookies %s не является обычным файлом", cookiesFile)
 		}
-		file, err := os.OpenFile(cookiesFile, os.O_RDWR, 0)
+		file, err := os.Open(cookiesFile)
 		if err != nil {
-			return nil, fmt.Errorf("cookies %s недоступен для чтения и записи: %w", cookiesFile, err)
+			return nil, fmt.Errorf("cookies %s недоступен для чтения: %w", cookiesFile, err)
 		}
 		_ = file.Close()
 		cookiesFile, _ = filepath.Abs(cookiesFile)
@@ -223,7 +220,6 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 		downloadDir:       absoluteDir,
 		cookiesFile:       cookiesFile,
 		maxFileSize:       maxFileSize,
-		cookieConcurrency: 1,
 		maxPlaylistTracks: maxPlaylistTracks,
 	}
 	if cookiesFile != "" {
@@ -492,18 +488,13 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 }
 
 func (d *downloader) runWithProgress(ctx context.Context, args []string, manifest string, progress downloadProgress, total int) ([]byte, string, error) {
-	release, err := d.acquireCookieLock(ctx)
+	cookies, cleanup, err := d.isolatedCookieFile()
 	if err != nil {
 		return nil, "", err
 	}
-	defer release()
-	if d.cookiesFile != "" {
-		args = argsBeforeSeparator(args, "--cookies", d.cookiesFile)
-		defer func() {
-			if err := d.refreshCookieSnapshot(); err != nil {
-				log.Printf("Не удалось обновить snapshot cookies: %v", err)
-			}
-		}()
+	defer cleanup()
+	if cookies != "" {
+		args = argsBeforeSeparator(args, "--cookies", cookies)
 	}
 	cmd := exec.CommandContext(ctx, d.bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -577,7 +568,7 @@ func (d *downloader) commonArgs() []string {
 }
 
 func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, error) {
-	cookies, cleanup, err := d.lookupCookieFile()
+	cookies, cleanup, err := d.isolatedCookieFile()
 	if err != nil {
 		return nil, "", err
 	}
@@ -608,7 +599,7 @@ func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, e
 	return stdout.Bytes(), stderr.String(), err
 }
 
-func (d *downloader) lookupCookieFile() (string, func(), error) {
+func (d *downloader) isolatedCookieFile() (string, func(), error) {
 	if d.cookiesFile == "" {
 		return "", func() {}, nil
 	}
@@ -662,25 +653,6 @@ func argsBeforeSeparator(args []string, values ...string) []string {
 		}
 	}
 	return append(args, values...)
-}
-
-func (d *downloader) acquireCookieLock(ctx context.Context) (func(), error) {
-	if d.cookiesFile == "" {
-		return func() {}, nil
-	}
-	d.cookieLockOnce.Do(func() {
-		limit := d.cookieConcurrency
-		if limit <= 0 {
-			limit = 1
-		}
-		d.cookieLock = make(chan struct{}, limit)
-	})
-	select {
-	case d.cookieLock <- struct{}{}:
-		return func() { <-d.cookieLock }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 func checkWritableDir(path string) error {

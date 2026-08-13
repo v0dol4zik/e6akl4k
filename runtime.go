@@ -69,7 +69,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	dl.cookieConcurrency = cfg.CookieConcurrency
 	dl.maxPlaylistTracks = cfg.MaxPlaylistTracks
 	state, err := openStore(cfg.DatabasePath)
 	if err != nil {

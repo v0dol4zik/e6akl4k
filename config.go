@@ -26,7 +26,6 @@ type config struct {
 	RateLimit          int
 	InlineRateLimit    int
 	RateWindow         time.Duration
-	CookieConcurrency  int
 	AdminIDs           map[int64]bool
 	CacheTTL           time.Duration
 	MaxPlaylistTracks  int
@@ -48,7 +47,7 @@ func loadConfig() (config, error) {
 	if cfg.DownloadWorkers, err = strictEnvInt("DOWNLOAD_WORKERS", maxParallelDownloads, 1, 32); err != nil {
 		return config{}, err
 	}
-	if cfg.DownloadQueueSize, err = strictEnvInt("DOWNLOAD_QUEUE_SIZE", 20, 0, 10000); err != nil {
+	if cfg.DownloadQueueSize, err = strictEnvInt("DOWNLOAD_QUEUE_SIZE", 0, 0, 10000); err != nil {
 		return config{}, err
 	}
 	if cfg.LookupWorkers, err = strictEnvInt("LOOKUP_WORKERS", 2, 1, 32); err != nil {
@@ -73,9 +72,6 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	if cfg.InlineRateLimit, err = strictEnvInt("INLINE_RATE_LIMIT", 60, 1, 10000); err != nil {
-		return config{}, err
-	}
-	if cfg.CookieConcurrency, err = strictEnvInt("YTDLP_COOKIE_CONCURRENCY", 1, 1, 32); err != nil {
 		return config{}, err
 	}
 	if cfg.MaxPlaylistTracks, err = strictEnvInt("MAX_PLAYLIST_TRACKS", maxPlaylistTracks, 1, 1000); err != nil {

@@ -43,6 +43,24 @@ func TestJobGateBoundsWorkersAndQueue(t *testing.T) {
 	}
 }
 
+func TestDefaultDownloadGateRunsSevenWithoutWaitingQueue(t *testing.T) {
+	gate := newJobGate(maxParallelDownloads, 0)
+	releases := make([]func(), 0, maxParallelDownloads)
+	for i := 0; i < maxParallelDownloads; i++ {
+		_, release, err := gate.acquire(context.Background())
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i+1, err)
+		}
+		releases = append(releases, release)
+	}
+	if _, _, err := gate.acquire(context.Background()); !errors.Is(err, errQueueFull) {
+		t.Fatalf("eighth acquire err=%v, want errQueueFull", err)
+	}
+	for _, release := range releases {
+		release()
+	}
+}
+
 func TestJobGateIsFIFO(t *testing.T) {
 	gate := newJobGate(1, 3)
 	_, release, err := gate.acquire(context.Background())

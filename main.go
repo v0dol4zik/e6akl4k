@@ -23,7 +23,7 @@ const (
 	playlistZIPThreshold       = 10
 	maxPlaylistTracks          = 75
 	maxTitleLength             = 200
-	maxParallelDownloads       = 2
+	maxParallelDownloads       = 7
 	maxStoredEntries           = 5000
 	pendingURLTTL              = time.Hour
 )
@@ -79,7 +79,7 @@ type app struct {
 }
 
 func newApp(ctx context.Context, bot *tgbotapi.BotAPI, downloader *downloader) *app {
-	cfg := config{DownloadWorkers: maxParallelDownloads, DownloadQueueSize: 20, LookupWorkers: 2, LookupQueueSize: 40, RateLimit: 12, RateWindow: time.Minute, CacheTTL: 180 * 24 * time.Hour, MaxFileSize: maxFileSize, MaxPlaylistTracks: maxPlaylistTracks}
+	cfg := config{DownloadWorkers: maxParallelDownloads, LookupWorkers: 2, LookupQueueSize: 40, RateLimit: 12, RateWindow: time.Minute, CacheTTL: 180 * 24 * time.Hour, MaxFileSize: maxFileSize, MaxPlaylistTracks: maxPlaylistTracks}
 	return newAppWithServices(ctx, bot, downloader, nil, cfg)
 }
 

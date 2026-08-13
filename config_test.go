@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
-	keys := []string{"BOT_TOKEN", "CACHE_CHAT_ID", "INLINE_CACHE_CHAT_ID", "DOWNLOAD_WORKERS", "RATE_WINDOW", "ADMIN_IDS", "MAX_FILE_SIZE", "XDG_DATA_HOME"}
+	keys := []string{"BOT_TOKEN", "CACHE_CHAT_ID", "INLINE_CACHE_CHAT_ID", "DOWNLOAD_WORKERS", "DOWNLOAD_QUEUE_SIZE", "RATE_WINDOW", "ADMIN_IDS", "MAX_FILE_SIZE", "XDG_DATA_HOME"}
 	for _, key := range keys {
 		key := key
 		old, ok := os.LookupEnv(key)
@@ -36,6 +36,9 @@ func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
 	}
 	if cfg.MaxFileSize != maxFileSize {
 		t.Fatalf("unbounded file size=%d", cfg.MaxFileSize)
+	}
+	if cfg.DownloadQueueSize != 0 {
+		t.Fatalf("download queue size=%d, want no waiting queue", cfg.DownloadQueueSize)
 	}
 }
 

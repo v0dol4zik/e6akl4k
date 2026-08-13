@@ -24,6 +24,7 @@ services:
       - type: bind
         source: ./cookies.txt
         target: /app/cookies.txt
+        read_only: true
         bind:
           create_host_path: false
     read_only: true

@@ -167,17 +167,6 @@ func TestInlineHelpers(t *testing.T) {
 	}
 }
 
-func TestCookieLockHonorsContextCancellation(t *testing.T) {
-	d := downloader{cookiesFile: "cookies.txt"}
-	d.cookieLockOnce.Do(func() { d.cookieLock = make(chan struct{}, 1) })
-	d.cookieLock <- struct{}{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := d.acquireCookieLock(ctx); err == nil {
-		t.Fatal("cancelled context acquired the cookie lock")
-	}
-}
-
 func TestInlineLookupBuildsSearchCandidates(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "fake-yt-dlp")
 	script := `#!/bin/sh

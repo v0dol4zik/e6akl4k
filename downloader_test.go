@@ -142,25 +142,20 @@ func TestManifestLineCount(t *testing.T) {
 	}
 }
 
-func TestLookupCookiesUseIsolatedSnapshot(t *testing.T) {
+func TestOperationsUseIsolatedCookieSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	cookies := filepath.Join(dir, "cookies.txt")
 	if err := os.WriteFile(cookies, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d := &downloader{downloadDir: dir, cookiesFile: cookies, cookieConcurrency: 1}
+	d := &downloader{downloadDir: dir, cookiesFile: cookies}
 	if err := d.refreshCookieSnapshot(); err != nil {
 		t.Fatal(err)
 	}
-	release, err := d.acquireCookieLock(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
 	if err := os.WriteFile(cookies, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, cleanup, err := d.lookupCookieFile()
+	snapshot, cleanup, err := d.isolatedCookieFile()
 	if err != nil {
 		t.Fatal(err)
 	}

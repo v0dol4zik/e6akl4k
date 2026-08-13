@@ -59,7 +59,7 @@ var texts = map[string]map[string]string{
 	"btn_range_25":         {"ru": "2️⃣5️⃣ первые 25", "en": "2️⃣5️⃣ first 25"},
 	"btn_range_limit":      {"ru": "📚 первые {limit}", "en": "📚 first {limit}"},
 	"btn_range_custom":     {"ru": "🎵 {start}–{end}", "en": "🎵 {start}–{end}"},
-	"queue_full":           {"ru": "⚠️ очередь сейчас заполнена. попробуй немного позже.", "en": "⚠️ the queue is full. please try again later."},
+	"queue_full":           {"ru": "⚠️ бот сейчас занят. попробуй немного позже.", "en": "⚠️ the bot is busy. please try again later."},
 	"queued":               {"ru": "🕒 <b>загрузка в очереди</b>\nпозиция: {position}", "en": "🕒 <b>download queued</b>\nposition: {position}"},
 	"archive_queued":       {"ru": "🕒 <b>архивация в очереди</b>\nпозиция: {position}", "en": "🕒 <b>archiving queued</b>\nposition: {position}"},
 	"rate_limited":         {"ru": "⏳ слишком много запросов. попробуй через {seconds} сек.", "en": "⏳ too many requests. try again in {seconds} sec."},
