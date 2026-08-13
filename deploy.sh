@@ -164,7 +164,7 @@ database_backup="$backup_dir/musicbot-$timestamp.db"
 env_backup="$backup_dir/env-$timestamp"
 cookies_backup="$backup_dir/cookies-$timestamp.txt"
 backup_files=("$env_backup" "$cookies_backup")
-if [[ -f "$database_path" ]]; then
+if $SUDO test -f "$database_path"; then
 	$SUDO sqlite3 "$database_path" ".backup '$database_backup'"
 	backup_files+=("$database_backup")
 fi
