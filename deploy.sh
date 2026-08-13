@@ -85,8 +85,8 @@ token=""
 $SUDO chown "$OWNER_UID:$OWNER_GID" "$env_file"
 $SUDO chmod 0600 "$env_file"
 
-$SUDO apt-get update
-$SUDO apt-get install -y ca-certificates curl sqlite3
+$SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update
+$SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y ca-certificates curl sqlite3
 
 install_docker() {
   docker_arch="$(dpkg --print-architecture)"
@@ -98,8 +98,8 @@ install_docker() {
   printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
     "$docker_arch" "$ID" "$VERSION_CODENAME" \
     | $SUDO tee /etc/apt/sources.list.d/docker.list >/dev/null
-  $SUDO apt-get update
-  $SUDO apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update
+  $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 }
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -111,7 +111,8 @@ if ! $SUDO docker info >/dev/null 2>&1; then
   exit 1
 fi
 if ! $SUDO docker compose version >/dev/null 2>&1; then
-  if ! $SUDO apt-get install -y docker-compose-plugin && ! $SUDO apt-get install -y docker-compose-v2; then
+  if ! $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y docker-compose-plugin \
+    && ! $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y docker-compose-v2; then
     echo "Не удалось установить Docker Compose v2." >&2
     exit 1
   fi
