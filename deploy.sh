@@ -88,6 +88,67 @@ $SUDO chmod 0600 "$env_file"
 $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update
 $SUDO env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y ca-certificates curl sqlite3
 
+harden_ssh_if_safe() {
+  local sshd_bin="/usr/sbin/sshd"
+  local ssh_config_dir="/etc/ssh/sshd_config.d"
+  local ssh_config="$ssh_config_dir/00-key-only.conf"
+  local login_user="${SUDO_USER:-$(id -un)}"
+  local login_home=""
+  local authorized_keys=""
+  local candidate=""
+  local previous=""
+  local had_previous=false
+  local effective=""
+
+  if ! $SUDO test -x "$sshd_bin" || ! $SUDO test -d "$ssh_config_dir"; then
+    echo "SSH hardening пропущен: OpenSSH server или sshd_config.d не найдены."
+    return
+  fi
+  login_home="$(getent passwd "$login_user" | cut -d: -f6)"
+  authorized_keys="$login_home/.ssh/authorized_keys"
+  if [[ -z "$login_home" ]] || ! $SUDO test -s "$authorized_keys"; then
+    echo "SSH hardening пропущен: у $login_user нет authorized_keys; парольный вход не отключаю, чтобы не потерять доступ."
+    return
+  fi
+
+  candidate="$(mktemp)"
+  previous="$(mktemp)"
+  printf '%s\n' \
+    'PasswordAuthentication no' \
+    'KbdInteractiveAuthentication no' \
+    'ChallengeResponseAuthentication no' \
+    'PubkeyAuthentication yes' > "$candidate"
+  if $SUDO test -f "$ssh_config"; then
+    $SUDO cp "$ssh_config" "$previous"
+    had_previous=true
+  fi
+  $SUDO install -o root -g root -m 0644 "$candidate" "$ssh_config"
+  rm -f "$candidate"
+
+  effective="$($SUDO "$sshd_bin" -T 2>/dev/null || true)"
+  if ! $SUDO "$sshd_bin" -t \
+    || ! grep -qx 'passwordauthentication no' <<< "$effective" \
+    || ! grep -qx 'kbdinteractiveauthentication no' <<< "$effective" \
+    || ! grep -qx 'pubkeyauthentication yes' <<< "$effective"; then
+    if [[ "$had_previous" == true ]]; then
+      $SUDO install -o root -g root -m 0644 "$previous" "$ssh_config"
+    else
+      $SUDO rm -f "$ssh_config"
+    fi
+    rm -f "$previous"
+    echo "SSH hardening не применён: итоговая конфигурация sshd не прошла проверку." >&2
+    return 1
+  fi
+  rm -f "$previous"
+
+  if ! $SUDO systemctl reload ssh 2>/dev/null; then
+    $SUDO systemctl reload sshd
+  fi
+  echo "SSH защищён: парольный вход отключён, public-key вход включён."
+}
+
+harden_ssh_if_safe
+
 install_docker() {
   docker_arch="$(dpkg --print-architecture)"
   key_file="$(mktemp)"
