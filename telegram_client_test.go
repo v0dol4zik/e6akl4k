@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,6 +61,27 @@ func TestMediaGroupFallbackOnlyForDefinitiveClientErrors(t *testing.T) {
 	if canFallbackToIndividual(&tgbotapi.Error{Code: http.StatusTooManyRequests}) {
 		t.Fatal("rate limit should not immediately fan out to individual sends")
 	}
+}
+
+func TestTelegramHTTPClientRedactsSecrets(t *testing.T) {
+	const secret = "123456:super-secret-token"
+	client := redactingHTTPClient{
+		client:  &http.Client{Transport: failingRoundTripper{secret: secret}},
+		secrets: []string{secret},
+	}
+	request, err := http.NewRequest(http.MethodPost, "https://telegram.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Do(request); err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("unredacted error=%v", err)
+	}
+}
+
+type failingRoundTripper struct{ secret string }
+
+func (t failingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("request https://api.telegram.org/bot%s/getUpdates failed", t.secret)
 }
 
 func retryTestBot(t *testing.T, method string, failures int32) (*tgbotapi.BotAPI, *atomic.Int32) {

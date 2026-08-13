@@ -23,6 +23,25 @@ type deadlineTransport struct {
 	pollLimit    time.Duration
 }
 
+type redactingHTTPClient struct {
+	client  *http.Client
+	secrets []string
+}
+
+func (c redactingHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	response, err := c.client.Do(request)
+	if err == nil {
+		return response, nil
+	}
+	message := err.Error()
+	for _, secret := range c.secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	return nil, errors.New(message)
+}
+
 func (t deadlineTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	limit := t.requestLimit
 	if strings.HasSuffix(request.URL.Path, "/getUpdates") {

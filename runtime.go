@@ -79,15 +79,15 @@ func main() {
 	if err := state.cleanup(context.Background(), cfg.CacheTTL); err != nil {
 		log.Printf("Очистить старый кэш: %v", err)
 	}
-	telegramHTTP := &http.Client{
+	telegramHTTP := redactingHTTPClient{client: &http.Client{
 		Transport: deadlineTransport{base: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: 0,
 			IdleConnTimeout:       90 * time.Second,
 		}, requestLimit: telegramRequestTimeout, uploadLimit: telegramUploadTimeout, pollLimit: 75 * time.Second},
-	}
+	}, secrets: []string{cfg.BotToken}}
 	bot, err := tgbotapi.NewBotAPIWithClient(cfg.BotToken, tgbotapi.APIEndpoint, telegramHTTP)
 	if err != nil {
 		log.Fatalf("Не удалось подключиться к Telegram: %v", err)
