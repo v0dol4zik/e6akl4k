@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -19,6 +20,66 @@ func TestTranslationsCoverEveryLanguage(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestTranslationsUseLowercaseStyle(t *testing.T) {
+	protected := []string{
+		"AAC", "Apple", "Audiomack", "Bandcamp", "Daft", "Deezer", "FLAC", "M4A",
+		"Mixcloud", "MP3", "OGG", "SoundCloud", "Spotify", "Tidal", "VK", "Yandex",
+		"YouTube", "ZIP",
+	}
+	check := func(key, lang, value string) {
+		t.Helper()
+		plain := stripHTMLTags(value)
+		segments := strings.FieldsFunc(plain, func(r rune) bool {
+			return r == '\n' || r == '.' || r == '!' || r == '?' || r == '…' || r == ':'
+		})
+		for _, segment := range segments {
+			segment = strings.TrimSpace(segment)
+			for i, r := range segment {
+				if !unicode.IsLetter(r) {
+					continue
+				}
+				rest := segment[i:]
+				allowed := false
+				for _, prefix := range protected {
+					if strings.HasPrefix(rest, prefix) {
+						allowed = true
+						break
+					}
+				}
+				if !unicode.IsLower(r) && !allowed {
+					t.Errorf("%s/%s starts a text segment with uppercase: %q", key, lang, segment)
+				}
+				break
+			}
+		}
+	}
+
+	for key, translations := range texts {
+		for _, lang := range languageOrder {
+			check(key, lang, translations[lang])
+		}
+	}
+	check("choose_language", "ru+en", chooseLanguageText)
+}
+
+func stripHTMLTags(value string) string {
+	var result strings.Builder
+	inTag := false
+	for _, r := range value {
+		switch r {
+		case '<':
+			inTag = true
+		case '>':
+			inTag = false
+		default:
+			if !inTag {
+				result.WriteRune(r)
+			}
+		}
+	}
+	return result.String()
 }
 
 func TestUserGuidesExplainNewFeatures(t *testing.T) {
@@ -90,7 +151,7 @@ func TestHelpCommandSendsLocalizedHTMLGuide(t *testing.T) {
 		From:     &tgbotapi.User{ID: 10},
 		Chat:     &tgbotapi.Chat{ID: 10, Type: "private"},
 	})
-	if parseMode != "HTML" || !strings.Contains(sentText, "@guide_bot") || !strings.Contains(sentText, "Поиск по названию") {
+	if parseMode != "HTML" || !strings.Contains(sentText, "@guide_bot") || !strings.Contains(sentText, "поиск по названию") {
 		t.Fatalf("unexpected help response: parse_mode=%q text=%q", parseMode, sentText)
 	}
 }
