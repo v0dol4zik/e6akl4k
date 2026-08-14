@@ -1,0 +1,65 @@
+---
+stages:
+  - test
+  - build
+  - release
+
+variables:
+  GOCACHE: $CI_PROJECT_DIR/.cache/go-build
+  GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
+
+default:
+  interruptible: true
+  cache:
+    key: go-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cache/go-build/
+      - .cache/go-mod/
+
+go_quality:
+  stage: test
+  image: golang:1.26.5-bookworm
+  timeout: 15m
+  script:
+    - go test -race -covermode=atomic -coverprofile=coverage.out ./...
+    - go vet ./...
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+    - govulncheck ./...
+    - go build -trimpath ./...
+    - go tool cover -func=coverage.out
+  coverage: '/total:.*\(statements\).*?(\d+(?:\.\d+)?%)/'
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - coverage.out
+
+docker_build:
+  stage: build
+  image: docker:24.0.5-cli
+  timeout: 30m
+  services:
+    - name: docker:24.0.5-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - docker info
+  script:
+    - docker build --tag "musicbot:$CI_COMMIT_SHA" .
+
+publish_release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/cli:latest
+  timeout: 5m
+  interruptible: false
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo "Publishing $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "e6akl4k $CI_COMMIT_TAG"
+    description: "Release notes are available in CHANGELOG.md."

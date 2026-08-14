@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/d6xd/e6akl4k/actions/workflows/ci.yml"><img src="https://github.com/d6xd/e6akl4k/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://github.com/d6xd/e6akl4k/releases"><img src="https://img.shields.io/github/v/release/d6xd/e6akl4k?include_prereleases" alt="Latest release"></a>
+  <a href="https://gitlab.com/d6xd/e6akl4k/-/pipelines"><img src="https://gitlab.com/d6xd/e6akl4k/badges/main/pipeline.svg?ignore_skipped=true" alt="Pipeline status"></a>
+  <a href="https://gitlab.com/d6xd/e6akl4k/-/releases"><img src="https://gitlab.com/d6xd/e6akl4k/-/badges/release.svg" alt="Latest release"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26"></a>
   <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker ready"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/d6xd/e6akl4k" alt="MIT license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
 ## Contents
@@ -44,7 +44,7 @@ The project is designed for small private installations: a personal bot shared w
 On a fresh Debian or Ubuntu server:
 
 ```bash
-git clone https://github.com/d6xd/e6akl4k.git
+git clone https://gitlab.com/d6xd/e6akl4k.git
 cd e6akl4k
 chmod +x deploy.sh
 ./deploy.sh

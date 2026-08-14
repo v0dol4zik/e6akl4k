@@ -10,13 +10,14 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 - English project homepage with a linked Russian version.
 - Project logo, hero artwork, status badges, and focused documentation pages.
-- MIT license and automated GitHub Release creation for version tags.
+- MIT license and automated GitLab Release creation for version tags.
 
 ### Changed
 
+- Migrated the primary repository, CI pipeline, badges, and automated releases from GitHub to GitLab.
 - Increased the default download concurrency to seven jobs without a waiting download queue.
 - Restored lowercase Russian and English user-facing locale text.
-- Updated CI actions and split Go quality checks from the Docker build.
+- Updated CI images and split Go quality checks from the Docker build.
 
 ## [v2026.08.13] - 2026-08-13
 
@@ -32,5 +33,5 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Added safe SSH hardening that disables password authentication only after validating an installed public key.
 - Tightened container permissions and protected deployment secrets and backups.
 
-[v2026.08.14]: https://github.com/d6xd/e6akl4k/compare/v2026.08.13...v2026.08.14
-[v2026.08.13]: https://github.com/d6xd/e6akl4k/releases/tag/v2026.08.13
+[v2026.08.14]: https://gitlab.com/d6xd/e6akl4k/-/compare/v2026.08.13...v2026.08.14
+[v2026.08.13]: https://gitlab.com/d6xd/e6akl4k/-/tags/v2026.08.13
