@@ -1,4 +1,8 @@
-# e6akl4k music downloader bot
+<p align="center">
+  <img src="assets/logo.svg" alt="Go gopher слушает музыку и играет на клавишах" width="260">
+</p>
+
+<h1 align="center">e6akl4k music downloader bot</h1>
 
 > [English version](README.md)
 
@@ -188,3 +192,7 @@ docker compose config --quiet
 ```
 
 CI также собирает бинарник и Docker-образ. Тесты покрывают SQLite, TTL кэша, очереди, rate limit, дедупликацию, диапазоны плейлистов, ZIP-разбиение, resolver и повторную отправку через Telegram `file_id`.
+
+## Лицензия
+
+Исходный код распространяется по [лицензии MIT](LICENSE). Логотип проекта доступен по CC0 1.0; подробности указаны в [описании ассетов](assets/README.md).

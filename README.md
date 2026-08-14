@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/hero.webp" alt="e6akl4k music downloader bot" width="100%">
+  <img src="assets/logo.svg" alt="Go gopher listening to music and playing a keyboard" width="260">
 </p>
 
 <h1 align="center">e6akl4k music downloader bot</h1>
@@ -90,4 +90,4 @@ Metadata-only services are never presented as direct audio sources. The bot sear
 
 ## License
 
-Distributed under the [MIT License](LICENSE).
+The source code is distributed under the [MIT License](LICENSE). The project logo is available under CC0 1.0; see the [asset credits](assets/README.md).

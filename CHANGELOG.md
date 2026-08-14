@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additional numeric component distinguishes multiple releases on the same day.
 
+## [Unreleased]
+
+### Changed
+
+- Replaced the generated project branding with the CC0 music gopher artwork.
+
 ## [v2026.08.14] - 2026-08-14
 
 ### Added
