@@ -1,41 +1,72 @@
-name: ci
+name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Go quality checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.26.5'
+          go-version-file: go.mod
           cache: true
-      - run: go test -race -coverprofile=coverage.out ./...
-      - run: go vet ./...
+          cache-dependency-path: go.sum
+
+      - name: Test with the race detector
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Vet
+        run: go vet ./...
+
       - name: Vulnerability scan
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
-      - run: go build -trimpath ./...
-      - uses: actions/upload-artifact@v4
+
+      - name: Build
+        run: go build -trimpath ./...
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
         with:
           name: coverage
           path: coverage.out
+          if-no-files-found: error
 
   container:
+    name: Docker build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build container
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
-          load: true
           tags: musicbot:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
