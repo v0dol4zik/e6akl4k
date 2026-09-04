@@ -364,3 +364,117 @@ func TestIncomingURLWithDefaultPreferenceSkipsFormatKeyboard(t *testing.T) {
 		t.Fatalf("history format=%q err=%v", historyFormat, err)
 	}
 }
+
+func TestHistoryCommandAndCachedRedelivery(t *testing.T) {
+	type sent struct {
+		method string
+		text   string
+		markup string
+		audio  string
+		chatID string
+	}
+	var mu sync.Mutex
+	var calls []sent
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = r.ParseForm()
+		method := filepath.Base(r.URL.Path)
+		switch method {
+		case "getMe":
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+			return
+		case "sendMessage", "editMessageText", "sendAudio", "sendDocument":
+			mu.Lock()
+			calls = append(calls, sent{method: method, text: r.FormValue("text"), markup: r.FormValue("reply_markup"), audio: r.FormValue("audio"), chatID: r.FormValue("chat_id")})
+			mu.Unlock()
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"text":"x"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	})
+	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour}
+	app := newAppWithServices(ctx, bot, &downloader{downloadDir: t.TempDir()}, state, cfg)
+	app.setLang(10, "en")
+	app.setLang(11, "en")
+	snapshot := func() []sent {
+		mu.Lock()
+		defer mu.Unlock()
+		out := append([]sent(nil), calls...)
+		calls = nil
+		return out
+	}
+	command := func(userID int64) *tgbotapi.Message {
+		return &tgbotapi.Message{Text: "/history", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 8}}, From: &tgbotapi.User{ID: userID}, Chat: &tgbotapi.Chat{ID: userID, Type: "private"}}
+	}
+	callback := func(userID int64, data string) *tgbotapi.CallbackQuery {
+		return &tgbotapi.CallbackQuery{ID: "cb", From: &tgbotapi.User{ID: userID}, Message: &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: userID, Type: "private"}}, Data: data}
+	}
+
+	app.handleMessage(command(10))
+	got := snapshot()
+	if len(got) != 1 || got[0].method != "sendMessage" || got[0].text != tr("history_empty", "en") || got[0].markup != "" {
+		t.Fatalf("empty history: %#v", got)
+	}
+
+	state.recordDownload(ctx, 10, "youtube.com", "mp3:320", "delivered", time.Second, "", "youtube:gone:mp3:320", "Gone", "Nobody")
+	state.recordDownload(ctx, 10, "youtube.com", "mp3:320", "delivered", time.Second, "", "octave:11:mp3:320", "Track", "Artist")
+	if err := state.putCachedAudio(ctx, cachedAudio{Key: "octave:11:mp3:320", FileID: "cached-file", Title: "Track", Artist: "Artist", Format: "mp3", Quality: "320"}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := state.recentDownloads(ctx, 10, historyLimit)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items=%#v err=%v", items, err)
+	}
+	cachedID, expiredID := items[0].ID, items[1].ID
+
+	app.handleMessage(command(10))
+	got = snapshot()
+	if len(got) != 1 || got[0].method != "sendMessage" || !strings.Contains(got[0].text, "Artist — Track") || !strings.Contains(got[0].text, "Nobody — Gone") {
+		t.Fatalf("history listing: %#v", got)
+	}
+	for _, want := range []string{fmt.Sprintf(`"hist:%d"`, cachedID), fmt.Sprintf(`"hist:%d"`, expiredID), `"hist:clear"`} {
+		if !strings.Contains(got[0].markup, want) {
+			t.Fatalf("history keyboard must contain %s: %s", want, got[0].markup)
+		}
+	}
+
+	app.handleCallback(callback(11, fmt.Sprintf("hist:%d", cachedID)))
+	if got = snapshot(); len(got) != 0 {
+		t.Fatalf("another user's history button must be ignored: %#v", got)
+	}
+
+	app.handleCallback(callback(10, fmt.Sprintf("hist:%d", cachedID)))
+	got = snapshot()
+	if len(got) != 1 || got[0].method != "sendAudio" || got[0].audio != "cached-file" || got[0].chatID != "10" {
+		t.Fatalf("cached history entry must be re-sent by file_id: %#v", got)
+	}
+	stats, err := state.stats(ctx)
+	if err != nil || stats.CacheHits != 1 {
+		t.Fatalf("cache hits=%d err=%v", stats.CacheHits, err)
+	}
+
+	app.handleCallback(callback(10, fmt.Sprintf("hist:%d", expiredID)))
+	got = snapshot()
+	if len(got) != 1 || got[0].method != "sendMessage" || got[0].text != tr("history_expired", "en") {
+		t.Fatalf("expired history entry: %#v", got)
+	}
+
+	app.handleCallback(callback(10, "hist:clear"))
+	got = snapshot()
+	if len(got) != 1 || got[0].method != "editMessageText" || got[0].text != tr("history_cleared", "en") {
+		t.Fatalf("clear history: %#v", got)
+	}
+	if items, err := state.recentDownloads(ctx, 10, historyLimit); err != nil || len(items) != 0 {
+		t.Fatalf("history must be empty after clearing: %#v err=%v", items, err)
+	}
+}

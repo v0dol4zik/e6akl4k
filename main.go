@@ -183,6 +183,12 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 			} else {
 				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 			}
+		case "history":
+			if lang, ok := a.getLang(userID); ok {
+				a.sendHistory(message.Chat.ID, userID, lang)
+			} else {
+				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
+			}
 		default:
 			handled = false
 		}
@@ -243,6 +249,8 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		}
 	case strings.HasPrefix(data, "pref:"):
 		a.handlePreferenceChoice(callback)
+	case strings.HasPrefix(data, "hist:"):
+		a.handleHistoryChoice(callback)
 	case strings.HasPrefix(data, "cancel:"):
 		a.handlePendingCancel(callback)
 	case strings.HasPrefix(data, "cancel_download:"):
@@ -306,6 +314,13 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 	historyStarted := time.Now()
 	historyStatus := "failed"
 	historyError := ""
+	historyKey := ""
+	if !pending.Preview.IsPlaylist {
+		historyKey = sourceCacheKey(pending.Preview.Extractor, pending.Preview.SourceID, format, quality)
+		if historyKey == "" {
+			historyKey = generalCacheKey(url, format, quality)
+		}
+	}
 	starting := a.appliedPreferenceHint(userID, format, quality, lang) + tr("download_starting", lang)
 	status := showStatus(starting, "HTML", nil)
 
@@ -317,7 +332,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 	downloadCtx, cancel := context.WithCancel(a.ctx)
 	defer func() {
 		if a.store != nil {
-			a.store.recordDownload(a.ctx, userID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), historyError)
+			a.store.recordDownload(a.ctx, userID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), historyError, historyKey, pending.Preview.Title, pending.Preview.Artist)
 		}
 		if historyStatus == "delivered" || historyStatus == "partial" {
 			a.deleteStatusMessage(status)
@@ -612,6 +627,71 @@ func (a *app) handlePreferenceChoice(callback *tgbotapi.CallbackQuery) {
 		return
 	}
 	a.safeEdit(callback, tr("settings_saved", lang, "value", preferenceLabel(format, quality, lang)), "HTML", nil)
+}
+
+const historyLimit = 10
+
+// sendHistory lists the user's recent cached downloads with one re-delivery button per item.
+func (a *app) sendHistory(chatID, userID int64, lang string) {
+	var items []historyItem
+	if a.store != nil {
+		var err error
+		if items, err = a.store.recentDownloads(a.ctx, userID, historyLimit); err != nil {
+			log.Printf("Не удалось прочитать историю user_id=%d: %v", userID, err)
+		}
+	}
+	if len(items) == 0 {
+		a.sendText(chatID, tr("history_empty", lang), "HTML", nil)
+		return
+	}
+	a.sendText(chatID, historyText(items, lang), "HTML", historyKeyboard(items, lang))
+}
+
+// handleHistoryChoice re-sends a cached track from "hist:<id>" or clears the history on "hist:clear".
+// History never starts a new download: an expired cache entry only asks for the link again.
+func (a *app) handleHistoryChoice(callback *tgbotapi.CallbackQuery) {
+	if a.store == nil {
+		return
+	}
+	userID := callback.From.ID
+	lang := a.langOrDefault(userID)
+	chatID := userID
+	if callback.Message != nil && callback.Message.Chat != nil {
+		chatID = callback.Message.Chat.ID
+	}
+	payload := strings.TrimPrefix(callback.Data, "hist:")
+	if payload == "clear" {
+		if err := a.store.clearHistory(a.ctx, userID); err != nil {
+			log.Printf("Не удалось очистить историю user_id=%d: %v", userID, err)
+			a.safeEdit(callback, tr("download_error", lang, "error", tr("unknown_error", lang)), "HTML", nil)
+			return
+		}
+		a.safeEdit(callback, tr("history_cleared", lang), "HTML", nil)
+		return
+	}
+	id, err := strconv.ParseInt(payload, 10, 64)
+	if err != nil || id <= 0 {
+		return
+	}
+	item, ok := a.store.historyEntry(a.ctx, userID, id)
+	if !ok || item.CacheKey == "" {
+		return
+	}
+	entry, ok := a.store.cachedAudio(a.ctx, item.CacheKey, a.cfg.CacheTTL)
+	if !ok {
+		a.sendText(chatID, tr("history_expired", lang), "HTML", nil)
+		return
+	}
+	if err := a.sendCachedAudio(chatID, entry, lang); err != nil {
+		if invalidCachedFileError(err) {
+			a.store.deleteCachedAudio(a.ctx, item.CacheKey)
+			a.sendText(chatID, tr("history_expired", lang), "HTML", nil)
+			return
+		}
+		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+		return
+	}
+	a.store.increment(a.ctx, "cache_hits")
 }
 
 func (a *app) settingsText(userID int64, lang string) string {

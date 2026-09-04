@@ -288,6 +288,7 @@ func botCommands(lang string, _ bool) []tgbotapi.BotCommand {
 		{Command: "help", Description: tr("command_help", lang)},
 		{Command: "language", Description: tr("command_language", lang)},
 		{Command: "settings", Description: tr("command_settings", lang)},
+		{Command: "history", Description: tr("command_history", lang)},
 		{Command: "id", Description: tr("command_id", lang)},
 	}
 }

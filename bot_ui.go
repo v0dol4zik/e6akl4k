@@ -59,6 +59,44 @@ func settingsKeyboard(lang string) *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
+// historyLabel renders one /history entry as "artist — title" or a fallback on the cache key.
+func historyLabel(item historyItem) string {
+	title := strings.TrimSpace(item.Title)
+	artist := strings.TrimSpace(item.Artist)
+	switch {
+	case title != "" && artist != "":
+		return artist + " — " + title
+	case title != "":
+		return title
+	case artist != "":
+		return artist
+	default:
+		return item.CacheKey
+	}
+}
+
+func historyText(items []historyItem, lang string) string {
+	lines := make([]string, 0, len(items)+1)
+	lines = append(lines, tr("history_title", lang))
+	for index, item := range items {
+		format := strings.ToUpper(strings.SplitN(item.Format, ":", 2)[0])
+		lines = append(lines, fmt.Sprintf("%d. %s · %s", index+1, html.EscapeString(historyLabel(item)), html.EscapeString(format)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// historyKeyboard offers one "hist:<id>" button per entry plus a "hist:clear" button.
+func historyKeyboard(items []historyItem, lang string) *tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(items)+1)
+	for index, item := range items {
+		label := shortenRunes(fmt.Sprintf("%d. %s", index+1, historyLabel(item)), 40)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(label, "hist:"+strconv.FormatInt(item.ID, 10))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_history_clear", lang), "hist:clear")))
+	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	return &markup
+}
+
 // preferenceLabel renders a stored default; an empty format means "ask each time".
 func preferenceLabel(format, quality, lang string) string {
 	if format == "" {

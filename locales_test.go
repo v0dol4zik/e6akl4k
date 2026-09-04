@@ -109,7 +109,7 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 func TestBotCommandsAreLocalized(t *testing.T) {
 	ru := botCommands("ru", false)
 	en := botCommands("en", false)
-	if len(ru) != 5 || len(en) != 5 || ru[1].Description == en[1].Description || ru[3].Command != "settings" || ru[4].Command != "id" {
+	if len(ru) != 6 || len(en) != 6 || ru[1].Description == en[1].Description || ru[3].Command != "settings" || ru[4].Command != "history" || ru[5].Command != "id" {
 		t.Fatalf("unexpected localized commands: ru=%#v en=%#v", ru, en)
 	}
 	admin := botCommands("en", true)

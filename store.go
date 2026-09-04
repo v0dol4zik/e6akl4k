@@ -28,6 +28,16 @@ type cachedAudio struct {
 	UpdatedAt time.Time
 }
 
+// historyItem is one delivered download shown by /history.
+type historyItem struct {
+	ID        int64
+	CacheKey  string
+	Title     string
+	Artist    string
+	Format    string
+	CreatedAt time.Time
+}
+
 type statsSnapshot struct {
 	StartedAt        time.Time
 	DownloadsOK      int64
@@ -204,13 +214,17 @@ CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 		`ALTER TABLE audio_cache ADD COLUMN media_type TEXT NOT NULL DEFAULT 'audio'`,
 		`ALTER TABLE users ADD COLUMN default_format TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN default_quality TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE download_history ADD COLUMN cache_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE download_history ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE download_history ADD COLUMN artist TEXT NOT NULL DEFAULT ''`,
 	} {
 		_, err = s.db.ExecContext(ctx, statement)
 		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
-	return nil
+	_, err = s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS download_history_user_id ON download_history(user_id, id)`)
+	return err
 }
 
 func (s *store) addAdmin(ctx context.Context, userID, actorID int64) (bool, error) {
@@ -362,11 +376,55 @@ func (s *store) userInfo(ctx context.Context, userID int64) (userInfo, bool, err
 	return item, true, nil
 }
 
-func (s *store) recordDownload(ctx context.Context, userID int64, source, format, status string, elapsed time.Duration, message string) {
+func (s *store) recordDownload(ctx context.Context, userID int64, source, format, status string, elapsed time.Duration, message, cacheKey, title, artist string) {
 	if len(message) > 500 {
 		message = message[:500]
 	}
-	_, _ = s.db.ExecContext(ctx, `INSERT INTO download_history(user_id,source,format,status,elapsed_ms,error,created_at) VALUES(?,?,?,?,?,?,unixepoch())`, userID, source, format, status, elapsed.Milliseconds(), message)
+	_, _ = s.db.ExecContext(ctx, `INSERT INTO download_history(user_id,source,format,status,elapsed_ms,error,cache_key,title,artist,created_at) VALUES(?,?,?,?,?,?,?,?,?,unixepoch())`, userID, source, format, status, elapsed.Milliseconds(), message, cacheKey, title, artist)
+}
+
+// recentDownloads returns the newest delivered downloads of a user with a cache key,
+// one row per cache key, newest first.
+func (s *store) recentDownloads(ctx context.Context, userID int64, limit int) ([]historyItem, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,cache_key,title,artist,format,created_at FROM download_history
+WHERE id IN (SELECT max(id) FROM download_history WHERE user_id=? AND status='delivered' AND cache_key<>'' GROUP BY cache_key)
+ORDER BY id DESC LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []historyItem
+	for rows.Next() {
+		var item historyItem
+		var created int64
+		if err := rows.Scan(&item.ID, &item.CacheKey, &item.Title, &item.Artist, &item.Format, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = time.Unix(created, 0)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// historyEntry returns one history row; ok is false when it does not belong to the user.
+func (s *store) historyEntry(ctx context.Context, userID, id int64) (historyItem, bool) {
+	var item historyItem
+	var created int64
+	err := s.db.QueryRowContext(ctx, `SELECT id,cache_key,title,artist,format,created_at FROM download_history WHERE id=? AND user_id=?`, id, userID).
+		Scan(&item.ID, &item.CacheKey, &item.Title, &item.Artist, &item.Format, &created)
+	if err != nil {
+		return historyItem{}, false
+	}
+	item.CreatedAt = time.Unix(created, 0)
+	return item, true
+}
+
+func (s *store) clearHistory(ctx context.Context, userID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM download_history WHERE user_id=?`, userID)
+	return err
 }
 
 func (s *store) Close() error { return s.db.Close() }

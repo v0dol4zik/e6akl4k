@@ -25,7 +25,7 @@ func TestStorePersistsLanguageCacheStatsAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.increment(ctx, "downloads_ok")
-	state.recordDownload(ctx, 42, "youtube.com", "mp3:320", "ok", time.Second, "")
+	state.recordDownload(ctx, 42, "youtube.com", "mp3:320", "ok", time.Second, "", "", "", "")
 	if err := state.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -245,5 +245,112 @@ INSERT INTO users(user_id, language, updated_at) VALUES(7, 'ru', 1)`); err != ni
 	}
 	if _, _, ok := state.userPreference(ctx, 999); ok {
 		t.Fatal("unknown user must have no preference")
+	}
+}
+
+func TestStoreMigratesDownloadHistoryOnExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE download_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  format TEXT NOT NULL,
+  status TEXT NOT NULL,
+  elapsed_ms INTEGER NOT NULL,
+  error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+INSERT INTO download_history(user_id,source,format,status,elapsed_ms,error,created_at) VALUES(7,'youtube.com','mp3:320','delivered',10,'',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	state, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := state.recentDownloads(ctx, 7, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("legacy rows without a cache key must stay hidden: %#v", items)
+	}
+	state.recordDownload(ctx, 7, "youtube.com", "mp3:320", "delivered", time.Second, "", "youtube:abc:mp3:320", "Track", "Artist")
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err = openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	items, err = state.recentDownloads(ctx, 7, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].CacheKey != "youtube:abc:mp3:320" || items[0].Title != "Track" || items[0].Artist != "Artist" || items[0].Format != "mp3:320" {
+		t.Fatalf("items=%#v", items)
+	}
+	var indexes int
+	if err := state.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='download_history_user_id'`).Scan(&indexes); err != nil || indexes != 1 {
+		t.Fatalf("index count=%d err=%v", indexes, err)
+	}
+}
+
+func TestStoreRecentDownloadsDedupesAndClears(t *testing.T) {
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	state.recordDownload(ctx, 1, "youtube.com", "mp3:320", "delivered", time.Second, "", "youtube:a:mp3:320", "Old A", "")
+	state.recordDownload(ctx, 1, "youtube.com", "flac:best", "delivered", time.Second, "", "youtube:b:flac:best", "B", "Artist B")
+	state.recordDownload(ctx, 1, "youtube.com", "mp3:320", "failed", time.Second, "boom", "youtube:c:mp3:320", "C", "")
+	state.recordDownload(ctx, 1, "youtube.com", "mp3:320", "partial", time.Second, "", "youtube:d:mp3:320", "D", "")
+	state.recordDownload(ctx, 1, "youtube.com", "mp3:320", "delivered", time.Second, "", "", "Playlist", "")
+	state.recordDownload(ctx, 1, "youtube.com", "mp3:320", "delivered", time.Second, "", "youtube:a:mp3:320", "New A", "Artist A")
+	state.recordDownload(ctx, 2, "youtube.com", "mp3:320", "delivered", time.Second, "", "youtube:e:mp3:320", "E", "")
+
+	items, err := state.recentDownloads(ctx, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].CacheKey != "youtube:a:mp3:320" || items[0].Title != "New A" || items[1].CacheKey != "youtube:b:flac:best" {
+		t.Fatalf("items=%#v", items)
+	}
+	if items[0].ID <= items[1].ID {
+		t.Fatalf("newest entry must come first: %#v", items)
+	}
+	limited, err := state.recentDownloads(ctx, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 || limited[0].CacheKey != "youtube:a:mp3:320" {
+		t.Fatalf("limited=%#v", limited)
+	}
+	if item, ok := state.historyEntry(ctx, 2, items[0].ID); ok {
+		t.Fatalf("another user's row must be invisible: %#v", item)
+	}
+	if item, ok := state.historyEntry(ctx, 1, items[0].ID); !ok || item.Title != "New A" {
+		t.Fatalf("item=%#v ok=%v", item, ok)
+	}
+
+	if err := state.clearHistory(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if items, err := state.recentDownloads(ctx, 1, 10); err != nil || len(items) != 0 {
+		t.Fatalf("history must be empty after clear: items=%#v err=%v", items, err)
+	}
+	if items, err := state.recentDownloads(ctx, 2, 10); err != nil || len(items) != 1 {
+		t.Fatalf("other users must keep their history: items=%#v err=%v", items, err)
 	}
 }

@@ -40,6 +40,7 @@
 - Monitor the bot through health checks, Prometheus metrics, `/perf`, redacted `/log` traces, bans, dynamic administrators, and an audit log.
 - Show a once-daily support note after a successful download, with a permanent one-tap opt-out.
 - Remember a default format and quality per user through `/settings`, so regular users skip the format keyboard while keeping playlist range and delivery choices.
+- Re-deliver recent tracks through `/history`: the last ten downloads come back instantly from the Telegram cache without a new download, and the list can be cleared with one tap.
 
 The project is designed for small private installations: a personal bot shared with friends, with enough safety and observability to run unattended on a VPS.
 
