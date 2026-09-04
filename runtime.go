@@ -70,6 +70,8 @@ func main() {
 		log.Fatal(err)
 	}
 	dl.maxPlaylistTracks = cfg.MaxPlaylistTracks
+	dl.ytdlpSleepRequests = cfg.YTDLPSleepRequests
+	dl.ytdlpFragments = cfg.YTDLPFragments
 	state, err := openStore(cfg.DatabasePath)
 	if err != nil {
 		log.Fatalf("Не удалось открыть SQLite: %v", err)
@@ -95,10 +97,20 @@ func main() {
 		log.Fatalf("Не удалось удалить webhook: %v", err)
 	}
 	log.Printf("Бот @%s запущен", bot.Self.UserName)
-	registerBotCommands(bot, cfg.AdminIDs)
+	adminIDs := make(map[int64]bool, len(cfg.AdminIDs))
+	for id := range cfg.AdminIDs {
+		adminIDs[id] = true
+	}
+	if records, adminErr := state.admins(context.Background()); adminErr == nil {
+		for _, record := range records {
+			adminIDs[record.UserID] = true
+		}
+	}
+	registerBotCommands(bot, adminIDs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	startMediaMetricsRecorder(ctx, state)
 	application := newAppWithServices(ctx, bot, dl, state, cfg)
 	_ = startHTTPServer(ctx, application, cfg.HTTPAddr)
 	application.startDiskMonitor(ctx)
@@ -250,30 +262,31 @@ func registerBotCommands(bot *tgbotapi.BotAPI, admins map[int64]bool) {
 		}
 	}
 	for adminID := range admins {
-		scope := tgbotapi.NewBotCommandScopeChat(adminID)
-		if _, err := bot.Request(tgbotapi.NewSetMyCommandsWithScope(scope, botCommands(defaultLang, true)...)); err != nil {
-			log.Printf("Установить админские команды %d: %v", adminID, err)
-		}
-		for _, lang := range languageOrder {
-			config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(scope, lang, botCommands(lang, true)...)
-			if _, err := bot.Request(config); err != nil {
-				log.Printf("Установить админские команды %d для языка %s: %v", adminID, lang, err)
-			}
+		registerChatCommands(bot, adminID, true)
+	}
+}
+
+func registerChatCommands(bot *tgbotapi.BotAPI, chatID int64, admin bool) {
+	if bot == nil {
+		return
+	}
+	scope := tgbotapi.NewBotCommandScopeChat(chatID)
+	if _, err := bot.Request(tgbotapi.NewSetMyCommandsWithScope(scope, botCommands(defaultLang, admin)...)); err != nil {
+		log.Printf("Установить команды %d: %v", chatID, err)
+	}
+	for _, lang := range languageOrder {
+		config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(scope, lang, botCommands(lang, admin)...)
+		if _, err := bot.Request(config); err != nil {
+			log.Printf("Установить команды %d для языка %s: %v", chatID, lang, err)
 		}
 	}
 }
 
-func botCommands(lang string, admin bool) []tgbotapi.BotCommand {
-	commands := []tgbotapi.BotCommand{
+func botCommands(lang string, _ bool) []tgbotapi.BotCommand {
+	return []tgbotapi.BotCommand{
 		{Command: "start", Description: tr("command_start", lang)},
 		{Command: "help", Description: tr("command_help", lang)},
 		{Command: "language", Description: tr("command_language", lang)},
+		{Command: "id", Description: tr("command_id", lang)},
 	}
-	if admin {
-		commands = append(commands,
-			tgbotapi.BotCommand{Command: "stats", Description: tr("command_stats", lang)},
-			tgbotapi.BotCommand{Command: "status", Description: tr("command_status", lang)},
-		)
-	}
-	return commands
 }

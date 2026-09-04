@@ -29,13 +29,17 @@ const (
 )
 
 type inlineCandidate struct {
-	URL       string
-	CacheKey  string
-	Title     string
-	Artist    string
-	Duration  string
-	UserID    int64
-	ExpiresAt time.Time
+	URL        string
+	CacheKey   string
+	Title      string
+	Artist     string
+	Duration   string
+	SourceID   string
+	Extractor  string
+	Confidence int
+	Match      string
+	UserID     int64
+	ExpiresAt  time.Time
 }
 
 type inlineActiveDownload struct {

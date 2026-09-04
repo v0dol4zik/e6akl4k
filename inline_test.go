@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -189,5 +191,48 @@ printf '%s' '{"entries":[{"id":"video-id","title":"Track","uploader":"Artist","d
 	}
 	if got.CacheKey != "youtube:video-id:mp3:320" {
 		t.Fatalf("unexpected cache key: %q", got.CacheKey)
+	}
+}
+
+func TestTextSearchUsesYouTubeWithoutCallingOctave(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "fake-yt-dlp")
+	script := `#!/bin/sh
+printf '%s' '{"entries":[{"id":"youtube-id","title":"Fallback","uploader":"Artist","duration":60,"url":"youtube-id"}]}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var octaveCalls atomic.Int32
+	d := downloader{
+		bin: bin,
+		octave: testOctaveClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			octaveCalls.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})),
+	}
+	searches := []struct {
+		name string
+		run  func() ([]inlineCandidate, error)
+	}{
+		{name: "inline", run: func() ([]inlineCandidate, error) {
+			return d.inlineLookup(context.Background(), "fallback track")
+		}},
+		{name: "private", run: func() ([]inlineCandidate, error) {
+			return d.searchLookup(context.Background(), "fallback track", 60)
+		}},
+	}
+	for _, search := range searches {
+		t.Run(search.name, func(t *testing.T) {
+			candidates, err := search.run()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(candidates) != 1 || candidates[0].Extractor != "youtube" || candidates[0].SourceID != "youtube-id" {
+				t.Fatalf("unexpected YouTube candidates: %#v", candidates)
+			}
+		})
+	}
+	if octaveCalls.Load() != 0 {
+		t.Fatalf("Octave search calls = %d, want 0", octaveCalls.Load())
 	}
 }

@@ -63,6 +63,19 @@ func TestMediaGroupFallbackOnlyForDefinitiveClientErrors(t *testing.T) {
 	}
 }
 
+func TestTelegramMediaMethodsUseUploadTimeout(t *testing.T) {
+	for _, path := range []string{"/bottoken/sendAudio", "/bottoken/sendDocument", "/bottoken/sendMediaGroup"} {
+		if !telegramMediaMethod(path) {
+			t.Errorf("media method not recognized: %s", path)
+		}
+	}
+	for _, path := range []string{"/bottoken/getUpdates", "/bottoken/sendMessage"} {
+		if telegramMediaMethod(path) {
+			t.Errorf("non-media method recognized: %s", path)
+		}
+	}
+}
+
 func TestTelegramHTTPClientRedactsSecrets(t *testing.T) {
 	const secret = "123456:super-secret-token"
 	client := redactingHTTPClient{

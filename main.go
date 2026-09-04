@@ -29,7 +29,7 @@ const (
 )
 
 var (
-	urlPattern = regexp.MustCompile(`(?i)(https?://)?(www\.)?(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com)[\w/\-?=&%.#+@!~]*`)
+	urlPattern = regexp.MustCompile(`(?i)(https?://)?(www\.)?(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com|music\.octavestreaming\.com|api\.octavestreaming\.com)[\w/\-?=&%.#+@!~]*`)
 	unsafeName = regexp.MustCompile(`[<>:"/\\|?*]`)
 )
 
@@ -68,6 +68,7 @@ type app struct {
 	limiter       *rateLimiter
 	inlineLimiter *rateLimiter
 	flights       flightGroup
+	octaveRemote  *circuitBreaker
 
 	mu            sync.Mutex
 	userLang      map[int64]string
@@ -110,6 +111,7 @@ func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *d
 		archives:      newJobGate(cfg.ArchiveWorkers, cfg.ArchiveQueueSize),
 		limiter:       newRateLimiter(cfg.RateLimit, cfg.RateWindow),
 		inlineLimiter: newRateLimiter(cfg.InlineRateLimit, cfg.RateWindow),
+		octaveRemote:  newCircuitBreaker(3, 5*time.Minute, 10*time.Minute),
 		userLang:      make(map[int64]string),
 		urls:          make(map[string]pendingURL),
 		active:        make(map[string]activeDownload),
@@ -131,6 +133,10 @@ func (a *app) handleUpdate(update tgbotapi.Update) (success bool) {
 			success = false
 		}
 	}()
+	a.observeTelegramUsers(update)
+	if a.rejectBannedUpdate(update) {
+		return true
+	}
 	switch {
 	case update.InlineQuery != nil:
 		a.handleInlineQuery(update.InlineQuery)
@@ -150,6 +156,9 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 	}
 	userID := message.From.ID
 	if message.IsCommand() {
+		if a.handleAdminCommand(message) {
+			return
+		}
 		handled := true
 		switch message.Command() {
 		case "start":
@@ -166,10 +175,6 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 			} else {
 				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 			}
-		case "stats":
-			a.handleAdminStats(message)
-		case "status":
-			a.handleAdminStatus(message)
 		default:
 			handled = false
 		}
@@ -213,6 +218,8 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 	}
 	data := callback.Data
 	switch {
+	case strings.HasPrefix(data, supportNoticeCallback):
+		a.handleSupportNoticeDismiss(callback)
 	case strings.HasPrefix(data, "inline_cancel:"):
 		a.handleInlineCancel(callback)
 	case strings.HasPrefix(data, "setlang:"):
@@ -285,6 +292,10 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 		if a.store != nil {
 			a.store.recordDownload(a.ctx, callback.From.ID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), historyError)
 		}
+		if historyStatus == "delivered" || historyStatus == "partial" {
+			a.deleteStatusMessage(status)
+			a.maybeSendSupportNotice(chatID, callback.From.ID, lang)
+		}
 	}()
 	a.mu.Lock()
 	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: chatID, userID: callback.From.ID}
@@ -302,15 +313,19 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 			status = &sent
 		}
 	}
+	reporter := newStatusReporter(downloadCtx, a, status, lang, cancelKey)
+	defer reporter.close()
+	downloadCtx = withStatusReporter(downloadCtx, reporter)
 
 	var trackStarted time.Time
 	var lastProgress time.Time
 	if !pending.Preview.IsPlaylist {
+		reporter.stage(tr("stage_cache", lang))
 		if handled, succeeded := a.tryCachedDownload(downloadCtx, chatID, pending, format, quality, lang, func(position int) {
 			if status != nil {
 				a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
 			}
-		}); handled {
+		}, reporter); handled {
 			if succeeded {
 				historyStatus = "delivered"
 				a.recordDeliveryMetrics(deliveryReport{Delivered: 1})
@@ -319,13 +334,13 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 				historyStatus = "cancelled"
 			}
 			if status != nil && succeeded {
-				a.editStatusMessage(status, tr("download_finished", lang))
+				a.editStatusMessageFinal(status, tr("download_finished", lang))
 			}
 			return
 		}
 	}
 	if pending.Preview.IsPlaylist && pending.Delivery == "individual" && selectedTrackCount(pending) > playlistZIPThreshold {
-		report, batchErr := a.downloadAndSendPlaylistBatches(downloadCtx, chatID, pending, format, quality, lang, status)
+		report, batchErr := a.downloadAndSendPlaylistBatches(downloadCtx, chatID, pending, format, quality, lang, status, reporter)
 		historyStatus = deliveryStatus(report)
 		historyError = deliveryError(report)
 		a.recordDeliveryMetrics(report)
@@ -352,6 +367,7 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 		}
 		return
 	}
+	reporter.stage(tr("stage_source", lang))
 	results, err := a.runDownloadRangeQueued(downloadCtx, url, format, quality, pending.RangeStart, pending.RangeEnd, func(position int) {
 		if status != nil {
 			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
@@ -437,19 +453,16 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 		return
 	}
 	if status != nil {
-		edit := tgbotapi.NewEditMessageText(status.Chat.ID, status.MessageID, tr("download_finished", lang))
-		edit.ParseMode = "HTML"
-		if _, err := sendTelegram(a.bot, edit); err != nil {
-			log.Printf("Не удалось обновить статус загрузки: %v", err)
-		}
+		a.editStatusMessageFinal(status, tr("download_finished", lang))
 	}
-	report := a.sendResultsIndividually(chatID, results, format, lang)
+	reporter.stage(tr("stage_prepare", lang))
+	report := a.sendResultsIndividually(chatID, results, format, lang, reporter)
 	historyStatus = deliveryStatus(report)
 	historyError = deliveryError(report)
 	a.recordDeliveryMetrics(report)
 }
 
-func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, status *tgbotapi.Message) (deliveryReport, error) {
+func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, status *tgbotapi.Message, reporter *statusReporter) (deliveryReport, error) {
 	start, end := pending.RangeStart, pending.RangeEnd
 	if start <= 0 {
 		start = 1
@@ -457,19 +470,47 @@ func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, 
 	if end <= 0 || end > pending.Preview.TrackCount {
 		end = pending.Preview.TrackCount
 	}
-	report := deliveryReport{}
-	for batchStart := start; batchStart <= end; batchStart += 10 {
-		batchEnd := min(batchStart+9, end)
-		a.editStatusMessage(status, tr("download_batch", lang, "start", strconv.Itoa(batchStart), "end", strconv.Itoa(batchEnd), "total", strconv.Itoa(end)))
-		results, err := a.runDownloadRangeQueued(ctx, pending.URL, format, quality, batchStart, batchEnd, func(position int) {
-			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
-		}, nil)
-		if err != nil {
-			return report, err
+	type playlistBatch struct {
+		results []downloadResult
+		err     error
+	}
+	pipelineCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	pipelineCtx = withStatusReporter(pipelineCtx, reporter)
+	batches := make(chan playlistBatch)
+	go func() {
+		defer close(batches)
+		for batchStart := start; batchStart <= end; batchStart += 10 {
+			batchEnd := min(batchStart+9, end)
+			reporter.stage(tr("download_batch", lang, "start", strconv.Itoa(batchStart), "end", strconv.Itoa(batchEnd), "total", strconv.Itoa(end)))
+			results, err := a.runDownloadRangeQueued(pipelineCtx, pending.URL, format, quality, batchStart, batchEnd, func(position int) {
+				reporter.stage(tr("queued", lang, "position", strconv.Itoa(position)))
+			}, nil)
+			batch := playlistBatch{results: results, err: err}
+			select {
+			case batches <- batch:
+			case <-pipelineCtx.Done():
+				if len(results) > 0 {
+					a.downloader.clearSession(results[0].Session)
+				}
+				return
+			}
+			if err != nil {
+				return
+			}
 		}
-		batchReport := a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, false)
+	}()
+	report := deliveryReport{}
+	for batch := range batches {
+		if batch.err != nil {
+			return report, batch.err
+		}
+		batchReport := a.sendResultsIndividuallyWithSummary(chatID, batch.results, format, lang, false, reporter)
 		report.Delivered += batchReport.Delivered
 		report.Failed += batchReport.Failed
+		if err := pipelineCtx.Err(); err != nil {
+			return report, err
+		}
 	}
 	summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(report.Delivered), "total", strconv.Itoa(report.Delivered+report.Failed))
 	if report.Failed > 0 {
@@ -549,6 +590,10 @@ func (a *app) runDownload(ctx context.Context, url, format, quality string, prog
 }
 
 func (a *app) runInlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
+	return a.runRankedLookup(ctx, query, 0)
+}
+
+func (a *app) runRankedLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, error) {
 	_, release, err := a.lookups.acquire(ctx)
 	if err != nil {
 		if errors.Is(err, errQueueFull) && a.store != nil {
@@ -557,7 +602,7 @@ func (a *app) runInlineLookup(ctx context.Context, query string) ([]inlineCandid
 		return nil, err
 	}
 	defer release()
-	return a.downloader.inlineLookup(ctx, query)
+	return a.downloader.searchLookup(ctx, query, expectedDuration)
 }
 
 func (a *app) runDownloadRange(ctx context.Context, url, format, quality string, start, end int, progress downloadProgress) ([]downloadResult, error) {
@@ -606,11 +651,15 @@ func (a *app) handlePendingCancel(callback *tgbotapi.CallbackQuery) {
 	a.safeEdit(callback, tr("cancelled", lang), "", nil)
 }
 
-func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, format, lang string) deliveryReport {
-	return a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, true)
+func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, format, lang string, reporters ...*statusReporter) deliveryReport {
+	return a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, true, reporters...)
 }
 
-func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloadResult, format, lang string, showSummary bool) deliveryReport {
+func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloadResult, format, lang string, showSummary bool, reporters ...*statusReporter) deliveryReport {
+	var reporter *statusReporter
+	if len(reporters) > 0 {
+		reporter = reporters[0]
+	}
 	session := ""
 	if len(results) > 0 {
 		session = results[0].Session
@@ -643,7 +692,8 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 	if !telegramAudioFormat(format) {
 		sent := 0
 		for _, item := range items {
-			document := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(item.result.FilePath))
+			progress := newUploadBatchProgress(reporter, item.size)
+			document := tgbotapi.NewDocument(chatID, progressFile{path: item.result.FilePath, progress: progress})
 			document.Caption = buildCaption(item.result, item.size, format, lang, item.index+1, len(results))
 			document.ParseMode = "HTML"
 			message, err := sendTelegram(a.bot, document)
@@ -667,9 +717,14 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 	for start := 0; start < len(items); start += 10 {
 		end := min(start+10, len(items))
 		batch := items[start:end]
+		var batchSize int64
+		for _, item := range batch {
+			batchSize += item.size
+		}
+		progress := newUploadBatchProgress(reporter, batchSize)
 		media := make([]interface{}, 0, len(batch))
 		for _, item := range batch {
-			input := tgbotapi.NewInputMediaAudio(tgbotapi.FilePath(item.result.FilePath))
+			input := tgbotapi.NewInputMediaAudio(progressFile{path: item.result.FilePath, progress: progress})
 			input.Caption = buildCaption(item.result, item.size, format, lang, item.index+1, len(results))
 			input.ParseMode = "HTML"
 			input.Title = firstNonEmpty(item.result.Title, strings.TrimSuffix(filepath.Base(item.result.FilePath), filepath.Ext(item.result.FilePath)))
@@ -680,7 +735,7 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 		var delivered []tgbotapi.Message
 		var sendErr error
 		if len(batch) == 1 {
-			audio := tgbotapi.NewAudio(chatID, tgbotapi.FilePath(batch[0].result.FilePath))
+			audio := tgbotapi.NewAudio(chatID, progressFile{path: batch[0].result.FilePath, progress: progress})
 			audio.Caption, audio.ParseMode = buildCaption(batch[0].result, batch[0].size, format, lang, batch[0].index+1, len(results)), "HTML"
 			audio.Title, audio.Performer = batch[0].result.Title, batch[0].result.Artist
 			message, err := sendTelegram(a.bot, audio)
@@ -698,7 +753,8 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 				continue
 			}
 			for _, item := range batch {
-				audio := tgbotapi.NewAudio(chatID, tgbotapi.FilePath(item.result.FilePath))
+				fallbackProgress := newUploadBatchProgress(reporter, item.size)
+				audio := tgbotapi.NewAudio(chatID, progressFile{path: item.result.FilePath, progress: fallbackProgress})
 				audio.Title, audio.Performer = item.result.Title, item.result.Artist
 				audio.Caption, audio.ParseMode = buildCaption(item.result, item.size, format, lang, item.index+1, len(results)), "HTML"
 				message, err := sendTelegram(a.bot, audio)
@@ -841,7 +897,11 @@ func (a *app) guideText(key, lang string) string {
 	if a.bot != nil && a.bot.Self.UserName != "" {
 		username = a.bot.Self.UserName
 	}
-	return tr(key, lang, "username", html.EscapeString(username))
+	text := tr(key, lang, "username", html.EscapeString(username))
+	if key == "help" {
+		text += "\n" + tr("id_help", lang)
+	}
+	return text
 }
 
 func (a *app) sendText(chatID int64, text, parseMode string, markup *tgbotapi.InlineKeyboardMarkup) *tgbotapi.Message {

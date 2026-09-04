@@ -9,13 +9,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/musicbo
 FROM debian:bookworm-slim
 
 ARG TARGETARCH
-ARG YTDLP_VERSION=2026.07.04
+ARG YTDLP_VERSION=2026.08.19
 ARG DENO_VERSION=2.9.5
-RUN apt-get update \
+RUN apt-get -o Acquire::Retries=5 \
+        -o Acquire::http::Timeout=30 \
+        -o Acquire::https::Timeout=30 update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
-RUN apt-get update \
-    && apt-get --print-uris --yes install ffmpeg passwd python3 unzip \
+    && apt-get --print-uris --yes --no-install-recommends install ffmpeg passwd python3 unzip \
        | sed -n "s/^'\\([^']*\\)' \\([^ ]*\\).*/\\1 \\2/p" \
        | xargs -r -n 2 -P 8 sh -c 'curl -fsSL --retry 3 --retry-delay 1 "$1" -o "/var/cache/apt/archives/$2"' sh \
     && apt-get install -y --no-install-recommends ffmpeg passwd python3 unzip \

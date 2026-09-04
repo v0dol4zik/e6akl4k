@@ -47,8 +47,13 @@ docker_build:
     DOCKER_DRIVER: overlay2
   before_script:
     - docker info
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
   script:
-    - docker build --tag "musicbot:$CI_COMMIT_SHA" .
+    - docker build --pull --tag "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
 
 publish_release:
   stage: release

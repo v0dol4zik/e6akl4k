@@ -6,9 +6,29 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ## [Unreleased]
 
+### Added
+
+- Added Octave Streaming as the primary title-search source, with direct track and album downloads in MP3 128/320 and lossless FLAC.
+- Added strict Octave URL parsing, bounded API/media requests, expiring in-memory playback-token caching, and stable Telegram cache keys.
+- Added persistent dynamic administrators, bans, owner-only role management, moderation audit, `/perf`, and redacted `/log [fresh] <url>` diagnostics.
+- Added Octave remote-URL circuit breaking, playback-token refresh, validated HTTP Range resume, session cover reuse, and multipart Telegram upload progress.
+- Added confidence-ranked search with alternate-version penalties and exact/similar/version labels.
+- Added one-time `bootstrap.sh`, lean versioned-image deployment, Registry publishing, and explicit `rollback.sh`.
+- Added `/id @username` lookup for Telegram users previously observed by the bot.
+- Added a throttled post-download support message with a persistent per-user hide option.
+
 ### Changed
 
 - Replaced the generated project branding with the CC0 music gopher artwork.
+- Kept YouTube search as an automatic fallback when Octave has no matching tracks or its API is unavailable.
+- Added an Octave MP3 remote-URL fast path with local fallback, skipped redundant MP3 remuxing, and made `yt-dlp` request delay and fragment concurrency configurable.
+- Added structured per-stage timing and throughput logs for source, conversion, Telegram upload, and cached delivery operations.
+- Pipelined large album delivery so the next bounded batch downloads while the current batch is sent.
+- Kept administrator commands out of Telegram's published command menu while preserving permission-checked manual access.
+
+### Fixed
+
+- Delete the upload-progress status after successful delivery instead of leaving a stale `100%` message behind.
 
 ## [v2026.08.14] - 2026-08-14
 

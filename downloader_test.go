@@ -102,6 +102,38 @@ func TestAudioFormatArgs(t *testing.T) {
 	}
 }
 
+func TestYTDLPNetworkArgsAreConfigurable(t *testing.T) {
+	d := downloader{}
+	defaults := d.commonArgs()
+	if !containsArgPair(defaults, "--concurrent-fragments", "4") || containsArg(defaults, "--sleep-requests") {
+		t.Fatalf("default args=%q", defaults)
+	}
+	d.ytdlpFragments = 8
+	d.ytdlpSleepRequests = 2
+	configured := d.commonArgs()
+	if !containsArgPair(configured, "--concurrent-fragments", "8") || !containsArgPair(configured, "--sleep-requests", "2") {
+		t.Fatalf("configured args=%q", configured)
+	}
+}
+
+func containsArg(args []string, value string) bool {
+	for _, arg := range args {
+		if arg == value {
+			return true
+		}
+	}
+	return false
+}
+
+func containsArgPair(args []string, key, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == key && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBestErrorLine(t *testing.T) {
 	message := "WARNING: transient warning\nERROR: actual failure"
 	if got := bestErrorLine(message); got != "ERROR: actual failure" {

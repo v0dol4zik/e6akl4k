@@ -74,10 +74,12 @@ func TestPlaylistTrackLimit(t *testing.T) {
 
 func TestDetectURL(t *testing.T) {
 	tests := map[string]string{
-		"смотри youtu.be/dQw4w9WgXcQ":                  "https://youtu.be/dQw4w9WgXcQ",
-		"https://www.youtube.com/watch?v=abc&list=xyz": "https://www.youtube.com/watch?v=abc&list=xyz",
-		"http://youtube.com@127.0.0.1/private":         "",
-		"не ссылка":                                    "",
+		"смотри youtu.be/dQw4w9WgXcQ":                    "https://youtu.be/dQw4w9WgXcQ",
+		"https://www.youtube.com/watch?v=abc&list=xyz":   "https://www.youtube.com/watch?v=abc&list=xyz",
+		"https://music.octavestreaming.com/album/3?t=11": "https://music.octavestreaming.com/album/3?t=11",
+		"http://music.octavestreaming.com/album/3?t=11":  "",
+		"http://youtube.com@127.0.0.1/private":           "",
+		"не ссылка":                                      "",
 	}
 	for input, want := range tests {
 		if got := detectURL(input); got != want {

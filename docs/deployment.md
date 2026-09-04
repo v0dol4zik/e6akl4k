@@ -1,33 +1,31 @@
 # Deployment
 
-## Automated deployment
+## One-time bootstrap
 
 The supported deployment target is a Debian or Ubuntu server with root or `sudo` access.
 
 ```bash
-chmod +x deploy.sh
-./deploy.sh
+chmod +x bootstrap.sh deploy.sh rollback.sh
+./bootstrap.sh
 ```
 
-The script:
+The bootstrap script:
 
 - installs Docker Engine and Docker Compose when needed;
 - asks for `BOT_TOKEN` and an optional cookies file;
 - creates the persistent `downloads/` and `cache/` directories;
-- validates the Compose configuration;
-- backs up SQLite, `.env`, and cookies before an update;
-- builds and starts the container;
-- waits for the health check and restores the previous image if startup fails.
+- creates `.env`, cookies, and persistent application directories;
+- validates an installed SSH public key before disabling password authentication.
 
 If the deployment user already has a non-empty `~/.ssh/authorized_keys`, the script validates the effective `sshd` configuration and disables password authentication. Without a preinstalled key, SSH hardening is skipped to avoid locking the user out.
 
-For non-interactive deployment, create `.env` through a secrets manager and optionally provide a cookies path:
+For a non-interactive bootstrap, provide the token and optional cookies path:
 
 ```bash
-COOKIES_FILE='/tmp/cookies.txt' ./deploy.sh
+BOT_TOKEN='123456:...' COOKIES_FILE='/tmp/cookies.txt' ./bootstrap.sh
 ```
 
-Subsequent runs preserve the existing token. `cookies.txt` is replaced only when `COOKIES_FILE` is explicitly provided.
+Run the bootstrap only for initial host provisioning. Regular deployments never modify `.env` or cookies.
 
 ## Updating an installation
 
@@ -45,19 +43,28 @@ cd /path/to/e6akl4k
 ./deploy.sh
 ```
 
-The script creates a timestamped backup before rebuilding. If the new container fails its health check, the previous Docker image is started automatically.
+Without an argument, `deploy.sh` builds a uniquely tagged local image. To deploy a CI image, pass its immutable Git SHA tag:
+
+```bash
+./deploy.sh registry.gitlab.com/group/project:0123456789abcdef
+```
+
+The script validates Compose, free space, and SQLite, creates a timestamped database backup, deploys the exact image, and waits for a healthy container. Failure restores the previous image automatically. A manual rollback is available through `./rollback.sh`.
+
+GitLab CI publishes `$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA` for the default branch and tags. Authenticate the server with `docker login registry.gitlab.com` before its first Registry deployment.
 
 ## YouTube cookies
 
 YouTube may respond with `Sign in to confirm you're not a bot` on a VPS. Export cookies from a signed-in account in Netscape format and deploy them with:
 
 ```bash
-COOKIES_FILE="$HOME/cookies.txt" ./deploy.sh
+sudo install -o 10001 -g 10001 -m 0600 "$HOME/cookies.txt" ./cookies.txt
+./deploy.sh
 ```
 
 The source file is stored with `0600` permissions and mounted read-only. Every `yt-dlp` operation uses an isolated temporary copy, so concurrent processes cannot corrupt the original file.
 
-If the bot check returns, export fresh cookies and run the deployment again.
+If the bot check returns, replace the mounted file explicitly and run the deployment again. `deploy.sh` itself never overwrites it.
 
 ## Operations
 

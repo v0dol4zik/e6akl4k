@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -98,12 +99,34 @@ func observabilityHandler(a *app) http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		_, _ = fmt.Fprintf(w, "musicbot_downloads_total{result=\"ok\"} %d\nmusicbot_downloads_total{result=\"partial\"} %d\nmusicbot_downloads_total{result=\"failed\"} %d\nmusicbot_downloads_total{result=\"cancelled\"} %d\nmusicbot_youtube_cookie_errors_total %d\nmusicbot_cache_hits_total %d\nmusicbot_searches_total %d\nmusicbot_rate_limited_total %d\nmusicbot_queue_rejected_total %d\nmusicbot_users %d\nmusicbot_cached_tracks %d\nmusicbot_downloads_active %d\nmusicbot_downloads_queued %d\nmusicbot_lookups_active %d\nmusicbot_lookups_queued %d\nmusicbot_archives_active %d\nmusicbot_archives_queued %d\n",
 			stats.DownloadsOK, stats.DownloadsPartial, stats.DownloadsFailed, stats.Cancelled, stats.CookieErrors, stats.CacheHits, stats.Searches, stats.RateLimited, stats.QueueRejected, stats.UniqueUsers, stats.CachedTracks, da, dw, la, lw, aa, aw)
+		if performance, perfErr := a.store.mediaPerformance(r.Context(), time.Now().Add(-time.Hour)); perfErr == nil {
+			for _, stage := range performance {
+				_, _ = fmt.Fprintf(w, "musicbot_media_stage_samples{stage=\"%s\",source=\"%s\",mode=\"%s\"} %d\nmusicbot_media_stage_success_ratio{stage=\"%s\",source=\"%s\",mode=\"%s\"} %.4f\nmusicbot_media_stage_p95_seconds{stage=\"%s\",source=\"%s\",mode=\"%s\"} %.6f\n",
+					prometheusLabel(stage.Stage), prometheusLabel(stage.Source), prometheusLabel(stage.Mode), stage.Count,
+					prometheusLabel(stage.Stage), prometheusLabel(stage.Source), prometheusLabel(stage.Mode), float64(stage.OK)/float64(max(stage.Count, 1)),
+					prometheusLabel(stage.Stage), prometheusLabel(stage.Source), prometheusLabel(stage.Mode), stage.P95.Seconds())
+			}
+		}
+		circuitValue := 0
+		switch a.octaveRemote.state() {
+		case circuitHalfOpen:
+			circuitValue = 1
+		case circuitOpen:
+			circuitValue = 2
+		}
+		_, _ = fmt.Fprintf(w, "musicbot_octave_remote_circuit_state %d\n", circuitValue)
 	})
 	return mux
 }
 
+func prometheusLabel(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	value = strings.ReplaceAll(value, "\n", "\\n")
+	return strings.ReplaceAll(value, "\"", "\\\"")
+}
+
 func (a *app) startDiskMonitor(ctx context.Context) {
-	if len(a.cfg.AdminIDs) == 0 {
+	if len(a.administratorIDs(ctx)) == 0 {
 		return
 	}
 	go func() {
@@ -116,7 +139,7 @@ func (a *app) startDiskMonitor(ctx context.Context) {
 			free := int64(stat.Bavail * uint64(stat.Bsize))
 			low := err == nil && free < a.cfg.DiskWarningBytes
 			if low && !warned {
-				for adminID := range a.cfg.AdminIDs {
+				for _, adminID := range a.administratorIDs(ctx) {
 					lang := a.langOrDefault(adminID)
 					a.sendText(adminID, tr("admin_disk_warning", lang, "free", humanSize(free, lang)), "", nil)
 				}

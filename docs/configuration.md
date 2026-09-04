@@ -17,10 +17,12 @@ chmod 600 .env
 | `CACHE_CHAT_ID` | empty | Private cache channel ID used for inline audio. |
 | `INLINE_CACHE_CHAT_ID` | empty | Legacy alias for `CACHE_CHAT_ID`. |
 | `INLINE_PLACEHOLDER_FILE_ID` | generated | Existing silent MP3 `file_id` for inline placeholders. |
-| `ADMIN_IDS` | empty | Comma-separated Telegram user IDs allowed to use `/stats` and `/status`. |
+| `ADMIN_IDS` | empty | Comma-separated immutable owner IDs. Owners manage dynamic admins; all admins can use moderation, `/perf`, and redacted `/log`. |
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory. |
 | `DATABASE_PATH` | `$XDG_DATA_HOME/musicbot.db` | SQLite database path. Falls back under `DOWNLOAD_DIR` when `XDG_DATA_HOME` is unset. |
 | `YTDLP_COOKIES_FILE` | `cookies.txt` | Netscape-format cookies file used through isolated temporary copies. |
+| `YTDLP_SLEEP_REQUESTS` | `0` | Delay in seconds between `yt-dlp` HTTP requests, from 0 to 60. |
+| `YTDLP_CONCURRENT_FRAGMENTS` | `4` | Concurrent HLS/DASH fragments per `yt-dlp` process, from 1 to 16. |
 
 ## Scheduling and limits
 
@@ -42,6 +44,8 @@ chmod 600 .env
 
 By default, seven downloads start immediately and there is no waiting download queue. An eighth simultaneous request receives a busy response. Lookup and archive jobs retain their own FIFO queues.
 
+The zero request delay and four concurrent fragments favor download latency. Increase `YTDLP_SLEEP_REQUESTS` or reduce fragment concurrency if a source starts throttling the server IP.
+
 ## Storage and operations
 
 | Variable | Default | Description |
@@ -54,7 +58,9 @@ By default, seven downloads start immediately and there is no waiting download q
 | `DISK_WARNING_BYTES` | `536870912` | Free-space threshold that triggers an administrator warning. |
 | `DISK_CHECK_INTERVAL` | `10m` | Disk monitoring interval. |
 
-Completed tracks, user language, counters, pending Telegram updates, and 90 days of history are stored in SQLite. The old `inline-audio-cache.json` is imported automatically and renamed with a `.migrated` suffix.
+Completed tracks, user language, observed Telegram username-to-ID mappings, dismissed support notices, counters, pending Telegram updates, dynamic administrators, bans, audit records, bounded performance samples, and 90 days of download history are stored in SQLite. `/id @username` can resolve only users previously visible to the bot because the Bot API does not provide arbitrary username lookup. The post-download support notice is shown at most once per 24 hours until the user permanently hides it. IDs in `ADMIN_IDS` are immutable owners; only owners may use `/addadmin` and `/deladmin`. The old `inline-audio-cache.json` is imported automatically and renamed with a `.migrated` suffix.
+
+Structured `media_stage` log records split latency into source probing/downloading, cover loading, transcoding, Telegram upload or remote fetch, and cached `file_id` delivery. Byte-carrying stages also report `size_bytes` and `bytes_per_second`. Secret-free samples are retained for 30 days with a 50,000-row cap and are available through `/perf [1h|24h|7d]`; `/log [fresh] <url>` returns a redacted trace of one real MP3 320 workflow.
 
 ## Inline mode
 

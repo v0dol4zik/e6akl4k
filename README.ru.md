@@ -6,23 +6,26 @@
 
 > [English version](README.md)
 
-Telegram-бот на Go для поиска и скачивания музыки через `yt-dlp`.
+Telegram-бот на Go для поиска и скачивания музыки из Octave Streaming и источников `yt-dlp`.
 
 ## Возможности
 
+- Прямое скачивание треков и альбомов Octave Streaming в MP3 128/320 или lossless FLAC.
+- Быстрая передача подходящих MP3 напрямую из Octave в Telegram с circuit breaker, автоматическим локальным fallback, повторными попытками и докачкой через HTTP Range.
 - YouTube / YouTube Music, SoundCloud, Bandcamp, VK, Mixcloud, Audiomack и другие поддерживаемые `yt-dlp` источники.
-- MP3 128/320/VBR, FLAC, M4A и OGG Vorbis с метаданными и обложками.
-- Поиск по названию прямо в личном чате и inline-поиск `@bot название трека` в любом чате.
+- MP3 128/320/VBR, FLAC, M4A и OGG Vorbis; Telegram получает название и исполнителя, а конвертируемые файлы — встроенные метаданные и обложки.
+- Ранжированный поиск по YouTube; результаты помечаются как точные, похожие или другая версия.
 - Предпросмотр названия, исполнителя, длительности, числа треков и примерного размера.
 - Spotify, Apple Music, Deezer, Tidal и Яндекс Музыка используются как ссылки на метаданные: бот предлагает подходящие версии с YouTube и просит подтвердить совпадение.
 - Плейлисты целиком, первыми 10/25/75 треками или диапазонами по десять.
 - MP3/M4A отправляются аудиоальбомами до десяти файлов; FLAC/OGG — документами. ZIP автоматически разбивается примерно по 45 МБ.
-- Русский и английский интерфейс, прогресс, ETA и отмена загрузки.
+- Русский и английский интерфейс, этапы обработки, фактический прогресс отправки в Telegram, ETA и отмена загрузки.
 - Постоянный SQLite-кэш Telegram `file_id`: повторный запрос не запускает `yt-dlp` и `ffmpeg`.
 - Объединение одинаковых одновременных запросов в одну загрузку.
 - До семи одновременных загрузок без очереди ожидания, отдельные FIFO-очереди поиска и архивации, rate limit и одна тяжёлая задача на пользователя.
 - Входящие Telegram updates сохраняются в SQLite до обработки и восстанавливаются после рестарта.
-- Healthcheck, Prometheus-метрики, JSON-логи, контроль диска и админские `/stats` и `/status`.
+- Healthcheck, Prometheus-метрики, JSON-логи, `/perf`, безопасный `/log [fresh] <ссылка>`, баны, динамические администраторы и аудит.
+- Ненавязчивое сообщение поддержки после успешной загрузки — не чаще раза в сутки, с постоянным отключением одной кнопкой.
 
 Музыкальные сервисы вроде Spotify не используются как источник аудиофайла. Бот читает их публичные метаданные, ищет варианты на YouTube и показывает выбор пользователю. Это не маскирует приблизительное совпадение под оригинал.
 
@@ -41,10 +44,14 @@ bot_ui.go           клавиатуры, URL-валидация и формат
 inline.go           inline-состояния и placeholder
 inline_handlers.go  inline-поиск, загрузка и замена аудио
 downloader.go       yt-dlp, метаданные, диапазоны и файлы
+octave.go            API, модели, ссылки и playback-токены Octave
+octave_downloader.go прямое скачивание и конвертация Octave
 archive.go          ZIP-архивы
 health.go           /healthz, /metrics и контроль диска
 locales.go          русские и английские тексты
-deploy.sh           первоначальный деплой Debian/Ubuntu
+bootstrap.sh        однократная подготовка Debian/Ubuntu и SSH
+deploy.sh           версионированный деплой, backup и healthcheck
+rollback.sh         возврат на предыдущий Docker-образ
 Dockerfile          multi-stage образ Go + yt-dlp + ffmpeg + Deno
 docker-compose.yml  постоянный ограниченный контейнер
 ```
@@ -82,6 +89,8 @@ DATABASE_PATH=/app/cache/musicbot.db
 CACHE_TTL=4320h
 DOWNLOAD_WORKERS=7
 DOWNLOAD_QUEUE_SIZE=0
+YTDLP_SLEEP_REQUESTS=0
+YTDLP_CONCURRENT_FRAGMENTS=4
 LOOKUP_WORKERS=2
 LOOKUP_QUEUE_SIZE=40
 ARCHIVE_WORKERS=1
@@ -102,20 +111,20 @@ DROP_PENDING_UPDATES=false
 На новом Debian/Ubuntu-сервере:
 
 ```bash
-chmod +x deploy.sh
+chmod +x bootstrap.sh deploy.sh rollback.sh
+./bootstrap.sh
 ./deploy.sh
 ```
 
-Скрипт установит Docker/Compose, запросит `BOT_TOKEN`, предложит путь к cookies, создаст каталоги, соберёт контейнер и дождётся успешного healthcheck.
-Если у запустившего deploy пользователя уже есть непустой `~/.ssh/authorized_keys`, скрипт проверит итоговую конфигурацию `sshd` и отключит вход по паролю. Без заранее установленного SSH-ключа этот шаг безопасно пропускается.
+`bootstrap.sh` один раз устанавливает Docker/Compose, создаёт секреты и каталоги и безопасно настраивает SSH при наличии ключа. `deploy.sh` больше не устанавливает пакеты и не изменяет `.env`/cookies: он делает backup SQLite, запускает конкретный тег образа, ждёт healthcheck и автоматически возвращает предыдущую версию при ошибке.
 
 Для автоматизированного запуска заранее создай `.env` через менеджер секретов:
 
 ```bash
-COOKIES_FILE='/tmp/cookies.txt' ./deploy.sh
+COOKIES_FILE='/tmp/cookies.txt' BOT_TOKEN='123456:...' ./bootstrap.sh
 ```
 
-Повторный запуск сохраняет токен. `cookies.txt` заменяется только при явно заданном `COOKIES_FILE`. Перед обновлением скрипт сохраняет SQLite, `.env` и cookies в `backups/`, а при неуспешном healthcheck автоматически запускает предыдущий образ.
+Для локальной сборки запусти `./deploy.sh`. Для неизменяемого образа из Registry передай точный тег: `./deploy.sh registry.gitlab.com/group/project:<git-sha>`. Ручной откат выполняется через `./rollback.sh`.
 
 ```bash
 sudo docker compose logs -f
@@ -135,7 +144,7 @@ sudo docker compose up -d
 На VPS YouTube часто отвечает `Sign in to confirm you're not a bot`. Экспортируй cookies залогиненного аккаунта в формате Netscape:
 
 ```bash
-COOKIES_FILE="$HOME/cookies.txt" ./deploy.sh
+COOKIES_FILE="$HOME/cookies.txt" BOT_TOKEN='123456:...' ./bootstrap.sh
 ```
 
 Файл монтируется только для чтения, а `yt-dlp` работает с его изолированными временными копиями. Права устанавливаются в `0600`. При повторном bot-check экспортируй свежий файл и снова запусти deploy.
@@ -171,7 +180,9 @@ DISK_CHECK_INTERVAL=10m
 LOG_FORMAT=json
 ```
 
-Администраторам доступны `/stats` и `/status`. При нехватке диска предупреждение повторяется только после восстановления места и нового падения ниже порога. Повторяющийся YouTube bot-check/cookies error также считается отдельно и присылается администратору не чаще раза в час.
+`ADMIN_IDS` задаёт неудаляемых владельцев. Владельцы управляют динамическими администраторами через `/addadmin` и `/deladmin`. Администраторам доступны `/ban`, `/pardon`, `/admins`, `/banlist`, `/userinfo`, `/jobs`, `/adminlog`, `/stats`, `/status`, `/perf [1h|24h|7d]` и `/log [fresh] <ссылка>`. Диагностический лог маскирует playback-токены, cookies и авторизацию.
+
+`/id` показывает ID отправителя, а `/id @username` — ID пользователя, которого бот уже видел в доступных ему Telegram updates. Bot API не позволяет искать произвольных людей по username, поэтому незнакомый боту пользователь должен сначала написать ему или появиться в доступном чате.
 
 ## Ограничения
 

@@ -34,6 +34,8 @@ type config struct {
 	DiskWarningBytes   int64
 	DiskCheckInterval  time.Duration
 	DropPendingUpdates bool
+	YTDLPSleepRequests int
+	YTDLPFragments     int
 }
 
 func loadConfig() (config, error) {
@@ -48,6 +50,12 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	if cfg.DownloadQueueSize, err = strictEnvInt("DOWNLOAD_QUEUE_SIZE", 0, 0, 10000); err != nil {
+		return config{}, err
+	}
+	if cfg.YTDLPSleepRequests, err = strictEnvInt("YTDLP_SLEEP_REQUESTS", 0, 0, 60); err != nil {
+		return config{}, err
+	}
+	if cfg.YTDLPFragments, err = strictEnvInt("YTDLP_CONCURRENT_FRAGMENTS", 4, 1, 16); err != nil {
 		return config{}, err
 	}
 	if cfg.LookupWorkers, err = strictEnvInt("LOOKUP_WORKERS", 2, 1, 32); err != nil {
@@ -180,7 +188,7 @@ func strictIDSet(key, value string) (map[int64]bool, error) {
 			continue
 		}
 		id, err := strconv.ParseInt(item, 10, 64)
-		if err != nil || id == 0 {
+		if err != nil || id <= 0 {
 			return nil, fmt.Errorf("%s содержит некорректный Telegram ID: %q", key, item)
 		}
 		result[id] = true

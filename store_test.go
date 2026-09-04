@@ -81,6 +81,60 @@ func TestStorePersistsPendingTelegramUpdates(t *testing.T) {
 	}
 }
 
+func TestStoreResolvesObservedTelegramUsername(t *testing.T) {
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	if err := state.observeTelegramUser(ctx, &tgbotapi.User{ID: 42, UserName: "Known_User"}); err != nil {
+		t.Fatal(err)
+	}
+	if userID, found, err := state.telegramUserIDByUsername(ctx, "@KNOWN_user"); err != nil || !found || userID != 42 {
+		t.Fatalf("userID=%d found=%v err=%v", userID, found, err)
+	}
+	if err := state.observeTelegramUser(ctx, &tgbotapi.User{ID: 84, UserName: "known_user"}); err != nil {
+		t.Fatal(err)
+	}
+	if userID, found, err := state.telegramUserIDByUsername(ctx, "known_user"); err != nil || !found || userID != 84 {
+		t.Fatalf("reassigned userID=%d found=%v err=%v", userID, found, err)
+	}
+	if _, found, err := state.telegramUserIDByUsername(ctx, "bad username"); err != nil || found {
+		t.Fatalf("invalid username found=%v err=%v", found, err)
+	}
+}
+
+func TestStoreUserNoticeCanBeThrottledAndDismissed(t *testing.T) {
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	ctx := context.Background()
+	if show, err := state.claimUserNotice(ctx, 42, "notice", time.Hour); err != nil || !show {
+		t.Fatalf("first claim show=%v err=%v", show, err)
+	}
+	if show, err := state.claimUserNotice(ctx, 42, "notice", time.Hour); err != nil || show {
+		t.Fatalf("throttled claim show=%v err=%v", show, err)
+	}
+	if _, err := state.db.Exec(`UPDATE user_notices SET last_shown_at=unixepoch()-7200 WHERE user_id=42 AND notice='notice'`); err != nil {
+		t.Fatal(err)
+	}
+	if show, err := state.claimUserNotice(ctx, 42, "notice", time.Hour); err != nil || !show {
+		t.Fatalf("expired claim show=%v err=%v", show, err)
+	}
+	if err := state.dismissUserNotice(ctx, 42, "notice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.db.Exec(`UPDATE user_notices SET last_shown_at=0 WHERE user_id=42 AND notice='notice'`); err != nil {
+		t.Fatal(err)
+	}
+	if show, err := state.claimUserNotice(ctx, 42, "notice", time.Hour); err != nil || show {
+		t.Fatalf("dismissed claim show=%v err=%v", show, err)
+	}
+}
+
 func TestStoreCanExplicitlyDiscardPendingTelegramUpdates(t *testing.T) {
 	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -112,5 +166,24 @@ func TestStoreExpiresCache(t *testing.T) {
 	}
 	if _, ok := state.cachedAudio(context.Background(), "old", time.Hour); ok {
 		t.Fatal("expired cache entry was returned")
+	}
+}
+
+func TestStoreAggregatesMediaPerformance(t *testing.T) {
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	now := time.Now()
+	for _, elapsed := range []int64{10, 20, 30, 40, 100} {
+		state.recordMediaStage(context.Background(), mediaStageSample{Stage: "source_download", Source: "octave", ElapsedMS: elapsed, SizeBytes: 1000, OK: elapsed != 100, CreatedAt: now})
+	}
+	rows, err := state.mediaPerformance(context.Background(), now.Add(-time.Minute))
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+	if rows[0].Count != 5 || rows[0].OK != 4 || rows[0].P50 != 30*time.Millisecond || rows[0].P95 != 40*time.Millisecond {
+		t.Fatalf("performance=%#v", rows[0])
 	}
 }

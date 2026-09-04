@@ -175,12 +175,14 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 		a.inline.clearActive(chosen.ResultID)
 	}()
 
-	parts := strings.Split(candidate.CacheKey, ":")
-	sourceID := ""
-	if len(parts) >= 2 {
-		sourceID = parts[1]
+	sourceID, extractor := candidate.SourceID, candidate.Extractor
+	if sourceID == "" || extractor == "" {
+		parts := strings.Split(candidate.CacheKey, ":")
+		if len(parts) >= 2 {
+			extractor, sourceID = parts[0], parts[1]
+		}
 	}
-	pending := pendingURL{URL: candidate.URL, Preview: mediaPreview{SourceID: sourceID, Extractor: "youtube"}}
+	pending := pendingURL{URL: candidate.URL, Preview: mediaPreview{SourceID: sourceID, Extractor: extractor}}
 	entry, err := a.ensureCachedAudio(downloadCtx, pending, "mp3", "320", nil)
 	if err != nil {
 		inlineFailure = err.Error()

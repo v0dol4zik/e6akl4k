@@ -108,13 +108,25 @@ func telegramAudioFormat(format string) bool {
 func searchKeyboard(keys []string, candidates []inlineCandidate, lang string) *tgbotapi.InlineKeyboardMarkup {
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(keys))
 	for i, key := range keys {
-		label := candidates[i].Title
+		marker := "≈"
+		switch candidates[i].Match {
+		case "exact":
+			marker = "✅"
+		case "variant":
+			marker = "⚠️"
+		}
+		source := "YT"
+		if candidates[i].Extractor == "octave" {
+			source = "Octave"
+		}
+		label := marker + " " + candidates[i].Title
 		if candidates[i].Artist != "" {
 			label = candidates[i].Artist + " — " + label
 		}
 		if candidates[i].Duration != "" {
 			label += " · " + candidates[i].Duration
 		}
+		label += " · " + source
 		label = shortenRunes(label, 58)
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(label, "pick:"+key)))
 	}
@@ -145,11 +157,18 @@ func detectURL(text string) string {
 	if err != nil || parsed.User != nil || !allowedHost(parsed.Hostname()) {
 		return ""
 	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if (host == "music.octavestreaming.com" || host == "api.octavestreaming.com") && parsed.Scheme != "https" {
+		return ""
+	}
 	return rawURL
 }
 
 func allowedHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "music.octavestreaming.com" || host == "api.octavestreaming.com" {
+		return true
+	}
 	for _, domain := range []string{"youtube.com", "youtu.be", "spotify.com", "soundcloud.com", "music.apple.com", "deezer.com", "tidal.com", "bandcamp.com", "vk.com", "ok.ru", "mixcloud.com", "audiomack.com"} {
 		if host == domain || strings.HasSuffix(host, "."+domain) {
 			return true

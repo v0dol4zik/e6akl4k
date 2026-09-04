@@ -86,14 +86,37 @@ type mediaPreview struct {
 }
 
 func (d *downloader) inlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
+	return d.searchLookup(ctx, query, 0)
+}
+
+func (d *downloader) searchLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, error) {
 	if directURL := detectURL(query); directURL != "" {
+		if _, ok := parseOctaveURL(directURL); ok && d.octave != nil {
+			preview, err := d.previewOctave(ctx, directURL)
+			if err != nil {
+				return nil, err
+			}
+			if preview.IsPlaylist {
+				return nil, errors.New("альбомы Octave скачиваются в личном чате с ботом")
+			}
+			return []inlineCandidate{{
+				URL: directURL, CacheKey: sourceCacheKey("octave", preview.SourceID, "mp3", "320"),
+				Title: preview.Title, Artist: preview.Artist, Duration: preview.Duration,
+				SourceID: preview.SourceID, Extractor: "octave",
+			}}, nil
+		}
 		return []inlineCandidate{{
-			URL:      directURL,
-			CacheKey: inlineCacheKey(directURL, ""),
-			Title:    directURL,
+			URL: directURL, CacheKey: inlineCacheKey(directURL, ""), Title: directURL,
 		}}, nil
 	}
+	youtube, err := d.youtubeInlineLookup(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return rankCandidates(query, expectedDuration, youtube), nil
+}
 
+func (d *downloader) youtubeInlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
 	args := append(d.commonArgs(), "--flat-playlist", "--dump-single-json", "--simulate", "--playlist-end", strconv.Itoa(inlineResultLimit), "--", "ytsearch"+strconv.Itoa(inlineResultLimit)+":"+query)
 	stdout, stderr, err := d.run(ctx, args...)
 	if err != nil {
@@ -117,11 +140,8 @@ func (d *downloader) inlineLookup(ctx context.Context, query string) ([]inlineCa
 		}
 		title, artist, duration := entry.resultMetadata()
 		candidates = append(candidates, inlineCandidate{
-			URL:      url,
-			CacheKey: inlineCacheKey(url, entry.ID),
-			Title:    title,
-			Artist:   artist,
-			Duration: duration,
+			URL: url, CacheKey: inlineCacheKey(url, entry.ID), Title: title, Artist: artist,
+			Duration: duration, SourceID: entry.ID, Extractor: "youtube",
 		})
 		if len(candidates) == inlineResultLimit {
 			break
@@ -144,13 +164,17 @@ func (m *mediaInfo) resultMetadata() (string, string, string) {
 }
 
 type downloader struct {
-	bin               string
-	downloadDir       string
-	cookiesFile       string
-	maxFileSize       int64
-	cookieSnapshotMu  sync.RWMutex
-	cookieSnapshot    []byte
-	maxPlaylistTracks int
+	bin                string
+	ffmpegBin          string
+	downloadDir        string
+	cookiesFile        string
+	maxFileSize        int64
+	cookieSnapshotMu   sync.RWMutex
+	cookieSnapshot     []byte
+	maxPlaylistTracks  int
+	octave             *octaveClient
+	ytdlpSleepRequests int
+	ytdlpFragments     int
 }
 
 type downloadProgress func(completed, total int)
@@ -168,6 +192,10 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 	bin, err := exec.LookPath("yt-dlp")
 	if err != nil {
 		return nil, errors.New("yt-dlp не найден в PATH")
+	}
+	ffmpegBin, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, errors.New("ffmpeg не найден в PATH")
 	}
 	absoluteDir, err := filepath.Abs(downloadDir)
 	if err != nil {
@@ -217,10 +245,12 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 	}
 	d := &downloader{
 		bin:               bin,
+		ffmpegBin:         ffmpegBin,
 		downloadDir:       absoluteDir,
 		cookiesFile:       cookiesFile,
 		maxFileSize:       maxFileSize,
 		maxPlaylistTracks: maxPlaylistTracks,
+		octave:            newOctaveClient(),
 	}
 	if cookiesFile != "" {
 		if err := d.refreshCookieSnapshot(); err != nil {
@@ -231,6 +261,12 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 }
 
 func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, error) {
+	if _, ok := parseOctaveURL(url); ok && d.octave != nil {
+		started := time.Now()
+		preview, err := d.previewOctave(ctx, url)
+		logMediaStage("source_probe", "octave", started, 0, err == nil)
+		return preview, err
+	}
 	info, stderr, err := d.probe(ctx, url)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -290,6 +326,9 @@ func (d *downloader) download(ctx context.Context, url, format, quality string, 
 }
 
 func (d *downloader) downloadRange(ctx context.Context, url, format, quality string, rangeStart, rangeEnd int, progress downloadProgress) ([]downloadResult, error) {
+	if _, ok := parseOctaveURL(url); ok && d.octave != nil {
+		return d.downloadOctaveRange(ctx, url, format, quality, rangeStart, rangeEnd, progress)
+	}
 	session, err := randomID()
 	if err != nil {
 		return nil, err
@@ -438,8 +477,10 @@ func validatePlaylistSizeWithLimit(count, limit int) error {
 }
 
 func (d *downloader) probe(ctx context.Context, url string) (*mediaInfo, string, error) {
+	started := time.Now()
 	args := append(d.commonArgs(), "--dump-single-json", "--simulate", "--ignore-errors", "--", url)
 	stdout, stderr, err := d.run(ctx, args...)
+	defer func() { logMediaStage("source_probe", sourceHost(url), started, 0, err == nil) }()
 	if bytes.Equal(bytes.TrimSpace(stdout), []byte("null")) {
 		if err == nil {
 			err = errors.New("yt-dlp не вернул информацию")
@@ -457,6 +498,7 @@ func (d *downloader) probe(ctx context.Context, url string) (*mediaInfo, string,
 }
 
 func (d *downloader) runDownload(ctx context.Context, url, format, quality, sessionDir, manifest string, selected []int, playlist bool, progress downloadProgress, total int) (string, error) {
+	started := time.Now()
 	template := "after_move:%(.{id,title,track,artist,uploader,channel,duration,duration_string,filepath,ext,playlist_index})j"
 	progressFile := filepath.Join(sessionDir, "progress.log")
 	args := append(d.commonArgs(),
@@ -484,6 +526,7 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 	}
 	args = append(args, "--", url)
 	_, stderr, err := d.runWithProgress(ctx, args, progressFile, progress, total)
+	logMediaStage("source_download", sourceHost(url), started, regularFilesSize(sessionDir), err == nil, "format", format, "quality", quality)
 	return stderr, err
 }
 
@@ -549,6 +592,10 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 }
 
 func (d *downloader) commonArgs() []string {
+	fragments := d.ytdlpFragments
+	if fragments <= 0 {
+		fragments = 4
+	}
 	args := []string{
 		"--ignore-config",
 		"--color", "never",
@@ -557,14 +604,30 @@ func (d *downloader) commonArgs() []string {
 		"--retries", "3",
 		"--fragment-retries", "3",
 		"--extractor-retries", "3",
-		"--sleep-requests", "1",
-		"--concurrent-fragments", "1",
+		"--concurrent-fragments", strconv.Itoa(fragments),
 		"--geo-bypass",
 		"--remote-components", "ejs:github",
 		"--extractor-args", "vk:force_mobile=1",
 		"--add-headers", "Accept-Language:en-US,en;q=0.9",
 	}
+	if d.ytdlpSleepRequests > 0 {
+		args = append(args, "--sleep-requests", strconv.Itoa(d.ytdlpSleepRequests))
+	}
 	return args
+}
+
+func regularFilesSize(root string) int64 {
+	var total int64
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return nil
+		}
+		if info, infoErr := entry.Info(); infoErr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, error) {

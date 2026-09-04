@@ -46,7 +46,7 @@ func (t deadlineTransport) RoundTrip(request *http.Request) (*http.Response, err
 	limit := t.requestLimit
 	if strings.HasSuffix(request.URL.Path, "/getUpdates") {
 		limit = t.pollLimit
-	} else if strings.HasPrefix(request.Header.Get("Content-Type"), "multipart/form-data") {
+	} else if strings.HasPrefix(request.Header.Get("Content-Type"), "multipart/form-data") || telegramMediaMethod(request.URL.Path) {
 		limit = t.uploadLimit
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), limit)
@@ -57,6 +57,15 @@ func (t deadlineTransport) RoundTrip(request *http.Request) (*http.Response, err
 	}
 	response.Body = &cancelOnClose{ReadCloser: response.Body, cancel: cancel}
 	return response, nil
+}
+
+func telegramMediaMethod(path string) bool {
+	for _, method := range []string{"/sendAudio", "/sendDocument", "/sendMediaGroup"} {
+		if strings.HasSuffix(path, method) {
+			return true
+		}
+	}
+	return false
 }
 
 type cancelOnClose struct {

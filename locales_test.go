@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode"
@@ -25,8 +26,8 @@ func TestTranslationsCoverEveryLanguage(t *testing.T) {
 func TestTranslationsUseLowercaseStyle(t *testing.T) {
 	protected := []string{
 		"AAC", "Apple", "Audiomack", "Bandcamp", "Daft", "Deezer", "FLAC", "M4A",
-		"Mixcloud", "MP3", "OGG", "SoundCloud", "Spotify", "Tidal", "VK", "Yandex",
-		"YouTube", "ZIP",
+		"Mixcloud", "MP3", "Octave", "OGG", "SoundCloud", "Spotify", "Tidal", "VK", "Yandex",
+		"Telegram", "YouTube", "ZIP",
 	}
 	check := func(key, lang, value string) {
 		t.Helper()
@@ -91,7 +92,7 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 		if !strings.Contains(welcome, "@music_test_bot") || !strings.Contains(help, "@music_test_bot") {
 			t.Errorf("%s guide does not contain the actual bot username", lang)
 		}
-		for _, feature := range []string{"Daft Punk", "Spotify", "ZIP", "MP3"} {
+		for _, feature := range []string{"Daft Punk", "Octave", "Spotify", "ZIP", "MP3"} {
 			if !strings.Contains(help, feature) {
 				t.Errorf("%s help does not explain %q", lang, feature)
 			}
@@ -108,12 +109,12 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 func TestBotCommandsAreLocalized(t *testing.T) {
 	ru := botCommands("ru", false)
 	en := botCommands("en", false)
-	if len(ru) != 3 || len(en) != 3 || ru[1].Description == en[1].Description {
+	if len(ru) != 4 || len(en) != 4 || ru[1].Description == en[1].Description || ru[3].Command != "id" {
 		t.Fatalf("unexpected localized commands: ru=%#v en=%#v", ru, en)
 	}
 	admin := botCommands("en", true)
-	if len(admin) != 5 || admin[3].Command != "stats" || admin[4].Command != "status" {
-		t.Fatalf("unexpected admin commands: %#v", admin)
+	if !reflect.DeepEqual(admin, en) {
+		t.Fatalf("admin commands must stay hidden from the Telegram menu: public=%#v admin=%#v", en, admin)
 	}
 	for _, commands := range [][]tgbotapi.BotCommand{ru, en, admin} {
 		for _, command := range commands {

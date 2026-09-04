@@ -47,6 +47,35 @@ type store struct {
 	db *sql.DB
 }
 
+type adminRecord struct {
+	UserID    int64
+	AddedBy   int64
+	CreatedAt time.Time
+}
+
+type banRecord struct {
+	UserID    int64
+	BannedBy  int64
+	Reason    string
+	CreatedAt time.Time
+}
+
+type auditRecord struct {
+	ActorID   int64
+	Action    string
+	TargetID  int64
+	Details   string
+	CreatedAt time.Time
+}
+
+type userInfo struct {
+	UserID       int64
+	Language     string
+	UpdatedAt    time.Time
+	Downloads    int64
+	LastDownload time.Time
+}
+
 func openStore(path string) (*store, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -77,6 +106,18 @@ CREATE TABLE IF NOT EXISTS users (
   user_id INTEGER PRIMARY KEY,
   language TEXT NOT NULL,
   updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS telegram_users (
+  user_id INTEGER PRIMARY KEY,
+  username TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_notices (
+  user_id INTEGER NOT NULL,
+  notice TEXT NOT NULL,
+  dismissed INTEGER NOT NULL DEFAULT 0,
+  last_shown_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, notice)
 );
 CREATE TABLE IF NOT EXISTS audio_cache (
   cache_key TEXT PRIMARY KEY,
@@ -115,8 +156,44 @@ CREATE TABLE IF NOT EXISTS telegram_updates (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS admins (
+  user_id INTEGER PRIMARY KEY,
+  added_by INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bans (
+  user_id INTEGER PRIMARY KEY,
+  banned_by INTEGER NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_id INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  target_id INTEGER NOT NULL DEFAULT 0,
+  details TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS media_stage_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stage TEXT NOT NULL,
+  source TEXT NOT NULL,
+  elapsed_ms INTEGER NOT NULL,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  ok INTEGER NOT NULL,
+  mode TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT '',
+  quality TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS telegram_updates_status_id ON telegram_updates(status, update_id);
 CREATE INDEX IF NOT EXISTS download_history_created_at ON download_history(created_at);
+CREATE INDEX IF NOT EXISTS bans_created_at ON bans(created_at);
+CREATE INDEX IF NOT EXISTS admin_audit_created_at ON admin_audit(created_at);
+CREATE INDEX IF NOT EXISTS media_stage_samples_created_at ON media_stage_samples(created_at);
+CREATE INDEX IF NOT EXISTS media_stage_samples_stage_source ON media_stage_samples(stage,source,created_at);
+CREATE INDEX IF NOT EXISTS telegram_users_username ON telegram_users(username);
 INSERT OR IGNORE INTO metadata(name, value) VALUES ('started_at', CAST(unixepoch() AS TEXT));
 CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 `)
@@ -128,6 +205,155 @@ CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 		return err
 	}
 	return nil
+}
+
+func (s *store) addAdmin(ctx context.Context, userID, actorID int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO admins(user_id,added_by,created_at) VALUES(?,?,unixepoch())`, userID, actorID)
+	if err != nil {
+		return false, err
+	}
+	changed, _ := result.RowsAffected()
+	return changed > 0, nil
+}
+
+func (s *store) deleteAdmin(ctx context.Context, userID int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM admins WHERE user_id=?`, userID)
+	if err != nil {
+		return false, err
+	}
+	changed, _ := result.RowsAffected()
+	return changed > 0, nil
+}
+
+func (s *store) isDynamicAdmin(ctx context.Context, userID int64) bool {
+	var exists int
+	return s.db.QueryRowContext(ctx, `SELECT 1 FROM admins WHERE user_id=?`, userID).Scan(&exists) == nil
+}
+
+func (s *store) admins(ctx context.Context) ([]adminRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id,added_by,created_at FROM admins ORDER BY created_at,user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []adminRecord
+	for rows.Next() {
+		var item adminRecord
+		var created int64
+		if err := rows.Scan(&item.UserID, &item.AddedBy, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = time.Unix(created, 0)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *store) banUser(ctx context.Context, userID, actorID int64, reason string) (bool, error) {
+	if len(reason) > 500 {
+		reason = reason[:500]
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO bans(user_id,banned_by,reason,created_at) VALUES(?,?,?,unixepoch())`, userID, actorID, reason)
+	if err != nil {
+		return false, err
+	}
+	changed, _ := result.RowsAffected()
+	return changed > 0, nil
+}
+
+func (s *store) pardonUser(ctx context.Context, userID int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM bans WHERE user_id=?`, userID)
+	if err != nil {
+		return false, err
+	}
+	changed, _ := result.RowsAffected()
+	return changed > 0, nil
+}
+
+func (s *store) isBanned(ctx context.Context, userID int64) (banRecord, bool) {
+	var item banRecord
+	var created int64
+	err := s.db.QueryRowContext(ctx, `SELECT user_id,banned_by,reason,created_at FROM bans WHERE user_id=?`, userID).Scan(&item.UserID, &item.BannedBy, &item.Reason, &created)
+	if err != nil {
+		return banRecord{}, false
+	}
+	item.CreatedAt = time.Unix(created, 0)
+	return item, true
+}
+
+func (s *store) bans(ctx context.Context, limit, offset int) ([]banRecord, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id,banned_by,reason,created_at FROM bans ORDER BY created_at DESC,user_id LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []banRecord
+	for rows.Next() {
+		var item banRecord
+		var created int64
+		if err := rows.Scan(&item.UserID, &item.BannedBy, &item.Reason, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = time.Unix(created, 0)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *store) audit(ctx context.Context, actorID int64, action string, targetID int64, details string) {
+	if len(details) > 1000 {
+		details = details[:1000]
+	}
+	_, _ = s.db.ExecContext(ctx, `INSERT INTO admin_audit(actor_id,action,target_id,details,created_at) VALUES(?,?,?,?,unixepoch())`, actorID, action, targetID, details)
+}
+
+func (s *store) auditLog(ctx context.Context, limit int) ([]auditRecord, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT actor_id,action,target_id,details,created_at FROM admin_audit ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []auditRecord
+	for rows.Next() {
+		var item auditRecord
+		var created int64
+		if err := rows.Scan(&item.ActorID, &item.Action, &item.TargetID, &item.Details, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = time.Unix(created, 0)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *store) userInfo(ctx context.Context, userID int64) (userInfo, bool, error) {
+	item := userInfo{UserID: userID}
+	var updated int64
+	err := s.db.QueryRowContext(ctx, `SELECT language,updated_at FROM users WHERE user_id=?`, userID).Scan(&item.Language, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return item, false, nil
+	}
+	if err != nil {
+		return item, false, err
+	}
+	item.UpdatedAt = time.Unix(updated, 0)
+	var last int64
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*),COALESCE(max(created_at),0) FROM download_history WHERE user_id=?`, userID).Scan(&item.Downloads, &last); err != nil {
+		return item, true, err
+	}
+	if last > 0 {
+		item.LastDownload = time.Unix(last, 0)
+	}
+	return item, true, nil
 }
 
 func (s *store) recordDownload(ctx context.Context, userID int64, source, format, status string, elapsed time.Duration, message string) {
@@ -148,6 +374,81 @@ func (s *store) language(ctx context.Context, userID int64) (string, bool) {
 func (s *store) setLanguage(ctx context.Context, userID int64, lang string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO users(user_id, language, updated_at) VALUES(?,?,unixepoch())
 ON CONFLICT(user_id) DO UPDATE SET language=excluded.language, updated_at=excluded.updated_at`, userID, lang)
+	return err
+}
+
+func normalizeTelegramUsername(value string) (string, bool) {
+	value = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "@"))
+	if len(value) < 5 || len(value) > 32 {
+		return "", false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '_' {
+			return "", false
+		}
+	}
+	return strings.ToLower(value), true
+}
+
+func (s *store) observeTelegramUser(ctx context.Context, user *tgbotapi.User) error {
+	if s == nil || user == nil || user.ID <= 0 {
+		return nil
+	}
+	username, valid := normalizeTelegramUsername(user.UserName)
+	if !valid {
+		username = ""
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if username != "" {
+		if _, err = tx.ExecContext(ctx, `UPDATE telegram_users SET username='' WHERE username=? AND user_id<>?`, username, user.ID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO telegram_users(user_id,username,updated_at) VALUES(?,?,unixepoch())
+ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, updated_at=excluded.updated_at`, user.ID, username); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *store) telegramUserIDByUsername(ctx context.Context, username string) (int64, bool, error) {
+	username, valid := normalizeTelegramUsername(username)
+	if !valid {
+		return 0, false, nil
+	}
+	var userID int64
+	err := s.db.QueryRowContext(ctx, `SELECT user_id FROM telegram_users WHERE username=? ORDER BY updated_at DESC LIMIT 1`, username).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return userID, err == nil, err
+}
+
+func (s *store) claimUserNotice(ctx context.Context, userID int64, notice string, interval time.Duration) (bool, error) {
+	if s == nil || userID <= 0 || strings.TrimSpace(notice) == "" {
+		return false, nil
+	}
+	seconds := max(int64(interval/time.Second), 0)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO user_notices(user_id,notice,dismissed,last_shown_at) VALUES(?,?,0,unixepoch())
+ON CONFLICT(user_id,notice) DO UPDATE SET last_shown_at=unixepoch()
+WHERE user_notices.dismissed=0 AND user_notices.last_shown_at <= unixepoch()-?`, userID, notice, seconds)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
+}
+
+func (s *store) dismissUserNotice(ctx context.Context, userID int64, notice string) error {
+	if s == nil || userID <= 0 || strings.TrimSpace(notice) == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO user_notices(user_id,notice,dismissed,last_shown_at) VALUES(?,?,1,0)
+ON CONFLICT(user_id,notice) DO UPDATE SET dismissed=1`, userID, notice)
 	return err
 }
 
@@ -250,6 +551,12 @@ func (s *store) cleanup(ctx context.Context, ttl time.Duration) error {
 	}
 	if err == nil {
 		_, err = s.db.ExecContext(ctx, `DELETE FROM telegram_updates WHERE status='done' AND updated_at < ?`, time.Now().Add(-7*24*time.Hour).Unix())
+	}
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `DELETE FROM media_stage_samples WHERE created_at < ?`, time.Now().Add(-30*24*time.Hour).Unix())
+	}
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `DELETE FROM media_stage_samples WHERE id NOT IN (SELECT id FROM media_stage_samples ORDER BY id DESC LIMIT 50000)`)
 	}
 	return err
 }
