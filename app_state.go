@@ -1,6 +1,16 @@
 package main
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+type userPreference struct {
+	Format  string
+	Quality string
+}
+
+var errInvalidDownloadOption = errors.New("недопустимый формат или качество")
 
 func (a *app) getLang(userID int64) (string, bool) {
 	a.mu.Lock()
@@ -34,6 +44,47 @@ func (a *app) setLang(userID int64, lang string) {
 			return
 		}
 	}
+}
+
+// getPreference returns the user's default download format and quality.
+// ok is false when the user should be asked every time.
+func (a *app) getPreference(userID int64) (string, string, bool) {
+	a.mu.Lock()
+	pref, cached := a.userPref[userID]
+	a.mu.Unlock()
+	if !cached && a.store != nil {
+		format, quality, _ := a.store.userPreference(a.ctx, userID)
+		pref = userPreference{Format: format, Quality: quality}
+		a.mu.Lock()
+		a.userPref[userID] = pref
+		a.mu.Unlock()
+	}
+	if pref.Format == "" || !validDownloadOption(pref.Format, pref.Quality) {
+		return "", "", false
+	}
+	return pref.Format, pref.Quality, true
+}
+
+// setPreference stores the default download option; an empty format means "ask each time".
+func (a *app) setPreference(userID int64, format, quality string) error {
+	if format != "" && !validDownloadOption(format, quality) {
+		return errInvalidDownloadOption
+	}
+	if format == "" {
+		quality = ""
+	}
+	a.mu.Lock()
+	a.userPref[userID] = userPreference{Format: format, Quality: quality}
+	a.mu.Unlock()
+	if a.store != nil {
+		if err := a.store.setUserPreference(a.ctx, userID, format, quality); err != nil {
+			a.mu.Lock()
+			delete(a.userPref, userID)
+			a.mu.Unlock()
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *app) getURL(key string, userID, chatID int64) (pendingURL, bool) {

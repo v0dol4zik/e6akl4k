@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -185,5 +186,64 @@ func TestStoreAggregatesMediaPerformance(t *testing.T) {
 	}
 	if rows[0].Count != 5 || rows[0].OK != 4 || rows[0].P50 != 30*time.Millisecond || rows[0].P95 != 40*time.Millisecond {
 		t.Fatalf("performance=%#v", rows[0])
+	}
+}
+
+func TestStoreMigratesUserPreferencesOnExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE users (user_id INTEGER PRIMARY KEY, language TEXT NOT NULL, updated_at INTEGER NOT NULL);
+INSERT INTO users(user_id, language, updated_at) VALUES(7, 'ru', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	state, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lang, ok := state.language(ctx, 7); !ok || lang != "ru" {
+		t.Fatalf("language=%q ok=%v", lang, ok)
+	}
+	if format, quality, ok := state.userPreference(ctx, 7); ok || format != "" || quality != "" {
+		t.Fatalf("legacy user must ask each time: format=%q quality=%q ok=%v", format, quality, ok)
+	}
+	if err := state.setUserPreference(ctx, 7, "mp3", "320"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.setUserPreference(ctx, 8, "flac", "best"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err = openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	if lang, ok := state.language(ctx, 7); !ok || lang != "ru" {
+		t.Fatalf("preference must keep the language: lang=%q ok=%v", lang, ok)
+	}
+	if format, quality, ok := state.userPreference(ctx, 7); !ok || format != "mp3" || quality != "320" {
+		t.Fatalf("preference=%q/%q ok=%v", format, quality, ok)
+	}
+	if format, quality, ok := state.userPreference(ctx, 8); !ok || format != "flac" || quality != "best" {
+		t.Fatalf("preference=%q/%q ok=%v", format, quality, ok)
+	}
+	if err := state.setUserPreference(ctx, 7, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := state.userPreference(ctx, 7); ok {
+		t.Fatal("clearing the preference must switch back to asking each time")
+	}
+	if _, _, ok := state.userPreference(ctx, 999); ok {
+		t.Fatal("unknown user must have no preference")
 	}
 }

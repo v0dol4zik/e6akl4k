@@ -5,11 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func TestPendingURLIsBoundToOwnerAndChat(t *testing.T) {
@@ -177,5 +182,185 @@ func TestDeliveryStatusAndError(t *testing.T) {
 	}
 	if got := deliveryStatus(deliveryReport{Failed: 1}); got != "delivery_failed" {
 		t.Fatalf("failed status=%q", got)
+	}
+}
+
+func TestPreferenceCallbackStoresDefaultFormat(t *testing.T) {
+	var edits []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch filepath.Base(r.URL.Path) {
+		case "getMe":
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+		case "editMessageText":
+			_ = r.ParseForm()
+			edits = append(edits, r.FormValue("text"))
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":10,"type":"private"},"text":"ok"}}`)
+		default:
+			fmt.Fprint(w, `{"ok":true,"result":true}`)
+		}
+	})
+	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	app := newAppWithServices(context.Background(), bot, nil, state, config{DownloadWorkers: 1, LookupWorkers: 1})
+	app.setLang(10, "en")
+	callback := func(data string) *tgbotapi.CallbackQuery {
+		return &tgbotapi.CallbackQuery{ID: "cb", From: &tgbotapi.User{ID: 10}, Message: &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}, Data: data}
+	}
+	app.handleCallback(callback("pref:mp3:320"))
+	if format, quality, ok := app.getPreference(10); !ok || format != "mp3" || quality != "320" {
+		t.Fatalf("cached preference=%q/%q ok=%v", format, quality, ok)
+	}
+	if format, quality, ok := state.userPreference(context.Background(), 10); !ok || format != "mp3" || quality != "320" {
+		t.Fatalf("stored preference=%q/%q ok=%v", format, quality, ok)
+	}
+	if lang, ok := state.language(context.Background(), 10); !ok || lang != "en" {
+		t.Fatalf("language must survive the preference update: %q ok=%v", lang, ok)
+	}
+	app.handleCallback(callback("pref:wav:best"))
+	if format, _, ok := app.getPreference(10); !ok || format != "mp3" {
+		t.Fatalf("invalid option must be ignored: format=%q ok=%v", format, ok)
+	}
+	app.handleCallback(callback("pref:ask"))
+	if _, _, ok := app.getPreference(10); ok {
+		t.Fatal("pref:ask must switch back to asking each time")
+	}
+	if _, _, ok := state.userPreference(context.Background(), 10); ok {
+		t.Fatal("pref:ask must clear the stored preference")
+	}
+	if len(edits) != 2 || !strings.Contains(edits[0], "MP3 (320 kbps)") || !strings.Contains(edits[1], "ask each time") {
+		t.Fatalf("unexpected confirmations: %q", edits)
+	}
+	// A fresh app instance must pick the value up from storage rather than the cache.
+	if err := state.setUserPreference(context.Background(), 11, "flac", "best"); err != nil {
+		t.Fatal(err)
+	}
+	if format, quality, ok := app.getPreference(11); !ok || format != "flac" || quality != "best" {
+		t.Fatalf("preference from storage=%q/%q ok=%v", format, quality, ok)
+	}
+}
+
+func TestSettingsCommandShowsCurrentDefault(t *testing.T) {
+	var sentText, markup string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch filepath.Base(r.URL.Path) {
+		case "getMe":
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+		case "sendMessage":
+			_ = r.ParseForm()
+			sentText, markup = r.FormValue("text"), r.FormValue("reply_markup")
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":10,"type":"private"}}}`)
+		default:
+			fmt.Fprint(w, `{"ok":true,"result":true}`)
+		}
+	})
+	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := newApp(context.Background(), bot, nil)
+	app.setLang(10, "ru")
+	if err := app.setPreference(10, "flac", "best"); err != nil {
+		t.Fatal(err)
+	}
+	app.handleMessage(&tgbotapi.Message{
+		Text:     "/settings",
+		Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 9}},
+		From:     &tgbotapi.User{ID: 10},
+		Chat:     &tgbotapi.Chat{ID: 10, Type: "private"},
+	})
+	if !strings.Contains(sentText, "FLAC") || !strings.Contains(sentText, "настройки") {
+		t.Fatalf("unexpected settings text: %q", sentText)
+	}
+	for _, data := range []string{"pref:mp3:best", "pref:mp3:128", "pref:mp3:320", "pref:flac:best", "pref:m4a:best", "pref:ogg:best", "pref:ask"} {
+		if !strings.Contains(markup, `"`+data+`"`) {
+			t.Errorf("settings keyboard lacks %q: %s", data, markup)
+		}
+	}
+	if strings.Contains(markup, `"dl:`) {
+		t.Fatalf("settings keyboard must not start downloads: %s", markup)
+	}
+}
+
+func TestIncomingURLWithDefaultPreferenceSkipsFormatKeyboard(t *testing.T) {
+	var sendAudioCalls, keyboardCalls atomic.Int32
+	var mu sync.Mutex
+	var statusTexts []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = r.ParseForm()
+		if strings.Contains(r.FormValue("reply_markup"), `"dl:`) {
+			keyboardCalls.Add(1)
+		}
+		switch filepath.Base(r.URL.Path) {
+		case "getMe":
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+		case "sendMessage", "editMessageText":
+			mu.Lock()
+			statusTexts = append(statusTexts, r.FormValue("text"))
+			mu.Unlock()
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":10,"type":"private"},"text":"status"}}`)
+		case "sendAudio":
+			sendAudioCalls.Add(1)
+			if got := r.FormValue("audio"); got != "cached-file" {
+				t.Errorf("audio=%q", got)
+			}
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"audio":{"file_id":"cached-file","file_unique_id":"u","duration":1}}}`)
+		default:
+			fmt.Fprint(w, `{"ok":true,"result":true}`)
+		}
+	})
+	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: handler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	dl := &downloader{downloadDir: t.TempDir(), maxFileSize: maxFileSize, maxPlaylistTracks: 75, octave: testOctaveClient(http.NotFoundHandler())}
+	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour, MaxPlaylistTracks: 75, MaxFileSize: maxFileSize}
+	app := newAppWithServices(context.Background(), bot, dl, state, cfg)
+	app.setLang(10, "en")
+	if err := state.putCachedAudio(context.Background(), cachedAudio{Key: sourceCacheKey("octave", "11", "mp3", "320"), FileID: "cached-file", Title: "Track", Format: "mp3"}); err != nil {
+		t.Fatal(err)
+	}
+	message := &tgbotapi.Message{Text: "https://music.octavestreaming.com/track/11", From: &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}
+
+	app.handleMessage(message)
+	if sendAudioCalls.Load() != 0 || keyboardCalls.Load() != 1 {
+		t.Fatalf("without a default the format keyboard must be shown: audio=%d keyboards=%d", sendAudioCalls.Load(), keyboardCalls.Load())
+	}
+
+	if err := app.setPreference(10, "mp3", "320"); err != nil {
+		t.Fatal(err)
+	}
+	app.handleMessage(message)
+	if sendAudioCalls.Load() != 1 || keyboardCalls.Load() != 1 {
+		t.Fatalf("with a default the download must start immediately: audio=%d keyboards=%d", sendAudioCalls.Load(), keyboardCalls.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	hinted := false
+	for _, text := range statusTexts {
+		if strings.Contains(text, "format: 🎵 MP3 (320 kbps)") && strings.Contains(text, "/settings") {
+			hinted = true
+		}
+	}
+	if !hinted {
+		t.Fatalf("status must mention the applied default: %q", statusTexts)
+	}
+	var historyFormat string
+	if err := state.db.QueryRow(`SELECT format FROM download_history ORDER BY id DESC LIMIT 1`).Scan(&historyFormat); err != nil || historyFormat != "mp3:320" {
+		t.Fatalf("history format=%q err=%v", historyFormat, err)
 	}
 }

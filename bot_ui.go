@@ -22,22 +22,54 @@ func languageKeyboard() *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
+// downloadOptions lists the selectable format/quality pairs in keyboard order.
+var downloadOptions = []struct {
+	labelKey, format, quality string
+}{
+	{"btn_mp3_best", "mp3", "best"},
+	{"btn_mp3_128", "mp3", "128"},
+	{"btn_mp3_320", "mp3", "320"},
+	{"btn_flac", "flac", "best"},
+	{"btn_m4a", "m4a", "best"},
+	{"btn_ogg", "ogg", "best"},
+}
+
 func formatKeyboard(key, lang string) *tgbotapi.InlineKeyboardMarkup {
-	buttons := [][2]string{
-		{tr("btn_mp3_best", lang), "dl:mp3:best:" + key},
-		{tr("btn_mp3_128", lang), "dl:mp3:128:" + key},
-		{tr("btn_mp3_320", lang), "dl:mp3:320:" + key},
-		{tr("btn_flac", lang), "dl:flac:best:" + key},
-		{tr("btn_m4a", lang), "dl:m4a:best:" + key},
-		{tr("btn_ogg", lang), "dl:ogg:best:" + key},
-		{tr("btn_cancel", lang), "cancel:" + key},
+	buttons := make([][2]string, 0, len(downloadOptions)+1)
+	for _, option := range downloadOptions {
+		buttons = append(buttons, [2]string{tr(option.labelKey, lang), "dl:" + option.format + ":" + option.quality + ":" + key})
 	}
+	buttons = append(buttons, [2]string{tr("btn_cancel", lang), "cancel:" + key})
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(buttons))
 	for _, button := range buttons {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(button[0], button[1])))
 	}
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &markup
+}
+
+// settingsKeyboard offers the formatKeyboard options as defaults plus "ask each time".
+func settingsKeyboard(lang string) *tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(downloadOptions)+1)
+	for _, option := range downloadOptions {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr(option.labelKey, lang), "pref:"+option.format+":"+option.quality)))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("settings_ask_each_time", lang), "pref:ask")))
+	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	return &markup
+}
+
+// preferenceLabel renders a stored default; an empty format means "ask each time".
+func preferenceLabel(format, quality, lang string) string {
+	if format == "" {
+		return tr("settings_ask_each_time", lang)
+	}
+	for _, option := range downloadOptions {
+		if option.format == format && option.quality == quality {
+			return tr(option.labelKey, lang)
+		}
+	}
+	return strings.ToUpper(format) + " " + quality
 }
 
 func deliveryKeyboard(key, format, quality, lang string) *tgbotapi.InlineKeyboardMarkup {

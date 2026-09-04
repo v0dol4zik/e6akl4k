@@ -48,6 +48,13 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 		log.Printf("save pending URL: %v", err)
 		return
 	}
+	if !preview.IsPlaylist {
+		if format, quality, ok := a.getPreference(message.From.ID); ok {
+			a.deleteStatusMessage(status)
+			a.startDownload(message.From.ID, message.Chat.ID, key, format, quality, lang, nil)
+			return
+		}
+	}
 	text := previewText(preview, lang)
 	var keyboard *tgbotapi.InlineKeyboardMarkup
 	if preview.IsPlaylist {
@@ -133,6 +140,10 @@ func (a *app) handleSearchPick(callback *tgbotapi.CallbackQuery) {
 		a.sendText(callback.From.ID, tr("action_unavailable", lang), "", nil)
 		return
 	}
+	if format, quality, ok := a.getPreference(callback.From.ID); ok {
+		a.startDownload(callback.From.ID, chatID, key, format, quality, lang, callback)
+		return
+	}
 	a.safeEdit(callback, previewText(pending.Preview, lang), "HTML", formatKeyboard(key, lang))
 }
 
@@ -177,6 +188,10 @@ func (a *app) handleRangeChoice(callback *tgbotapi.CallbackQuery) {
 	}
 	pending, ok = a.setURLRange(parts[2], callback.From.ID, chatID, start, end)
 	if !ok {
+		return
+	}
+	if format, quality, ok := a.getPreference(callback.From.ID); ok {
+		a.startDownload(callback.From.ID, chatID, parts[2], format, quality, lang, callback)
 		return
 	}
 	text := previewText(pending.Preview, lang) + "\n" + tr("selected_range", lang, "start", strconv.Itoa(start), "end", strconv.Itoa(end))

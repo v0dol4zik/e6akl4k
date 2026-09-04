@@ -200,9 +200,15 @@ CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `ALTER TABLE audio_cache ADD COLUMN media_type TEXT NOT NULL DEFAULT 'audio'`)
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
+	for _, statement := range []string{
+		`ALTER TABLE audio_cache ADD COLUMN media_type TEXT NOT NULL DEFAULT 'audio'`,
+		`ALTER TABLE users ADD COLUMN default_format TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN default_quality TEXT NOT NULL DEFAULT ''`,
+	} {
+		_, err = s.db.ExecContext(ctx, statement)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
 	}
 	return nil
 }
@@ -374,6 +380,23 @@ func (s *store) language(ctx context.Context, userID int64) (string, bool) {
 func (s *store) setLanguage(ctx context.Context, userID int64, lang string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO users(user_id, language, updated_at) VALUES(?,?,unixepoch())
 ON CONFLICT(user_id) DO UPDATE SET language=excluded.language, updated_at=excluded.updated_at`, userID, lang)
+	return err
+}
+
+// userPreference returns the stored default download format and quality.
+// An empty format means the user is asked every time.
+func (s *store) userPreference(ctx context.Context, userID int64) (string, string, bool) {
+	var format, quality string
+	err := s.db.QueryRowContext(ctx, `SELECT default_format, default_quality FROM users WHERE user_id=?`, userID).Scan(&format, &quality)
+	if err != nil || format == "" {
+		return "", "", false
+	}
+	return format, quality, true
+}
+
+func (s *store) setUserPreference(ctx context.Context, userID int64, format, quality string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO users(user_id, language, default_format, default_quality, updated_at) VALUES(?,?,?,?,unixepoch())
+ON CONFLICT(user_id) DO UPDATE SET default_format=excluded.default_format, default_quality=excluded.default_quality, updated_at=excluded.updated_at`, userID, defaultLang, format, quality)
 	return err
 }
 

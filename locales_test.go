@@ -92,7 +92,7 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 		if !strings.Contains(welcome, "@music_test_bot") || !strings.Contains(help, "@music_test_bot") {
 			t.Errorf("%s guide does not contain the actual bot username", lang)
 		}
-		for _, feature := range []string{"Daft Punk", "Octave", "Spotify", "ZIP", "MP3"} {
+		for _, feature := range []string{"Daft Punk", "Octave", "Spotify", "ZIP", "MP3", "/settings"} {
 			if !strings.Contains(help, feature) {
 				t.Errorf("%s help does not explain %q", lang, feature)
 			}
@@ -109,7 +109,7 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 func TestBotCommandsAreLocalized(t *testing.T) {
 	ru := botCommands("ru", false)
 	en := botCommands("en", false)
-	if len(ru) != 4 || len(en) != 4 || ru[1].Description == en[1].Description || ru[3].Command != "id" {
+	if len(ru) != 5 || len(en) != 5 || ru[1].Description == en[1].Description || ru[3].Command != "settings" || ru[4].Command != "id" {
 		t.Fatalf("unexpected localized commands: ru=%#v en=%#v", ru, en)
 	}
 	admin := botCommands("en", true)

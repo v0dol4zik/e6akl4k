@@ -72,6 +72,7 @@ type app struct {
 
 	mu            sync.Mutex
 	userLang      map[int64]string
+	userPref      map[int64]userPreference
 	urls          map[string]pendingURL
 	urlOrder      []string
 	active        map[string]activeDownload
@@ -113,6 +114,7 @@ func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *d
 		inlineLimiter: newRateLimiter(cfg.InlineRateLimit, cfg.RateWindow),
 		octaveRemote:  newCircuitBreaker(3, 5*time.Minute, 10*time.Minute),
 		userLang:      make(map[int64]string),
+		userPref:      make(map[int64]userPreference),
 		urls:          make(map[string]pendingURL),
 		active:        make(map[string]activeDownload),
 		activeUser:    make(map[int64]bool),
@@ -175,6 +177,12 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 			} else {
 				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 			}
+		case "settings":
+			if lang, ok := a.getLang(userID); ok {
+				a.sendText(message.Chat.ID, a.settingsText(userID, lang), "HTML", settingsKeyboard(lang))
+			} else {
+				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
+			}
 		default:
 			handled = false
 		}
@@ -233,6 +241,8 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		if !existed {
 			a.sendText(callback.From.ID, a.guideText("welcome", lang), "HTML", nil)
 		}
+	case strings.HasPrefix(data, "pref:"):
+		a.handlePreferenceChoice(callback)
 	case strings.HasPrefix(data, "cancel:"):
 		a.handlePendingCancel(callback)
 	case strings.HasPrefix(data, "cancel_download:"):
@@ -262,25 +272,42 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 	if callback.Message != nil && callback.Message.Chat != nil {
 		chatID = callback.Message.Chat.ID
 	}
-	if pending, ok := a.getURL(urlKey, callback.From.ID, chatID); ok && pending.Preview.IsPlaylist && selectedTrackCount(pending) > playlistZIPThreshold && pending.Delivery == "" {
-		a.safeEdit(callback, tr("choose_delivery", lang), "HTML", deliveryKeyboard(urlKey, format, quality, lang))
+	a.startDownload(callback.From.ID, chatID, urlKey, format, quality, lang, callback)
+}
+
+// startDownload runs the download flow for a stored pending URL. When callback is nil
+// (a default format was applied without a button press) status updates go to a fresh
+// message instead of editing the callback message.
+func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang string, callback *tgbotapi.CallbackQuery) {
+	if !validDownloadOption(format, quality) {
 		return
 	}
-	if !a.beginUserDownload(callback.From.ID) {
+	showStatus := func(text, parseMode string, markup *tgbotapi.InlineKeyboardMarkup) *tgbotapi.Message {
+		if callback != nil {
+			return a.safeEdit(callback, text, parseMode, markup)
+		}
+		return a.sendText(chatID, text, parseMode, markup)
+	}
+	if pending, ok := a.getURL(urlKey, userID, chatID); ok && pending.Preview.IsPlaylist && selectedTrackCount(pending) > playlistZIPThreshold && pending.Delivery == "" {
+		showStatus(tr("choose_delivery", lang), "HTML", deliveryKeyboard(urlKey, format, quality, lang))
+		return
+	}
+	if !a.beginUserDownload(userID) {
 		a.sendText(chatID, tr("user_download_active", lang), "", nil)
 		return
 	}
-	defer a.finishUserDownload(callback.From.ID)
-	pending, ok := a.popURL(urlKey, callback.From.ID, chatID)
+	defer a.finishUserDownload(userID)
+	pending, ok := a.popURL(urlKey, userID, chatID)
 	if !ok {
-		a.sendText(callback.From.ID, tr("action_unavailable", lang), "", nil)
+		a.sendText(userID, tr("action_unavailable", lang), "", nil)
 		return
 	}
 	url := pending.URL
 	historyStarted := time.Now()
 	historyStatus := "failed"
 	historyError := ""
-	status := a.safeEdit(callback, tr("download_starting", lang), "HTML", nil)
+	starting := a.appliedPreferenceHint(userID, format, quality, lang) + tr("download_starting", lang)
+	status := showStatus(starting, "HTML", nil)
 
 	cancelKey, err := randomID()
 	if err != nil {
@@ -290,15 +317,15 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 	downloadCtx, cancel := context.WithCancel(a.ctx)
 	defer func() {
 		if a.store != nil {
-			a.store.recordDownload(a.ctx, callback.From.ID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), historyError)
+			a.store.recordDownload(a.ctx, userID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), historyError)
 		}
 		if historyStatus == "delivered" || historyStatus == "partial" {
 			a.deleteStatusMessage(status)
-			a.maybeSendSupportNotice(chatID, callback.From.ID, lang)
+			a.maybeSendSupportNotice(chatID, userID, lang)
 		}
 	}()
 	a.mu.Lock()
-	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: chatID, userID: callback.From.ID}
+	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: chatID, userID: userID}
 	a.mu.Unlock()
 	defer func() {
 		cancel()
@@ -307,7 +334,7 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 		a.mu.Unlock()
 	}()
 	if status != nil {
-		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, tr("download_starting", lang), *downloadCancelKeyboard(cancelKey, lang))
+		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, starting, *downloadCancelKeyboard(cancelKey, lang))
 		edit.ParseMode = "HTML"
 		if sent, sendErr := sendTelegram(a.bot, edit); sendErr == nil {
 			status = &sent
@@ -356,7 +383,7 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 			if errors.Is(batchErr, errQueueFull) {
 				if report.Delivered == 0 {
 					a.restoreURL(urlKey, pending)
-					a.safeEdit(callback, tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
+					showStatus(tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
 				} else {
 					a.sendText(chatID, tr("queue_full", lang), "", nil)
 				}
@@ -404,7 +431,7 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 		}
 		if errors.Is(err, errQueueFull) {
 			a.restoreURL(urlKey, pending)
-			a.safeEdit(callback, tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
+			showStatus(tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
 			return
 		}
 		var tooLarge playlistTooLargeError
@@ -412,7 +439,7 @@ func (a *app) handleDownload(callback *tgbotapi.CallbackQuery) {
 			a.sendText(chatID, tr("playlist_too_large", lang, "count", strconv.Itoa(tooLarge.Count), "limit", strconv.Itoa(tooLarge.Limit)), "", nil)
 			return
 		}
-		log.Printf("Ошибка загрузки source=%s user_id=%d: %v", sourceHost(url), callback.From.ID, err)
+		log.Printf("Ошибка загрузки source=%s user_id=%d: %v", sourceHost(url), userID, err)
 		a.reportDownloadFailure(err.Error())
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return
@@ -566,6 +593,38 @@ func selectedTrackCount(pending pendingURL) int {
 		return 0
 	}
 	return end - start + 1
+}
+
+// handlePreferenceChoice stores "pref:<format>:<quality>" or "pref:ask" as the user's default.
+func (a *app) handlePreferenceChoice(callback *tgbotapi.CallbackQuery) {
+	lang := a.langOrDefault(callback.From.ID)
+	format, quality := "", ""
+	if callback.Data != "pref:ask" {
+		parts := strings.SplitN(callback.Data, ":", 3)
+		if len(parts) != 3 || !validDownloadOption(parts[1], parts[2]) {
+			return
+		}
+		format, quality = parts[1], parts[2]
+	}
+	if err := a.setPreference(callback.From.ID, format, quality); err != nil {
+		log.Printf("Не удалось сохранить настройки user_id=%d: %v", callback.From.ID, err)
+		a.safeEdit(callback, tr("download_error", lang, "error", tr("unknown_error", lang)), "HTML", nil)
+		return
+	}
+	a.safeEdit(callback, tr("settings_saved", lang, "value", preferenceLabel(format, quality, lang)), "HTML", nil)
+}
+
+func (a *app) settingsText(userID int64, lang string) string {
+	format, quality, _ := a.getPreference(userID)
+	return tr("settings_title", lang) + "\n" + tr("settings_current", lang, "value", preferenceLabel(format, quality, lang))
+}
+
+// appliedPreferenceHint returns a status line when the download option matches the user's default.
+func (a *app) appliedPreferenceHint(userID int64, format, quality, lang string) string {
+	if prefFormat, prefQuality, ok := a.getPreference(userID); ok && prefFormat == format && prefQuality == quality {
+		return tr("settings_applied_hint", lang, "value", preferenceLabel(format, quality, lang)) + "\n"
+	}
+	return ""
 }
 
 func (a *app) handleDeliveryChoice(callback *tgbotapi.CallbackQuery) {
