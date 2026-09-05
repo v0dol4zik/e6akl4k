@@ -223,6 +223,10 @@ var texts = map[string]map[string]string{
 		"ru": "📦 <b>как отправить выбранный плейлист?</b>\nспособ нужно выбрать до загрузки, чтобы бот не держал готовые файлы в ожидании.",
 		"en": "📦 <b>how should i send the selected playlist?</b>\nchoose before downloading so the bot does not keep completed files waiting on disk.",
 	},
+	"choose_delivery_batch": {
+		"ru": "📦 <b>как отправить {count} треков из сообщения?</b>\nспособ нужно выбрать до загрузки, чтобы бот не держал готовые файлы в ожидании.",
+		"en": "📦 <b>how should i send the {count} tracks from the message?</b>\nchoose before downloading so the bot does not keep completed files waiting on disk.",
+	},
 	"batch_preview": {
 		"ru": "🔗 <b>ссылок в сообщении: {count}</b>\nскачаю их вместе, формат один на все:",
 		"en": "🔗 <b>links in the message: {count}</b>\ni'll download them together with one format for all:",

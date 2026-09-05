@@ -305,8 +305,12 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 		}
 		return a.sendText(chatID, text, parseMode, markup)
 	}
-	if pending, ok := a.getURL(urlKey, userID, chatID); ok && (pending.Preview.IsPlaylist || len(pending.Batch) > 0) && selectedTrackCount(pending) > playlistZIPThreshold && pending.Delivery == "" {
-		showStatus(tr("choose_delivery", lang), "HTML", deliveryKeyboard(urlKey, format, quality, lang))
+	if pending, ok := a.getURL(urlKey, userID, chatID); ok && needsDeliveryChoice(pending) {
+		prompt := tr("choose_delivery", lang)
+		if len(pending.Batch) > 0 {
+			prompt = tr("choose_delivery_batch", lang, "count", strconv.Itoa(len(pending.Batch)))
+		}
+		showStatus(prompt, "HTML", deliveryKeyboard(urlKey, format, quality, lang))
 		return
 	}
 	if !a.beginUserDownload(userID) {
@@ -624,6 +628,19 @@ func (a *app) recordDeliveryMetrics(report deliveryReport) {
 	case "delivery_failed":
 		a.store.increment(a.ctx, "downloads_failed")
 	}
+}
+
+// needsDeliveryChoice reports whether the user must pick ZIP or individual delivery before the
+// download starts: large playlist selections and every multi-link batch (a batch is at most
+// maxBatchLinks links, so it never reaches playlistZIPThreshold and gets its own rule).
+func needsDeliveryChoice(pending pendingURL) bool {
+	if pending.Delivery != "" {
+		return false
+	}
+	if len(pending.Batch) > 0 {
+		return len(pending.Batch) > 1
+	}
+	return pending.Preview.IsPlaylist && selectedTrackCount(pending) > playlistZIPThreshold
 }
 
 func selectedTrackCount(pending pendingURL) int {

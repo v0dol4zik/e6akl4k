@@ -41,7 +41,7 @@
 - Show a once-daily support note after a successful download, with a permanent one-tap opt-out.
 - Remember a default format and quality per user through `/settings`, so regular users skip the format keyboard while keeping playlist range and delivery choices.
 - Re-deliver recent tracks through `/history`: the last ten downloads come back instantly from the Telegram cache without a new download, and the list can be cleared with one tap.
-- Download several track links from one message (up to five) together: one format for all, sequential processing in a single slot, and a per-link failure report instead of aborting the whole batch.
+- Download several track links from one message (up to five) together: one format for all, delivery as individual files or one ZIP archive, sequential processing in a single slot, and a per-link failure report instead of aborting the whole batch.
 
 The project is designed for small private installations: a personal bot shared with friends, with enough safety and observability to run unattended on a VPS.
 

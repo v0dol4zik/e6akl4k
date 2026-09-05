@@ -397,7 +397,7 @@ func (h *batchHarness) pendingKey(t *testing.T) string {
 }
 
 // newBatchHarness wires a fake Telegram and a fake Octave API where album 3 holds tracks 11 and 12
-// and every other album is a 404. Playback tokens are unavailable, so real downloads always fail.
+// (downloadable as MP3 320 without conversion) and every other album or track is a 404.
 func newBatchHarness(t *testing.T) *batchHarness {
 	t.Helper()
 	h := &batchHarness{}
@@ -423,12 +423,23 @@ func newBatchHarness(t *testing.T) *batchHarness {
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	})
 	octaveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/album/3" {
+		switch r.URL.Path {
+		case "/api/album/3":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"album":{"id":"3","title":"Album","artist":{"id":"2","name":"Artist"},"tracks":[{"id":"11","title":"First","artist":{"id":"2","name":"Artist"},"duration":180},{"id":"12","title":"Second","artist":{"id":"2","name":"Artist"},"duration":200}]}}`)
-			return
+		case "/api/playback-token":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"token":"octk_test_token","expiresIn":7200}`)
+		case "/audio/320":
+			if track := r.URL.Query().Get("track"); track != "11" && track != "12" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "audio/mpeg")
+			fmt.Fprint(w, "audio")
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 	})
 	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: telegramHandler})
 	if err != nil {
@@ -495,6 +506,15 @@ func TestBatchOfTwoLinksShowsPreviewAndDeliversBoth(t *testing.T) {
 	key := h.pendingKey(t)
 	h.app.handleCallback(batchCallback("dl:mp3:320:" + key))
 	calls = h.snapshot()
+	choice := h.deliveryPrompt(t, calls)
+	if choice.text != tr("choose_delivery_batch", "en", "count", "2") {
+		t.Fatalf("unexpected delivery prompt: %q", choice.text)
+	}
+	if h.count("sendAudio", calls) != 0 {
+		t.Fatalf("nothing must be sent before the delivery mode is chosen: %#v", calls)
+	}
+	h.app.handleCallback(batchCallback("delivery:individual:mp3:320:" + key))
+	calls = h.snapshot()
 	if got := h.count("sendAudio", calls); got != 2 {
 		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)
 	}
@@ -530,8 +550,114 @@ func TestBatchSkipsLinkWithFailedPreview(t *testing.T) {
 	}
 	h.app.handleCallback(batchCallback("dl:mp3:320:" + h.pendingKey(t)))
 	calls = h.snapshot()
+	for _, call := range calls {
+		if strings.Contains(call.markup, `"delivery:`) {
+			t.Fatalf("a batch with one remaining link must not ask for a delivery mode: %#v", call)
+		}
+	}
 	if got := h.count("sendAudio", calls); got != 1 {
 		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)
+	}
+}
+
+// deliveryPrompt returns the message carrying the ZIP/individual keyboard.
+func (h *batchHarness) deliveryPrompt(t *testing.T, calls []telegramCall) telegramCall {
+	t.Helper()
+	for _, call := range calls {
+		if strings.Contains(call.markup, `"delivery:zip:`) && strings.Contains(call.markup, `"delivery:individual:`) && strings.Contains(call.markup, `"cancel:`) {
+			return call
+		}
+	}
+	t.Fatalf("delivery keyboard was not shown: %#v", calls)
+	return telegramCall{}
+}
+
+// TestBatchWithDefaultFormatReportsSkippedLinks covers the fast path: a stored default format
+// skips the preview keyboard, so the skipped links must still be reported before downloading.
+func TestBatchWithDefaultFormatReportsSkippedLinks(t *testing.T) {
+	h := newBatchHarness(t)
+	cacheOctaveTrack(t, h.state, "11", "First")
+	if err := h.app.setPreference(10, "mp3", "320"); err != nil {
+		t.Fatal(err)
+	}
+
+	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/99?t=5"))
+	calls := h.snapshot()
+	for _, call := range calls {
+		if strings.Contains(call.markup, `"dl:mp3:320:`) {
+			t.Fatalf("the format keyboard must be skipped with a default format: %#v", call)
+		}
+	}
+	skipped := false
+	for _, call := range calls {
+		if (call.method == "sendMessage" || call.method == "editMessageText") && strings.Contains(call.text, "album/99?t=5</code> — skipped: Octave API") {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatalf("the skipped link must be reported on the default-format path: %#v", calls)
+	}
+	if got := h.count("sendAudio", calls); got != 1 {
+		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)
+	}
+	if !h.hasText(calls, tr("all_sent_summary", "en", "sent", "1", "total", "1")) {
+		t.Fatalf("summary is missing: %#v", calls)
+	}
+}
+
+// TestBatchZIPDeliverySendsOneArchive downloads both links for real and packs them into a ZIP;
+// the file_id cache must be bypassed because cached tracks cannot be archived.
+func TestBatchZIPDeliverySendsOneArchive(t *testing.T) {
+	h := newBatchHarness(t)
+	cacheOctaveTrack(t, h.state, "11", "First")
+
+	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/3?t=12"))
+	h.snapshot()
+	key := h.pendingKey(t)
+	h.app.handleCallback(batchCallback("dl:mp3:320:" + key))
+	h.deliveryPrompt(t, h.snapshot())
+	h.app.handleCallback(batchCallback("delivery:zip:mp3:320:" + key))
+	calls := h.snapshot()
+	if got := h.count("sendDocument", calls); got != 1 {
+		t.Fatalf("sendDocument calls=%d, calls=%#v", got, calls)
+	}
+	if got := h.count("sendAudio", calls); got != 0 {
+		t.Fatalf("ZIP delivery must not send tracks one by one: calls=%#v", calls)
+	}
+	if !h.hasText(calls, tr("zipping", "en", "count", "2")) || !h.hasText(calls, tr("zip_sent", "en")) {
+		t.Fatalf("ZIP progress messages are missing: %#v", calls)
+	}
+	var status string
+	if err := h.state.db.QueryRow(`SELECT status FROM download_history ORDER BY id DESC LIMIT 1`).Scan(&status); err != nil || status != "delivered" {
+		t.Fatalf("history status=%q err=%v", status, err)
+	}
+	if _, ok := h.app.getURL(key, 10, 10); ok {
+		t.Fatal("pending batch must be consumed")
+	}
+	entries, err := os.ReadDir(h.app.downloader.downloadDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("session files must be cleaned up after ZIP delivery: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestNeedsDeliveryChoice(t *testing.T) {
+	cases := []struct {
+		name    string
+		pending pendingURL
+		want    bool
+	}{
+		{"single track", pendingURL{Preview: mediaPreview{}}, false},
+		{"small playlist", pendingURL{Preview: mediaPreview{IsPlaylist: true, TrackCount: 5}}, false},
+		{"large playlist", pendingURL{Preview: mediaPreview{IsPlaylist: true, TrackCount: 20}}, true},
+		{"large playlist decided", pendingURL{Preview: mediaPreview{IsPlaylist: true, TrackCount: 20}, Delivery: "zip"}, false},
+		{"batch of two", pendingURL{Batch: []string{"a", "b"}}, true},
+		{"batch of one", pendingURL{Batch: []string{"a"}}, false},
+		{"batch decided", pendingURL{Batch: []string{"a", "b"}, Delivery: "individual"}, false},
+	}
+	for _, tc := range cases {
+		if got := needsDeliveryChoice(tc.pending); got != tc.want {
+			t.Errorf("%s: needsDeliveryChoice=%v want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -543,6 +669,8 @@ func TestBatchWithOneFailedDownloadIsPartial(t *testing.T) {
 	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11\nhttps://music.octavestreaming.com/album/3?t=12\nhttps://music.octavestreaming.com/track/13"))
 	h.snapshot()
 	h.app.handleCallback(batchCallback("dl:mp3:320:" + h.pendingKey(t)))
+	h.snapshot()
+	h.app.handleCallback(batchCallback("delivery:individual:mp3:320:" + h.pendingKey(t)))
 	calls := h.snapshot()
 	if got := h.count("sendAudio", calls); got != 2 {
 		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)

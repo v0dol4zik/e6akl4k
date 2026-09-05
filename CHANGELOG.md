@@ -18,7 +18,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Added a throttled post-download support message with a persistent per-user hide option.
 - Added `/settings` with a per-user default format and quality that skips the format keyboard for tracks, search picks, and playlist ranges, with an "ask each time" option and a visible hint in the download status.
 - Added `/history` listing the last ten delivered tracks with one-tap re-delivery from the Telegram `file_id` cache, an expired-cache hint instead of a new download, and a clear-history button.
-- Added batch downloads for several track links in one message (up to five): one shared format, sequential downloads inside a single slot, cached tracks re-sent by `file_id`, per-link failures reported without aborting the batch, and ZIP or individual delivery for larger batches.
+- Added batch downloads for several track links in one message (up to five): one shared format, sequential downloads inside a single slot, cached tracks re-sent by `file_id`, per-link failures reported without aborting the batch, and a ZIP-or-individual delivery choice for every batch of two or more links.
 
 ### Changed
 

@@ -704,7 +704,13 @@ func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang
 		return
 	}
 	if format, quality, ok := a.getPreference(userID); ok {
-		a.deleteStatusMessage(status)
+		// The format keyboard is skipped, so the skipped-link report must be shown on its own:
+		// the status message is reused for it instead of being deleted.
+		if len(failed) > 0 {
+			a.replaceStatusText(chatID, status, strings.Join(failed, "\n"))
+		} else {
+			a.deleteStatusMessage(status)
+		}
 		a.startDownload(userID, chatID, key, format, quality, lang, nil)
 		return
 	}
@@ -718,6 +724,18 @@ func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang
 		}
 	}
 	a.sendText(chatID, text, "HTML", keyboard)
+}
+
+// replaceStatusText rewrites a status message with text (HTML) and falls back to a new message.
+func (a *app) replaceStatusText(chatID int64, status *tgbotapi.Message, text string) {
+	if status != nil {
+		edit := tgbotapi.NewEditMessageText(status.Chat.ID, status.MessageID, text)
+		edit.ParseMode = "HTML"
+		if _, err := sendTelegram(a.bot, edit); err == nil {
+			return
+		}
+	}
+	a.sendText(chatID, text, "HTML", nil)
 }
 
 func batchPreviewText(previews []mediaPreview, failed []string, lang string) string {
