@@ -42,6 +42,7 @@
 - Remember a default format and quality per user through `/settings`, so regular users skip the format keyboard while keeping playlist range and delivery choices.
 - Re-deliver recent tracks through `/history`: the last ten downloads come back instantly from the Telegram cache without a new download, and the list can be cleared with one tap.
 - Search by a forwarded audio file in private chat: its performer and title tags (or the file name) become the query, and the duration helps rank the results.
+- Export Prometheus metrics for every counter, per-stage latency quantiles and success ratios, the cache hit ratio, the Octave fast-path share, and the circuit breaker state, cached for 30 seconds between scrapes.
 
 The project is designed for small private installations: a personal bot shared with friends, with enough safety and observability to run unattended on a VPS.
 
