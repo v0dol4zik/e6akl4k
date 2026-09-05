@@ -85,35 +85,114 @@ type mediaPreview struct {
 	Extractor       string
 }
 
+const octaveSearchTimeout = 8 * time.Second
+
+// searchOutcome describes which source produced text-search candidates and why YouTube was used.
+type searchOutcome struct {
+	Source         string // "octave" or "youtube"
+	FallbackReason string // "", "no_results", or "api_error"
+}
+
 func (d *downloader) inlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
 	return d.searchLookup(ctx, query, 0)
 }
 
+// searchLookup keeps the YouTube-only behaviour used by inline mode.
 func (d *downloader) searchLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, error) {
-	if directURL := detectURL(query); directURL != "" {
-		if _, ok := parseOctaveURL(directURL); ok && d.octave != nil {
-			preview, err := d.previewOctave(ctx, directURL)
-			if err != nil {
-				return nil, err
-			}
-			if preview.IsPlaylist {
-				return nil, errors.New("альбомы Octave скачиваются в личном чате с ботом")
-			}
-			return []inlineCandidate{{
-				URL: directURL, CacheKey: sourceCacheKey("octave", preview.SourceID, "mp3", "320"),
-				Title: preview.Title, Artist: preview.Artist, Duration: preview.Duration,
-				SourceID: preview.SourceID, Extractor: "octave",
-			}}, nil
-		}
-		return []inlineCandidate{{
-			URL: directURL, CacheKey: inlineCacheKey(directURL, ""), Title: directURL,
-		}}, nil
+	if candidates, handled, err := d.directURLCandidates(ctx, query); handled {
+		return candidates, err
 	}
 	youtube, err := d.youtubeInlineLookup(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	return rankCandidates(query, expectedDuration, youtube), nil
+}
+
+// textSearch searches Octave first and falls back to YouTube, reporting the source and the fallback reason.
+func (d *downloader) textSearch(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, searchOutcome, error) {
+	if candidates, handled, err := d.directURLCandidates(ctx, query); handled {
+		source := "youtube"
+		if len(candidates) > 0 && candidates[0].Extractor == "octave" {
+			source = "octave"
+		}
+		return candidates, searchOutcome{Source: source}, err
+	}
+	outcome := searchOutcome{Source: "youtube"}
+	if d.octave != nil {
+		octave, err := d.octaveTextLookup(ctx, query)
+		switch {
+		case err != nil:
+			log.Printf("octave search failed, falling back to youtube: %s", redactTraceText(err.Error()))
+			outcome.FallbackReason = "api_error"
+		case len(octave) > 0:
+			return rankCandidates(query, expectedDuration, octave), searchOutcome{Source: "octave"}, nil
+		default:
+			outcome.FallbackReason = "no_results"
+		}
+	}
+	youtube, err := d.youtubeInlineLookup(ctx, query)
+	if err != nil {
+		return nil, outcome, err
+	}
+	return rankCandidates(query, expectedDuration, youtube), outcome, nil
+}
+
+// directURLCandidates resolves a pasted link into a single candidate; handled is false for free-text queries.
+func (d *downloader) directURLCandidates(ctx context.Context, query string) ([]inlineCandidate, bool, error) {
+	directURL := detectURL(query)
+	if directURL == "" {
+		return nil, false, nil
+	}
+	if _, ok := parseOctaveURL(directURL); ok && d.octave != nil {
+		preview, err := d.previewOctave(ctx, directURL)
+		if err != nil {
+			return nil, true, err
+		}
+		if preview.IsPlaylist {
+			return nil, true, errors.New("альбомы Octave скачиваются в личном чате с ботом")
+		}
+		return []inlineCandidate{{
+			URL: directURL, CacheKey: sourceCacheKey("octave", preview.SourceID, "mp3", "320"),
+			Title: preview.Title, Artist: preview.Artist, Duration: preview.Duration,
+			SourceID: preview.SourceID, Extractor: "octave",
+		}}, true, nil
+	}
+	return []inlineCandidate{{
+		URL: directURL, CacheKey: inlineCacheKey(directURL, ""), Title: directURL,
+	}}, true, nil
+}
+
+func (d *downloader) octaveTextLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
+	ctx, cancel := context.WithTimeout(ctx, octaveSearchTimeout)
+	defer cancel()
+	tracks, err := d.octave.searchTracks(ctx, query, inlineResultLimit, 0)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]inlineCandidate, 0, len(tracks))
+	for _, track := range tracks {
+		if !numericOctaveID(track.ID) {
+			continue
+		}
+		candidates = append(candidates, octaveSearchCandidate(track))
+		if len(candidates) == inlineResultLimit {
+			break
+		}
+	}
+	return candidates, nil
+}
+
+func octaveSearchCandidate(track octaveTrack) inlineCandidate {
+	return inlineCandidate{
+		URL:       octaveTrackURL(track),
+		CacheKey:  sourceCacheKey("octave", track.ID, "mp3", "320"),
+		Title:     firstNonEmpty(track.Title, "Unknown"),
+		Artist:    track.Artist.Name,
+		Duration:  secondsToHMS(track.Duration),
+		SourceID:  track.ID,
+		Extractor: "octave",
+	}
 }
 
 func (d *downloader) youtubeInlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {

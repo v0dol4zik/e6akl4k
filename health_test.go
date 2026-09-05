@@ -24,6 +24,8 @@ func TestHealthAndMetricsHandlers(t *testing.T) {
 	defer state.Close()
 	state.increment(context.Background(), "downloads_ok")
 	state.increment(context.Background(), "downloads_partial")
+	state.increment(context.Background(), "search_octave")
+	state.increment(context.Background(), "search_youtube_fallback")
 	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute}
 	app := newAppWithServices(context.Background(), nil, &downloader{bin: bin, downloadDir: dir}, state, cfg)
 	handler := observabilityHandler(app)
@@ -36,7 +38,7 @@ func TestHealthAndMetricsHandlers(t *testing.T) {
 
 	metrics := httptest.NewRecorder()
 	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="ok"} 1`) || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="partial"} 1`) || !strings.Contains(metrics.Body.String(), "musicbot_archives_active 0") {
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="ok"} 1`) || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="partial"} 1`) || !strings.Contains(metrics.Body.String(), "musicbot_archives_active 0") || !strings.Contains(metrics.Body.String(), "musicbot_search_octave_total 1") || !strings.Contains(metrics.Body.String(), "musicbot_search_youtube_fallback_total 1") {
 		t.Fatalf("metrics code=%d body=%s", metrics.Code, metrics.Body.String())
 	}
 }
