@@ -28,7 +28,7 @@
 
 ## Features
 
-- Search YouTube for title and inline queries, marking exact, similar, and alternate-version results.
+- Search Octave Streaming first for private title queries and fall back to YouTube with an explicit notice; inline queries and results are ranked and marked as exact, similar, or alternate versions.
 - Download tracks and albums directly from Octave Streaming in MP3 128/320 or lossless FLAC.
 - Let Telegram fetch eligible Octave MP3 URLs directly, with a circuit breaker, resumable local fallback, and per-stage latency logs.
 - Download from YouTube, SoundCloud, Bandcamp, VK, Mixcloud, Audiomack, and other sources supported by `yt-dlp`.

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -206,5 +208,109 @@ func TestArgsBeforeSeparator(t *testing.T) {
 	want := []string{"--format", "audio", "--cookies", "snapshot.txt", "--", "https://example.test"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args=%#v, want %#v", got, want)
+	}
+}
+
+func TestTextSearchPrefersOctaveAndReportsFallback(t *testing.T) {
+	youtubeBin := filepath.Join(t.TempDir(), "fake-yt-dlp")
+	script := `#!/bin/sh
+printf '%s' '{"entries":[{"id":"youtube-id","title":"Track","uploader":"Artist","duration":185,"url":"youtube-id"}]}'
+`
+	if err := os.WriteFile(youtubeBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	octaveJSON := func(body string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/search/tracks" || r.URL.Query().Get("query") != "Artist Track" {
+				t.Errorf("unexpected Octave request %s?%s", r.URL.Path, r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, body)
+		})
+	}
+	tests := []struct {
+		name          string
+		octave        http.Handler
+		wantOutcome   searchOutcome
+		wantExtractor string
+		wantSourceID  string
+		wantURL       string
+		wantCacheKey  string
+		wantDuration  string
+	}{
+		{
+			name:          "octave hit",
+			octave:        octaveJSON(`{"results":[{"id":"11","title":"Track","artist":{"id":"2","name":"Artist"},"album":{"id":"3","title":"Album"},"duration":185}]}`),
+			wantOutcome:   searchOutcome{Source: "octave"},
+			wantExtractor: "octave", wantSourceID: "11",
+			wantURL:      "https://music.octavestreaming.com/album/3?t=11",
+			wantCacheKey: "octave:11:mp3:320", wantDuration: "3:05",
+		},
+		{
+			name:          "octave empty",
+			octave:        octaveJSON(`{"results":[]}`),
+			wantOutcome:   searchOutcome{Source: "youtube", FallbackReason: "no_results"},
+			wantExtractor: "youtube", wantSourceID: "youtube-id",
+			wantURL:      "https://www.youtube.com/watch?v=youtube-id",
+			wantCacheKey: "youtube:youtube-id:mp3:320", wantDuration: "3:05",
+		},
+		{
+			name: "octave error",
+			octave: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "boom", http.StatusInternalServerError)
+			}),
+			wantOutcome:   searchOutcome{Source: "youtube", FallbackReason: "api_error"},
+			wantExtractor: "youtube", wantSourceID: "youtube-id",
+			wantURL:      "https://www.youtube.com/watch?v=youtube-id",
+			wantCacheKey: "youtube:youtube-id:mp3:320", wantDuration: "3:05",
+		},
+		{
+			name:          "octave disabled",
+			octave:        nil,
+			wantOutcome:   searchOutcome{Source: "youtube"},
+			wantExtractor: "youtube", wantSourceID: "youtube-id",
+			wantURL:      "https://www.youtube.com/watch?v=youtube-id",
+			wantCacheKey: "youtube:youtube-id:mp3:320", wantDuration: "3:05",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &downloader{bin: youtubeBin}
+			if tc.octave != nil {
+				d.octave = testOctaveClient(tc.octave)
+			}
+			candidates, outcome, err := d.textSearch(context.Background(), "Artist Track", 185)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome != tc.wantOutcome {
+				t.Fatalf("outcome=%#v, want %#v", outcome, tc.wantOutcome)
+			}
+			if len(candidates) != 1 {
+				t.Fatalf("candidates=%#v", candidates)
+			}
+			got := candidates[0]
+			if got.Extractor != tc.wantExtractor || got.SourceID != tc.wantSourceID || got.URL != tc.wantURL || got.CacheKey != tc.wantCacheKey || got.Duration != tc.wantDuration {
+				t.Fatalf("candidate=%#v", got)
+			}
+			if got.Title != "Track" || got.Artist != "Artist" || got.Match != "exact" {
+				t.Fatalf("candidate ranking=%#v", got)
+			}
+		})
+	}
+}
+
+func TestTextSearchKeepsDirectLinksWithoutSearching(t *testing.T) {
+	var octaveCalls atomic.Int32
+	d := &downloader{bin: "/does/not/exist", octave: testOctaveClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		octaveCalls.Add(1)
+		http.Error(w, "must not be called", http.StatusInternalServerError)
+	}))}
+	candidates, outcome, err := d.textSearch(context.Background(), "https://youtu.be/video-id", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].URL != "https://youtu.be/video-id" || outcome != (searchOutcome{Source: "youtube"}) || octaveCalls.Load() != 0 {
+		t.Fatalf("candidates=%#v outcome=%#v octave calls=%d", candidates, outcome, octaveCalls.Load())
 	}
 }

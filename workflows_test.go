@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -337,5 +338,117 @@ func TestCookieFailureClassification(t *testing.T) {
 	}
 	if isCookieFailure("Видео приватное") {
 		t.Fatal("unrelated error classified as cookie failure")
+	}
+}
+
+func TestPresentSearchResultsAnnouncesYouTubeFallback(t *testing.T) {
+	youtubeBin := filepath.Join(t.TempDir(), "fake-yt-dlp")
+	script := `#!/bin/sh
+printf '%s' '{"entries":[{"id":"youtube-id","title":"Track","uploader":"Artist","duration":185,"url":"youtube-id"}]}'
+`
+	if err := os.WriteFile(youtubeBin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	octaveJSON := func(body string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, body)
+		})
+	}
+	tests := []struct {
+		name         string
+		octave       http.Handler
+		resolved     bool
+		wantPrefix   string
+		wantNotice   string
+		wantOctave   int64
+		wantFallback int64
+	}{
+		{
+			name:       "octave results",
+			octave:     octaveJSON(`{"results":[{"id":"11","title":"Track","artist":{"id":"2","name":"Artist"},"album":{"id":"3"},"duration":185}]}`),
+			wantPrefix: tr("search_results", "en"), wantOctave: 1,
+		},
+		{
+			name:       "octave empty",
+			octave:     octaveJSON(`{"results":[]}`),
+			wantPrefix: tr("search_results", "en"), wantNotice: tr("search_fallback_no_results", "en"), wantFallback: 1,
+		},
+		{
+			name: "octave unavailable",
+			octave: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "boom", http.StatusBadGateway)
+			}),
+			wantPrefix: tr("search_results", "en"), wantNotice: tr("search_fallback_unavailable", "en"), wantFallback: 1,
+		},
+		{
+			name:       "resolved link keeps its prefix",
+			octave:     octaveJSON(`{"results":[]}`),
+			resolved:   true,
+			wantPrefix: tr("resolved_results", "en"), wantNotice: tr("search_fallback_no_results", "en"), wantFallback: 1,
+		},
+		{
+			name:       "octave disabled",
+			wantPrefix: tr("search_results", "en"),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var texts []string
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = r.ParseForm()
+				switch filepath.Base(r.URL.Path) {
+				case "getMe":
+					fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+				case "sendMessage", "editMessageText":
+					mu.Lock()
+					texts = append(texts, r.FormValue("text"))
+					mu.Unlock()
+					fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"text":"x"}}`)
+				default:
+					fmt.Fprint(w, `{"ok":true,"result":true}`)
+				}
+			})
+			bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: handler})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer state.Close()
+			dl := &downloader{downloadDir: t.TempDir(), bin: youtubeBin}
+			if tc.octave != nil {
+				dl.octave = testOctaveClient(tc.octave)
+			}
+			cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour}
+			app := newAppWithServices(context.Background(), bot, dl, state, cfg)
+			status := &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}
+			app.presentSearchResults(10, 10, "Artist Track", "en", status, tc.resolved, 185)
+
+			mu.Lock()
+			got := append([]string(nil), texts...)
+			mu.Unlock()
+			if len(got) != 1 {
+				t.Fatalf("messages=%#v", got)
+			}
+			want := tc.wantPrefix
+			if tc.wantNotice != "" {
+				want += "\n\n" + tc.wantNotice
+			}
+			if got[0] != want {
+				t.Fatalf("header=%q, want %q", got[0], want)
+			}
+			stats, err := state.stats(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stats.Searches != 1 || stats.SearchOctave != tc.wantOctave || stats.SearchYouTubeFallback != tc.wantFallback {
+				t.Fatalf("stats=%+v, want octave=%d fallback=%d", stats, tc.wantOctave, tc.wantFallback)
+			}
+		})
 	}
 }

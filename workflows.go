@@ -85,13 +85,19 @@ func (a *app) handlePrivateSearch(message *tgbotapi.Message, query, lang string)
 func (a *app) presentSearchResults(chatID, userID int64, query, lang string, status *tgbotapi.Message, resolved bool, expectedDuration int) {
 	ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
 	defer cancel()
-	candidates, err := a.runRankedLookup(ctx, query, expectedDuration)
+	candidates, outcome, err := a.runRankedLookup(ctx, query, expectedDuration)
 	if err != nil {
 		a.handleQueueError(chatID, lang, err)
 		return
 	}
 	if a.store != nil {
 		a.store.increment(a.ctx, "searches")
+		switch {
+		case outcome.Source == "octave":
+			a.store.increment(a.ctx, "search_octave")
+		case outcome.FallbackReason != "":
+			a.store.increment(a.ctx, "search_youtube_fallback")
+		}
 	}
 	keys := make([]string, 0, len(candidates))
 	for _, item := range candidates {
@@ -113,10 +119,7 @@ func (a *app) presentSearchResults(chatID, userID int64, query, lang string, sta
 		a.sendText(chatID, tr("nothing_found", lang), "", nil)
 		return
 	}
-	prefix := tr("search_results", lang)
-	if resolved {
-		prefix = tr("resolved_results", lang)
-	}
+	prefix := searchResultsHeader(outcome, resolved, lang)
 	keyboard := searchKeyboard(keys, candidates, lang)
 	if status != nil {
 		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, prefix, *keyboard)
@@ -126,6 +129,24 @@ func (a *app) presentSearchResults(chatID, userID int64, query, lang string, sta
 		}
 	}
 	a.sendText(chatID, prefix, "HTML", keyboard)
+}
+
+// searchResultsHeader picks the results caption and appends an explicit notice when YouTube replaced Octave.
+func searchResultsHeader(outcome searchOutcome, resolved bool, lang string) string {
+	prefix := tr("search_results", lang)
+	if resolved {
+		prefix = tr("resolved_results", lang)
+	}
+	if outcome.Source != "youtube" {
+		return prefix
+	}
+	switch outcome.FallbackReason {
+	case "no_results":
+		return prefix + "\n\n" + tr("search_fallback_no_results", lang)
+	case "api_error":
+		return prefix + "\n\n" + tr("search_fallback_unavailable", lang)
+	}
+	return prefix
 }
 
 func (a *app) handleSearchPick(callback *tgbotapi.CallbackQuery) {
@@ -581,6 +602,8 @@ func (a *app) handleAdminStats(message *tgbotapi.Message) {
 		"cookies", strconv.FormatInt(stats.CookieErrors, 10),
 		"hits", strconv.FormatInt(stats.CacheHits, 10),
 		"searches", strconv.FormatInt(stats.Searches, 10),
+		"search_octave", strconv.FormatInt(stats.SearchOctave, 10),
+		"search_fallback", strconv.FormatInt(stats.SearchYouTubeFallback, 10),
 		"limited", strconv.FormatInt(stats.RateLimited, 10),
 		"rejected", strconv.FormatInt(stats.QueueRejected, 10))
 	a.sendText(message.Chat.ID, text, "HTML", nil)

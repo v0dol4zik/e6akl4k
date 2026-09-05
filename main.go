@@ -729,10 +729,6 @@ func (a *app) runDownload(ctx context.Context, url, format, quality string, prog
 }
 
 func (a *app) runInlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
-	return a.runRankedLookup(ctx, query, 0)
-}
-
-func (a *app) runRankedLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, error) {
 	_, release, err := a.lookups.acquire(ctx)
 	if err != nil {
 		if errors.Is(err, errQueueFull) && a.store != nil {
@@ -741,7 +737,20 @@ func (a *app) runRankedLookup(ctx context.Context, query string, expectedDuratio
 		return nil, err
 	}
 	defer release()
-	return a.downloader.searchLookup(ctx, query, expectedDuration)
+	return a.downloader.searchLookup(ctx, query, 0)
+}
+
+// runRankedLookup performs an Octave-first text search and reports which source answered.
+func (a *app) runRankedLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, searchOutcome, error) {
+	_, release, err := a.lookups.acquire(ctx)
+	if err != nil {
+		if errors.Is(err, errQueueFull) && a.store != nil {
+			a.store.increment(a.ctx, "queue_rejected")
+		}
+		return nil, searchOutcome{}, err
+	}
+	defer release()
+	return a.downloader.textSearch(ctx, query, expectedDuration)
 }
 
 func (a *app) runDownloadRange(ctx context.Context, url, format, quality string, start, end int, progress downloadProgress) ([]downloadResult, error) {
