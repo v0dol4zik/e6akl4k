@@ -18,6 +18,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Added a throttled post-download support message with a persistent per-user hide option.
 - Added `/settings` with a per-user default format and quality that skips the format keyboard for tracks, search picks, and playlist ranges, with an "ask each time" option and a visible hint in the download status.
 - Added `/history` listing the last ten delivered tracks with one-tap re-delivery from the Telegram `file_id` cache, an expired-cache hint instead of a new download, and a clear-history button.
+- Added search by forwarded audio in private chats: the performer and title tags (or the file name) become the query and the audio duration guides ranking.
 
 ### Changed
 
