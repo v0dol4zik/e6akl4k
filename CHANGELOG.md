@@ -35,6 +35,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ### Fixed
 
+- YouTube downloads that fail with `HTTP Error 403` while cookies are attached are retried once without cookies (YouTube binds some cookie sessions to SABR-only streaming); the retry is logged, counted as `youtube_cookie_retries`, and three retries within ten minutes send administrators a "degraded cookies" alert.
 - Batch downloads now release their download slot before Telegram delivery, so cached re-sends, archive waits and uploads no longer block other users.
 - Clearing `/history` removes only the entries the list can show; failed and legacy rows stay for administrator statistics.
 - Delete the upload-progress status after successful delivery instead of leaving a stale `100%` message behind.

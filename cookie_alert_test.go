@@ -293,3 +293,42 @@ func TestCookieCheckCallbackRequiresAdmin(t *testing.T) {
 		t.Fatalf("audit=%#v err=%v", audit, err)
 	}
 }
+
+// TestCookieRetryAlertsAdminAfterWindow covers the downloader.onCookieRetry path: a successful
+// no-cookies retry is not a failed download, but three of them within the window still alert.
+func TestCookieRetryAlertsAdminAfterWindow(t *testing.T) {
+	dir := t.TempDir()
+	state, err := openStore(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	telegram := &cookieTestTelegram{}
+	application := newCookieTestApp(t, telegram, state, dir)
+
+	application.reportCookieRetry()
+	application.reportCookieRetry()
+	if got := telegram.snapshot(); len(got) != 0 {
+		t.Fatalf("two retries inside the window must not alert yet: %#v", got)
+	}
+	application.reportCookieRetry()
+	got := telegram.snapshot()
+	if len(got) != 1 || got[0].method != "sendMessage" || got[0].chatID != "10" || got[0].text != tr("admin_cookie_degraded", "en") {
+		t.Fatalf("third retry must alert the admin with the degraded text: %#v", got)
+	}
+	stats, err := state.stats(context.Background())
+	if err != nil || stats.CookieErrors != 1 || stats.DownloadsFailed != 0 {
+		t.Fatalf("retries must count as cookie errors but not failed downloads: stats=%#v err=%v", stats, err)
+	}
+	counters, err := state.counters(context.Background())
+	if err != nil || counters["youtube_cookie_retries"] != 3 {
+		t.Fatalf("youtube_cookie_retries=%d err=%v", counters["youtube_cookie_retries"], err)
+	}
+	// Cooldown: further retries do not spam.
+	application.reportCookieRetry()
+	application.reportCookieRetry()
+	application.reportCookieRetry()
+	if got := telegram.snapshot(); len(got) != 0 {
+		t.Fatalf("alert cooldown must suppress repeated messages: %#v", got)
+	}
+}

@@ -254,6 +254,8 @@ type downloader struct {
 	octave             *octaveClient
 	ytdlpSleepRequests int
 	ytdlpFragments     int
+	// onCookieRetry, when set, is called every time a YouTube 403 with cookies is retried without them.
+	onCookieRetry func()
 }
 
 type downloadProgress func(completed, total int)
@@ -615,9 +617,22 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 		return nil, "", err
 	}
 	defer cleanup()
-	if cookies != "" {
-		args = argsBeforeSeparator(args, "--cookies", cookies)
+	if cookies == "" {
+		return d.runWithProgressOnce(ctx, args, manifest, progress, total)
 	}
+	stdout, stderr, err := d.runWithProgressOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies), manifest, progress, total)
+	if !cookieForbiddenRetry(args, stderr, err, ctx) {
+		return stdout, stderr, err
+	}
+	log.Printf("yt-dlp вернул 403 с cookies, повторяю загрузку без cookies")
+	logMediaStage("cookie_forbidden_retry", "youtube", time.Now(), 0, true)
+	if d.onCookieRetry != nil {
+		d.onCookieRetry()
+	}
+	return d.runWithProgressOnce(ctx, args, manifest, progress, total)
+}
+
+func (d *downloader) runWithProgressOnce(ctx context.Context, args []string, manifest string, progress downloadProgress, total int) ([]byte, string, error) {
 	cmd := exec.CommandContext(ctx, d.bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -655,7 +670,7 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 			}
 		}()
 	}
-	err = cmd.Run()
+	err := cmd.Run()
 	close(stopProgress)
 	progressDone.Wait()
 	if completed := progressLineCount(manifest); completed > lastCompleted && progress != nil && total > 1 {
@@ -709,15 +724,57 @@ func regularFilesSize(root string) int64 {
 	return total
 }
 
+// cookieForbiddenRetry reports whether a yt-dlp failure looks like the YouTube 403 that appears when
+// a cookie session is bound to SABR-only streaming, and whether retrying without cookies is worth it.
+func cookieForbiddenRetry(args []string, stderr string, err error, ctx context.Context) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	if !argsHaveYouTubeTarget(args) {
+		return false
+	}
+	low := strings.ToLower(stderr)
+	return strings.Contains(low, "http error 403") || strings.Contains(low, "403: forbidden")
+}
+
+// argsHaveYouTubeTarget reports whether the yt-dlp target after "--" is a YouTube URL or ytsearch query.
+func argsHaveYouTubeTarget(args []string) bool {
+	for i, arg := range args {
+		if arg != "--" || i+1 >= len(args) {
+			continue
+		}
+		target := strings.ToLower(args[i+1])
+		if strings.HasPrefix(target, "ytsearch") {
+			return true
+		}
+		host := sourceHost(target)
+		return host == "youtu.be" || host == "youtube.com" || strings.HasSuffix(host, ".youtube.com")
+	}
+	return false
+}
+
 func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, error) {
 	cookies, cleanup, err := d.isolatedCookieFile()
 	if err != nil {
 		return nil, "", err
 	}
 	defer cleanup()
-	if cookies != "" {
-		args = argsBeforeSeparator(args, "--cookies", cookies)
+	if cookies == "" {
+		return d.runOnce(ctx, args)
 	}
+	stdout, stderr, err := d.runOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies))
+	if !cookieForbiddenRetry(args, stderr, err, ctx) {
+		return stdout, stderr, err
+	}
+	log.Printf("yt-dlp вернул 403 с cookies, повторяю без cookies")
+	logMediaStage("cookie_forbidden_retry", "youtube", time.Now(), 0, true)
+	if d.onCookieRetry != nil {
+		d.onCookieRetry()
+	}
+	return d.runOnce(ctx, args)
+}
+
+func (d *downloader) runOnce(ctx context.Context, args []string) ([]byte, string, error) {
 	cmd := exec.CommandContext(ctx, d.bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -731,7 +788,7 @@ func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, e
 	stderr := &limitedBuffer{limit: 256 * 1024}
 	cmd.Stdout = &stdout
 	cmd.Stderr = stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}

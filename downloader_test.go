@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -312,5 +313,100 @@ func TestTextSearchKeepsDirectLinksWithoutSearching(t *testing.T) {
 	}
 	if len(candidates) != 1 || candidates[0].URL != "https://youtu.be/video-id" || outcome != (searchOutcome{Source: "youtube"}) || octaveCalls.Load() != 0 {
 		t.Fatalf("candidates=%#v outcome=%#v octave calls=%d", candidates, outcome, octaveCalls.Load())
+	}
+}
+
+func TestCookieForbiddenRetryPredicate(t *testing.T) {
+	ctx := context.Background()
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	failed := errors.New("exit status 1")
+	cases := []struct {
+		name   string
+		args   []string
+		stderr string
+		err    error
+		ctx    context.Context
+		want   bool
+	}{
+		{"youtube 403", []string{"-f", "best", "--", "https://www.youtube.com/watch?v=abc"}, "ERROR: unable to download video data: HTTP Error 403: Forbidden", failed, ctx, true},
+		{"youtu.be 403", []string{"--", "https://youtu.be/abc"}, "HTTP Error 403: Forbidden", failed, ctx, true},
+		{"ytsearch 403", []string{"--", "ytsearch5:test"}, "HTTP Error 403: Forbidden", failed, ctx, true},
+		{"soundcloud 403", []string{"--", "https://soundcloud.com/a/b"}, "HTTP Error 403: Forbidden", failed, ctx, false},
+		{"youtube other error", []string{"--", "https://youtu.be/abc"}, "ERROR: Video unavailable", failed, ctx, false},
+		{"no error", []string{"--", "https://youtu.be/abc"}, "HTTP Error 403: Forbidden", nil, ctx, false},
+		{"cancelled", []string{"--", "https://youtu.be/abc"}, "HTTP Error 403: Forbidden", failed, cancelled, false},
+		{"no separator", []string{"https://youtu.be/abc"}, "HTTP Error 403: Forbidden", failed, ctx, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cookieForbiddenRetry(tc.args, tc.stderr, tc.err, tc.ctx); got != tc.want {
+				t.Fatalf("cookieForbiddenRetry=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestYouTube403RetriesWithoutCookies uses a fake yt-dlp that fails with 403 whenever --cookies is
+// passed and succeeds otherwise, mirroring a SABR-bound cookie session.
+func TestYouTube403RetriesWithoutCookies(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "yt-dlp")
+	calls := filepath.Join(dir, "calls.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + calls + "\n" +
+		"for a in \"$@\"; do if [ \"$a\" = \"--cookies\" ]; then echo 'ERROR: unable to download video data: HTTP Error 403: Forbidden' >&2; exit 1; fi; done\n" +
+		"echo '{\"id\":\"abc\",\"title\":\"ok\"}'\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cookies := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(cookies, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := &downloader{bin: fake, downloadDir: dir, cookiesFile: cookies}
+	if err := d.refreshCookieSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := d.run(context.Background(), "--dump-single-json", "--", "https://www.youtube.com/watch?v=abc")
+	if err != nil {
+		t.Fatalf("run must succeed after the no-cookies retry: %v", err)
+	}
+	if !strings.Contains(string(stdout), `"id":"abc"`) {
+		t.Fatalf("unexpected stdout: %q", stdout)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "--cookies") || strings.Contains(lines[1], "--cookies") {
+		t.Fatalf("expected one call with cookies then one without, got %q", lines)
+	}
+
+	// A non-YouTube 403 must not trigger the retry.
+	if err := os.Remove(calls); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.run(context.Background(), "--", "https://soundcloud.com/a/b"); err == nil {
+		t.Fatal("soundcloud 403 must stay an error")
+	}
+	data, _ = os.ReadFile(calls)
+	if got := len(strings.Split(strings.TrimSpace(string(data)), "\n")); got != 1 {
+		t.Fatalf("non-YouTube 403 must not retry, calls=%d", got)
+	}
+
+	// runWithProgress follows the same rule.
+	if err := os.Remove(calls); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(dir, "progress.log")
+	if _, _, err := d.runWithProgress(context.Background(), []string{"--", "https://youtu.be/abc"}, manifest, nil, 1); err != nil {
+		t.Fatalf("runWithProgress must succeed after retry: %v", err)
+	}
+	data, _ = os.ReadFile(calls)
+	if got := len(strings.Split(strings.TrimSpace(string(data)), "\n")); got != 2 {
+		t.Fatalf("runWithProgress retry calls=%d, want 2", got)
 	}
 }

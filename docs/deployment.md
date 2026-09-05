@@ -66,6 +66,19 @@ The source file is stored with `0600` permissions and mounted read-only. Every `
 
 If the bot check returns, replace the mounted file explicitly and run the deployment again. `deploy.sh` itself never overwrites it.
 
+### `HTTP Error 403: Forbidden` with valid cookies
+
+YouTube sometimes binds a signed-in cookie session to SABR-only streaming. The metadata probe still succeeds, but every media URL returns `403`, while the same request without cookies downloads normally. The bot handles this automatically: a YouTube download or search that fails with `403` while cookies are attached is retried once without cookies. The retry is logged as `cookie_forbidden_retry`, counted in `youtube_cookie_retries`, and three retries within ten minutes send administrators a "degraded cookies" alert with a check button. Age-restricted and private videos are unavailable until the cookies are replaced.
+
+To confirm the diagnosis manually, run the same download inside the container with and without `--cookies`:
+
+```bash
+sudo docker exec e6akl4k-music_bot-1 sh -c 'cp /app/cookies.txt /tmp/c.txt && yt-dlp --ignore-config --cookies /tmp/c.txt -f bestaudio -o /tmp/t.%(ext)s <url>; rm -f /tmp/c.txt /tmp/t.*'
+sudo docker exec e6akl4k-music_bot-1 sh -c 'yt-dlp --ignore-config -f bestaudio -o /tmp/t.%(ext)s <url>; rm -f /tmp/t.*'
+```
+
+If only the first command fails with `403`, export fresh cookies from a browser session and install them as shown above.
+
 ## Operations
 
 ```bash

@@ -325,6 +325,10 @@ var texts = map[string]map[string]string{
 		"ru": "⚠️ YouTube отклоняет cookies или требует bot-check. обнови cookies.txt и проверь /status.",
 		"en": "⚠️ YouTube is rejecting the cookies or requiring a bot check. refresh cookies.txt and check /status.",
 	},
+	"admin_cookie_degraded": {
+		"ru": "⚠️ YouTube отдаёт 403 с текущими cookies, загрузки идут повторно без cookies. треки 18+ и приватные недоступны — обнови cookies.txt.",
+		"en": "⚠️ YouTube returns 403 with the current cookies, so downloads are retried without them. age-restricted and private tracks are unavailable — refresh cookies.txt.",
+	},
 }
 
 func tr(key, lang string, values ...string) string {

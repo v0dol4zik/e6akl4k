@@ -144,6 +144,27 @@ func (a *app) reportDownloadFailure(message, source string) {
 	}
 }
 
+// reportCookieRetry is wired into downloader.onCookieRetry: the download itself succeeded without
+// cookies, but the cookie session is degraded, so it feeds the same sliding window and alert path.
+func (a *app) reportCookieRetry() {
+	if a.store != nil {
+		a.store.increment(a.ctx, "youtube_cookie_retries")
+	}
+	if !a.cookieAlerts.recordForbidden() {
+		return
+	}
+	if a.store != nil {
+		a.store.increment(a.ctx, "youtube_cookie_errors")
+	}
+	if !a.cookieAlerts.alertDue(a.ctx, a.store) {
+		return
+	}
+	for _, adminID := range a.administratorIDs(a.ctx) {
+		lang := a.langOrDefault(adminID)
+		a.sendText(adminID, tr("admin_cookie_degraded", lang), "", cookieCheckKeyboard(lang))
+	}
+}
+
 // cookieStatus reports "suspect" while the persisted alert time is inside the
 // cooldown window and "ok" otherwise; it is exposed through /healthz.
 func (a *app) cookieStatus(ctx context.Context) string {

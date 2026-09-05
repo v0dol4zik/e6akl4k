@@ -112,6 +112,7 @@ func main() {
 	defer stop()
 	startMediaMetricsRecorder(ctx, state)
 	application := newAppWithServices(ctx, bot, dl, state, cfg)
+	dl.onCookieRetry = application.reportCookieRetry
 	_ = startHTTPServer(ctx, application, cfg.HTTPAddr)
 	application.startDiskMonitor(ctx)
 	if cfg.CacheChatID != 0 {
