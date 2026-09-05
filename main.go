@@ -70,14 +70,14 @@ type app struct {
 	flights       flightGroup
 	octaveRemote  *circuitBreaker
 
-	mu            sync.Mutex
-	userLang      map[int64]string
-	userPref      map[int64]userPreference
-	urls          map[string]pendingURL
-	urlOrder      []string
-	active        map[string]activeDownload
-	activeUser    map[int64]bool
-	cookieAlertAt time.Time
+	mu           sync.Mutex
+	userLang     map[int64]string
+	userPref     map[int64]userPreference
+	urls         map[string]pendingURL
+	urlOrder     []string
+	active       map[string]activeDownload
+	activeUser   map[int64]bool
+	cookieAlerts cookieAlertState
 }
 
 func newApp(ctx context.Context, bot *tgbotapi.BotAPI, downloader *downloader) *app {
@@ -247,6 +247,8 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		if !existed {
 			a.sendText(callback.From.ID, a.guideText("welcome", lang), "HTML", nil)
 		}
+	case data == cookieCheckCallback:
+		a.handleCookieCheck(callback)
 	case strings.HasPrefix(data, "pref:"):
 		a.handlePreferenceChoice(callback)
 	case strings.HasPrefix(data, "hist:"):
@@ -404,7 +406,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 				}
 				return
 			}
-			a.reportDownloadFailure(batchErr.Error())
+			a.reportDownloadFailure(batchErr.Error(), sourceHost(url))
 			a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(batchErr.Error())), "HTML", nil)
 		}
 		return
@@ -455,7 +457,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			return
 		}
 		log.Printf("Ошибка загрузки source=%s user_id=%d: %v", sourceHost(url), userID, err)
-		a.reportDownloadFailure(err.Error())
+		a.reportDownloadFailure(err.Error(), sourceHost(url))
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return
 	}
@@ -465,7 +467,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			reason = results[0].Error
 			a.downloader.clearSession(results[0].Session)
 		}
-		a.reportDownloadFailure(reason)
+		a.reportDownloadFailure(reason, sourceHost(url))
 		historyError = reason
 		a.sendText(chatID, tr("nothing_downloaded", lang, "error", reason), "", nil)
 		return

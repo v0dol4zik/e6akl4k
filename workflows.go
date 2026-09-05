@@ -294,7 +294,7 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 			}
 			return true, false
 		}
-		a.reportDownloadFailure(err.Error())
+		a.reportDownloadFailure(err.Error(), sourceHost(pending.URL))
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return true, false
 	}
@@ -609,30 +609,3 @@ func (a *app) handleAdminStatus(message *tgbotapi.Message) {
 }
 
 func (a *app) activeUserCount() int { a.mu.Lock(); defer a.mu.Unlock(); return len(a.activeUser) }
-
-func (a *app) reportDownloadFailure(message string) {
-	if a.store != nil {
-		a.store.increment(a.ctx, "downloads_failed")
-	}
-	if !isCookieFailure(message) {
-		return
-	}
-	if a.store != nil {
-		a.store.increment(a.ctx, "youtube_cookie_errors")
-	}
-	a.mu.Lock()
-	if time.Since(a.cookieAlertAt) < time.Hour {
-		a.mu.Unlock()
-		return
-	}
-	a.cookieAlertAt = time.Now()
-	a.mu.Unlock()
-	for _, adminID := range a.administratorIDs(a.ctx) {
-		a.sendText(adminID, tr("admin_cookie_warning", a.langOrDefault(adminID)), "", nil)
-	}
-}
-
-func isCookieFailure(message string) bool {
-	message = strings.ToLower(message)
-	return strings.Contains(message, "cookies.txt") || strings.Contains(message, "not a bot") || strings.Contains(message, "подтверждения, что запрос не от бота")
-}

@@ -156,7 +156,7 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 		} else if inlineCancelled && a.store != nil {
 			a.store.increment(a.ctx, "downloads_cancelled")
 		} else if !inlineOK {
-			a.reportDownloadFailure(inlineFailure)
+			a.reportDownloadFailure(inlineFailure, sourceHost(candidate.URL))
 		}
 	}()
 

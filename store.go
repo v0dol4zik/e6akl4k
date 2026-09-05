@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -571,6 +572,30 @@ func (s *store) deleteCachedAudio(ctx context.Context, key string) {
 func (s *store) increment(ctx context.Context, name string) {
 	_, _ = s.db.ExecContext(ctx, `INSERT INTO counters(name,value) VALUES(?,1)
 ON CONFLICT(name) DO UPDATE SET value=value+1`, name)
+}
+
+// metadata returns the value stored under name in the metadata table or "" when absent.
+func (s *store) metadata(ctx context.Context, name string) string {
+	var value string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata WHERE name=?`, name).Scan(&value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func (s *store) setMetadata(ctx context.Context, name, value string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO metadata(name,value) VALUES(?,?)
+ON CONFLICT(name) DO UPDATE SET value=excluded.value`, name, value)
+	return err
+}
+
+// cookieAlertTime returns the persisted time of the last stale-cookie alert or the zero time.
+func (s *store) cookieAlertTime(ctx context.Context) time.Time {
+	unix, err := strconv.ParseInt(s.metadata(ctx, cookieAlertMetadataKey), 10, 64)
+	if err != nil || unix <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(unix, 0)
 }
 
 func (s *store) stats(ctx context.Context) (statsSnapshot, error) {
