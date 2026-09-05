@@ -215,11 +215,40 @@ func formatETA(duration time.Duration, lang string) string {
 	return tr("eta_hours_minutes", lang, "hours", strconv.Itoa(minutes/60), "minutes", strconv.Itoa(minutes%60))
 }
 
+// detectURL returns the first valid media link found in text, or an empty string.
 func detectURL(text string) string {
-	rawURL := urlPattern.FindString(text)
-	if rawURL == "" {
+	urls := detectURLs(text, 1)
+	if len(urls) == 0 {
 		return ""
 	}
+	return urls[0]
+}
+
+// detectURLs returns every valid media link in text in order of appearance,
+// without duplicates. A max of zero or less means no cap.
+func detectURLs(text string, max int) []string {
+	var urls []string
+	seen := make(map[string]struct{})
+	for _, match := range urlPattern.FindAllString(text, -1) {
+		normalized := normalizeDetectedURL(match)
+		if normalized == "" {
+			continue
+		}
+		if _, duplicate := seen[normalized]; duplicate {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		urls = append(urls, normalized)
+		if max > 0 && len(urls) >= max {
+			break
+		}
+	}
+	return urls
+}
+
+// normalizeDetectedURL adds a scheme when missing and rejects links with user info,
+// unknown hosts, or plain-HTTP Octave hosts.
+func normalizeDetectedURL(rawURL string) string {
 	if !strings.HasPrefix(strings.ToLower(rawURL), "http://") && !strings.HasPrefix(strings.ToLower(rawURL), "https://") {
 		rawURL = "https://" + rawURL
 	}

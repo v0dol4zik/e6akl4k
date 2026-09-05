@@ -632,3 +632,259 @@ func (a *app) handleAdminStatus(message *tgbotapi.Message) {
 }
 
 func (a *app) activeUserCount() int { a.mu.Lock(); defer a.mu.Unlock(); return len(a.activeUser) }
+
+// handleIncomingBatch previews every link of a multi-link message and offers one format for all of them.
+// Playlists are rejected as a whole; links that fail to preview are listed and skipped.
+func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang string) {
+	chatID, userID := message.Chat.ID, message.From.ID
+	if len(urls) > maxBatchLinks {
+		a.sendText(chatID, tr("batch_limit", lang, "max", strconv.Itoa(maxBatchLinks)), "HTML", nil)
+		urls = urls[:maxBatchLinks]
+	}
+	status := a.sendText(chatID, tr("analyzing", lang), "HTML", nil)
+	ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
+	defer cancel()
+	_, release, err := a.lookups.acquire(ctx)
+	if err != nil {
+		if errors.Is(err, errQueueFull) && a.store != nil {
+			a.store.increment(a.ctx, "queue_rejected")
+		}
+		a.handleQueueError(chatID, lang, err)
+		return
+	}
+	kept := make([]string, 0, len(urls))
+	previews := make([]mediaPreview, 0, len(urls))
+	var failed []string
+	for _, rawURL := range urls {
+		if requiresMusicResolution(rawURL) {
+			failed = append(failed, tr("batch_link_failed", lang, "url", html.EscapeString(rawURL), "error", tr("batch_search_only", lang)))
+			continue
+		}
+		linkCtx, linkCancel := context.WithTimeout(ctx, 20*time.Second)
+		preview, previewErr := a.inspectURL(linkCtx, rawURL)
+		linkCancel()
+		if previewErr != nil {
+			if ctx.Err() != nil {
+				release()
+				a.sendText(chatID, tr("preview_error", lang, "error", html.EscapeString(ctx.Err().Error())), "HTML", nil)
+				return
+			}
+			failed = append(failed, tr("batch_link_failed", lang, "url", html.EscapeString(rawURL), "error", html.EscapeString(previewErr.Error())))
+			continue
+		}
+		if preview.IsPlaylist {
+			release()
+			a.sendText(chatID, tr("batch_no_playlists", lang), "HTML", nil)
+			return
+		}
+		kept = append(kept, rawURL)
+		previews = append(previews, preview)
+	}
+	release()
+	if len(kept) == 0 {
+		a.sendText(chatID, strings.Join(append([]string{tr("nothing_found", lang)}, failed...), "\n"), "HTML", nil)
+		return
+	}
+	batchPreview := mediaPreview{
+		URL: kept[0], Title: tr("batch_title", lang, "count", strconv.Itoa(len(kept))),
+		TrackCount: len(kept), Extractor: "batch",
+	}
+	for _, preview := range previews {
+		batchPreview.DurationSeconds += preview.DurationSeconds
+		batchPreview.Estimated128 += preview.Estimated128
+		batchPreview.Estimated320 += preview.Estimated320
+	}
+	key, err := a.storeURL(pendingURL{URL: kept[0], ChatID: chatID, UserID: userID, Preview: batchPreview, Batch: kept, BatchPreviews: previews})
+	if err != nil {
+		log.Printf("save pending batch: %v", err)
+		return
+	}
+	if format, quality, ok := a.getPreference(userID); ok {
+		// The format keyboard is skipped, so the skipped-link report must be shown on its own:
+		// the status message is reused for it instead of being deleted.
+		if len(failed) > 0 {
+			a.replaceStatusText(chatID, status, strings.Join(failed, "\n"))
+		} else {
+			a.deleteStatusMessage(status)
+		}
+		a.startDownload(userID, chatID, key, format, quality, lang, nil)
+		return
+	}
+	text := batchPreviewText(previews, failed, lang)
+	keyboard := formatKeyboard(key, lang)
+	if status != nil {
+		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, text, *keyboard)
+		edit.ParseMode = "HTML"
+		if _, err := sendTelegram(a.bot, edit); err == nil {
+			return
+		}
+	}
+	a.sendText(chatID, text, "HTML", keyboard)
+}
+
+// replaceStatusText rewrites a status message with text (HTML) and falls back to a new message.
+func (a *app) replaceStatusText(chatID int64, status *tgbotapi.Message, text string) {
+	if status != nil {
+		edit := tgbotapi.NewEditMessageText(status.Chat.ID, status.MessageID, text)
+		edit.ParseMode = "HTML"
+		if _, err := sendTelegram(a.bot, edit); err == nil {
+			return
+		}
+	}
+	a.sendText(chatID, text, "HTML", nil)
+}
+
+func batchPreviewText(previews []mediaPreview, failed []string, lang string) string {
+	lines := []string{tr("batch_preview", lang, "count", strconv.Itoa(len(previews)))}
+	for i, preview := range previews {
+		lines = append(lines, strconv.Itoa(i+1)+". "+batchTrackLabel(preview))
+	}
+	lines = append(lines, failed...)
+	lines = append(lines, tr("choose_format", lang))
+	return strings.Join(lines, "\n")
+}
+
+func batchTrackLabel(preview mediaPreview) string {
+	label := html.EscapeString(shortenRunes(firstNonEmpty(preview.Title, preview.URL, "Unknown"), 80))
+	if preview.Artist != "" {
+		label = html.EscapeString(shortenRunes(preview.Artist, 60)) + " — " + label
+	}
+	if preview.Duration != "" {
+		label += " · " + html.EscapeString(preview.Duration)
+	}
+	return label
+}
+
+// downloadBatch processes pending.Batch sequentially inside one download slot. Cached tracks are
+// re-sent by file_id, the rest are downloaded one by one; a failing link does not stop the batch.
+func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, status *tgbotapi.Message, reporter *statusReporter) (deliveryReport, error) {
+	_, release, err := a.downloads.acquireNotify(ctx, func(position int) {
+		if status != nil {
+			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
+		}
+	})
+	if err != nil {
+		if errors.Is(err, errQueueFull) && a.store != nil {
+			a.store.increment(a.ctx, "queue_rejected")
+		}
+		return deliveryReport{}, err
+	}
+	defer release()
+
+	total := len(pending.Batch)
+	report := deliveryReport{}
+	var results []downloadResult
+	sessions := make(map[string]struct{})
+	defer func() {
+		for session := range sessions {
+			a.downloader.clearSession(session)
+		}
+	}()
+	for i, rawURL := range pending.Batch {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		preview := mediaPreview{URL: rawURL}
+		if i < len(pending.BatchPreviews) {
+			preview = pending.BatchPreviews[i]
+		}
+		reporter.stage(tr("batch_progress", lang, "current", strconv.Itoa(i+1), "total", strconv.Itoa(total), "title", html.EscapeString(shortenRunes(firstNonEmpty(preview.Title, rawURL), 80))))
+		item := pendingURL{URL: rawURL, ChatID: pending.ChatID, UserID: pending.UserID, Preview: preview}
+		if pending.Delivery != "zip" {
+			if delivered, handled := a.sendBatchCached(ctx, chatID, item, format, quality, lang); handled {
+				if delivered {
+					report.Delivered++
+				} else {
+					report.Failed++
+				}
+				continue
+			}
+		}
+		linkResults, downloadErr := a.downloader.downloadRange(ctx, rawURL, format, quality, 0, 0, nil)
+		for _, result := range linkResults {
+			if result.Session != "" {
+				sessions[result.Session] = struct{}{}
+			}
+		}
+		if ctx.Err() != nil {
+			return report, ctx.Err()
+		}
+		if downloadErr != nil {
+			log.Printf("Ошибка пакетной загрузки source=%s user_id=%d: %v", sourceHost(rawURL), pending.UserID, downloadErr)
+			linkResults = []downloadResult{{Title: preview.Title, Artist: preview.Artist, Error: downloadErr.Error()}}
+		}
+		if len(linkResults) == 0 {
+			linkResults = []downloadResult{{Title: preview.Title, Artist: preview.Artist, Error: tr("unknown_error", lang)}}
+		}
+		for _, result := range linkResults {
+			if result.Error != "" {
+				a.reportDownloadFailure(result.Error, sourceHost(rawURL))
+			}
+		}
+		results = append(results, linkResults...)
+	}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if len(results) > 0 {
+		if pending.Delivery == "zip" {
+			_, releaseArchive, queueErr := a.archives.acquireNotify(ctx, func(position int) {
+				a.editStatusMessage(status, tr("archive_queued", lang, "position", strconv.Itoa(position)))
+			})
+			if queueErr != nil {
+				return report, queueErr
+			}
+			zipReport := a.sendResultsAsZIP(chatID, results, format, lang)
+			releaseArchive()
+			report.Delivered += zipReport.Delivered
+			report.Failed += zipReport.Failed
+			return report, nil
+		}
+		if status != nil {
+			a.editStatusMessageFinal(status, tr("download_finished", lang))
+		}
+		reporter.stage(tr("stage_prepare", lang))
+		fileReport := a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, false, reporter)
+		report.Delivered += fileReport.Delivered
+		report.Failed += fileReport.Failed
+	}
+	summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(report.Delivered), "total", strconv.Itoa(report.Delivered+report.Failed))
+	if report.Failed > 0 {
+		summary = tr("batch_partial", lang, "ok", strconv.Itoa(report.Delivered), "failed", strconv.Itoa(report.Failed))
+	}
+	a.sendText(chatID, summary, "HTML", nil)
+	return report, nil
+}
+
+// sendBatchCached re-sends a batch link from the file_id cache. handled is false when there is no
+// usable cache entry and the link must be downloaded.
+func (a *app) sendBatchCached(ctx context.Context, chatID int64, item pendingURL, format, quality, lang string) (delivered, handled bool) {
+	if a.store == nil {
+		return false, false
+	}
+	keys := []string{}
+	if source := sourceCacheKey(item.Preview.Extractor, item.Preview.SourceID, format, quality); source != "" {
+		keys = append(keys, source)
+	}
+	keys = append(keys, generalCacheKey(item.URL, format, quality))
+	for _, key := range keys {
+		entry, ok := a.store.cachedAudio(ctx, key, a.cfg.CacheTTL)
+		if !ok {
+			continue
+		}
+		started := time.Now()
+		err := a.sendCachedAudio(chatID, entry, lang)
+		logMediaStage("telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", true, "format", entry.Format)
+		if err == nil {
+			a.store.increment(a.ctx, "cache_hits")
+			return true, true
+		}
+		if invalidCachedFileError(err) {
+			a.store.deleteCachedAudio(ctx, key)
+			continue
+		}
+		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+		return false, true
+	}
+	return false, false
+}
