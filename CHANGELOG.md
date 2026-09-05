@@ -19,6 +19,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Added `/settings` with a per-user default format and quality that skips the format keyboard for tracks, search picks, and playlist ranges, with an "ask each time" option and a visible hint in the download status.
 - Added `/history` listing the last ten delivered tracks with one-tap re-delivery from the Telegram `file_id` cache, an expired-cache hint instead of a new download, and a clear-history button.
 - Added Octave-first private title search: text queries hit the Octave search API before YouTube, and the results header states explicitly when YouTube was used because Octave had no matches or was unavailable. New `search_octave` and `search_youtube_fallback` counters appear in `/stats` and `/metrics`.
+- Added search by forwarded audio in private chats: the performer and title tags (or the file name) become the query and the audio duration guides ranking.
 
 ### Changed
 

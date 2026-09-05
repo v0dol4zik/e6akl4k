@@ -478,3 +478,118 @@ func TestHistoryCommandAndCachedRedelivery(t *testing.T) {
 		t.Fatalf("history must be empty after clearing: %#v err=%v", items, err)
 	}
 }
+
+func TestAudioSearchQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		audio *tgbotapi.Audio
+		want  string
+	}{
+		{name: "nil", audio: nil, want: ""},
+		{name: "performer and title", audio: &tgbotapi.Audio{Performer: "Daft Punk", Title: "Get Lucky"}, want: "Daft Punk Get Lucky"},
+		{name: "title only", audio: &tgbotapi.Audio{Title: " Get Lucky "}, want: "Get Lucky"},
+		{name: "performer only", audio: &tgbotapi.Audio{Performer: "Daft Punk"}, want: "Daft Punk"},
+		{name: "file name without extension", audio: &tgbotapi.Audio{FileName: "Daft Punk - Get Lucky.mp3"}, want: "Daft Punk - Get Lucky"},
+		{name: "tags win over file name", audio: &tgbotapi.Audio{Title: "Get Lucky", FileName: "other.flac"}, want: "Get Lucky"},
+		{name: "extension only", audio: &tgbotapi.Audio{FileName: ".mp3"}, want: ""},
+		{name: "nothing", audio: &tgbotapi.Audio{Duration: 200}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := audioSearchQuery(tt.audio); got != tt.want {
+				t.Fatalf("audioSearchQuery() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestForwardedAudioTriggersSearch(t *testing.T) {
+	tests := []struct {
+		name      string
+		message   *tgbotapi.Message
+		wantFirst string
+		wantCalls bool
+	}{
+		{
+			name: "private chat with tags searches",
+			message: &tgbotapi.Message{
+				Audio: &tgbotapi.Audio{Performer: "Daft Punk", Title: "Get Lucky", Duration: 248},
+				From:  &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10, Type: "private"},
+			},
+			wantFirst: tr("searching_by_audio", "en"),
+			wantCalls: true,
+		},
+		{
+			name: "private chat without metadata explains",
+			message: &tgbotapi.Message{
+				Audio: &tgbotapi.Audio{Duration: 248},
+				From:  &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10, Type: "private"},
+			},
+			wantFirst: tr("audio_no_metadata", "en"),
+			wantCalls: true,
+		},
+		{
+			name: "group chat is ignored",
+			message: &tgbotapi.Message{
+				Audio: &tgbotapi.Audio{Performer: "Daft Punk", Title: "Get Lucky", Duration: 248},
+				From:  &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: -20, Type: "group"},
+			},
+			wantCalls: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var texts []string
+			var calls atomic.Int32
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = r.ParseForm()
+				switch filepath.Base(r.URL.Path) {
+				case "getMe":
+					fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+				case "sendMessage", "editMessageText":
+					calls.Add(1)
+					mu.Lock()
+					texts = append(texts, r.FormValue("text"))
+					mu.Unlock()
+					fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":10,"type":"private"},"text":"status"}}`)
+				default:
+					calls.Add(1)
+					fmt.Fprint(w, `{"ok":true,"result":true}`)
+				}
+			})
+			bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: handler})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer state.Close()
+			// os.Args[0] is the test binary: yt-dlp lookups exit without producing JSON, so the search ends without network access.
+			dl := &downloader{downloadDir: t.TempDir(), bin: os.Args[0], maxFileSize: maxFileSize, maxPlaylistTracks: 75, octave: testOctaveClient(http.NotFoundHandler())}
+			cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour, MaxPlaylistTracks: 75, MaxFileSize: maxFileSize}
+			app := newAppWithServices(context.Background(), bot, dl, state, cfg)
+			app.setLang(10, "en")
+
+			app.handleMessage(tt.message)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !tt.wantCalls {
+				if calls.Load() != 0 {
+					t.Fatalf("expected no Telegram calls, got %d: %q", calls.Load(), texts)
+				}
+				return
+			}
+			if len(texts) == 0 || texts[0] != tt.wantFirst {
+				t.Fatalf("first message = %q, want %q", texts, tt.wantFirst)
+			}
+			if tt.wantFirst == tr("audio_no_metadata", "en") && len(texts) != 1 {
+				t.Fatalf("no search must run without metadata: %q", texts)
+			}
+		})
+	}
+}

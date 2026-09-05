@@ -196,6 +196,10 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 			return
 		}
 	}
+	if message.Audio != nil && message.Chat.IsPrivate() {
+		a.handleAudioSearch(message)
+		return
+	}
 	if message.Text == "" {
 		return
 	}
@@ -221,6 +225,45 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 		return
 	}
 	a.sendText(message.Chat.ID, a.guideText("invalid_link", lang), "HTML", nil)
+}
+
+// handleAudioSearch turns a forwarded audio file into a title search using its
+// performer/title tags or, failing that, its file name.
+func (a *app) handleAudioSearch(message *tgbotapi.Message) {
+	userID := message.From.ID
+	lang, ok := a.getLang(userID)
+	if !ok {
+		a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
+		return
+	}
+	if allowed, retry := a.limiter.allow(userID); !allowed {
+		if a.store != nil {
+			a.store.increment(a.ctx, "rate_limited")
+		}
+		a.sendText(message.Chat.ID, tr("rate_limited", lang, "seconds", strconv.Itoa(int(retry.Seconds())+1)), "", nil)
+		return
+	}
+	query := audioSearchQuery(message.Audio)
+	if query == "" {
+		a.sendText(message.Chat.ID, tr("audio_no_metadata", lang), "", nil)
+		return
+	}
+	status := a.sendText(message.Chat.ID, tr("searching_by_audio", lang), "HTML", nil)
+	a.presentSearchResults(message.Chat.ID, userID, query, lang, status, false, message.Audio.Duration)
+}
+
+// audioSearchQuery builds a search string from audio tags, falling back to the
+// file name without its extension. It returns "" when nothing usable is present.
+func audioSearchQuery(audio *tgbotapi.Audio) string {
+	if audio == nil {
+		return ""
+	}
+	query := strings.TrimSpace(strings.TrimSpace(audio.Performer) + " " + strings.TrimSpace(audio.Title))
+	if query != "" {
+		return query
+	}
+	name := strings.TrimSpace(audio.FileName)
+	return strings.TrimSpace(strings.TrimSuffix(name, filepath.Ext(name)))
 }
 
 func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
