@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -337,5 +339,264 @@ func TestCookieFailureClassification(t *testing.T) {
 	}
 	if isCookieFailure("Видео приватное") {
 		t.Fatal("unrelated error classified as cookie failure")
+	}
+}
+
+type telegramCall struct {
+	method string
+	text   string
+	markup string
+	audio  string
+}
+
+type batchHarness struct {
+	app   *app
+	state *store
+	mu    sync.Mutex
+	calls []telegramCall
+}
+
+func (h *batchHarness) snapshot() []telegramCall {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := append([]telegramCall(nil), h.calls...)
+	h.calls = nil
+	return out
+}
+
+func (h *batchHarness) count(method string, calls []telegramCall) int {
+	n := 0
+	for _, call := range calls {
+		if call.method == method {
+			n++
+		}
+	}
+	return n
+}
+
+func (h *batchHarness) hasText(calls []telegramCall, text string) bool {
+	for _, call := range calls {
+		if call.method == "sendMessage" && call.text == text {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *batchHarness) pendingKey(t *testing.T) string {
+	t.Helper()
+	h.app.mu.Lock()
+	defer h.app.mu.Unlock()
+	if len(h.app.urls) != 1 {
+		t.Fatalf("expected exactly one pending entry, got %d", len(h.app.urls))
+	}
+	for key := range h.app.urls {
+		return key
+	}
+	return ""
+}
+
+// newBatchHarness wires a fake Telegram and a fake Octave API where album 3 holds tracks 11 and 12
+// and every other album is a 404. Playback tokens are unavailable, so real downloads always fail.
+func newBatchHarness(t *testing.T) *batchHarness {
+	t.Helper()
+	h := &batchHarness{}
+	telegramHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = r.ParseForm()
+		method := filepath.Base(r.URL.Path)
+		switch method {
+		case "getMe":
+			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
+			return
+		case "sendMessage", "editMessageText", "sendAudio", "sendDocument":
+			h.mu.Lock()
+			h.calls = append(h.calls, telegramCall{method: method, text: r.FormValue("text"), markup: r.FormValue("reply_markup"), audio: r.FormValue("audio")})
+			h.mu.Unlock()
+			if method == "sendAudio" {
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"audio":{"file_id":"cached-file","file_unique_id":"u","duration":1}}}`)
+				return
+			}
+			fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":10,"type":"private"},"text":"status"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	})
+	octaveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/album/3" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"album":{"id":"3","title":"Album","artist":{"id":"2","name":"Artist"},"tracks":[{"id":"11","title":"First","artist":{"id":"2","name":"Artist"},"duration":180},{"id":"12","title":"Second","artist":{"id":"2","name":"Artist"},"duration":200}]}}`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: telegramHandler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { state.Close() })
+	previousSleep := octaveRetrySleep
+	octaveRetrySleep = func(context.Context, int) error { return nil }
+	t.Cleanup(func() { octaveRetrySleep = previousSleep })
+	dl := &downloader{downloadDir: t.TempDir(), maxFileSize: maxFileSize, maxPlaylistTracks: 75, octave: testOctaveClient(octaveHandler)}
+	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 20, RateWindow: time.Minute, CacheTTL: time.Hour, MaxPlaylistTracks: 75, MaxFileSize: maxFileSize}
+	h.app = newAppWithServices(context.Background(), bot, dl, state, cfg)
+	h.state = state
+	h.app.setLang(10, "en")
+	return h
+}
+
+func batchMessage(text string) *tgbotapi.Message {
+	return &tgbotapi.Message{Text: text, From: &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}
+}
+
+func batchCallback(data string) *tgbotapi.CallbackQuery {
+	return &tgbotapi.CallbackQuery{ID: "cb", From: &tgbotapi.User{ID: 10}, Message: &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}, Data: data}
+}
+
+func cacheOctaveTrack(t *testing.T, state *store, trackID, title string) {
+	t.Helper()
+	if err := state.putCachedAudio(context.Background(), cachedAudio{Key: sourceCacheKey("octave", trackID, "mp3", "320"), FileID: "cached-file", Title: title, Format: "mp3", Quality: "320"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBatchOfTwoLinksShowsPreviewAndDeliversBoth(t *testing.T) {
+	h := newBatchHarness(t)
+	cacheOctaveTrack(t, h.state, "11", "First")
+	cacheOctaveTrack(t, h.state, "12", "Second")
+
+	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 and https://music.octavestreaming.com/album/3?t=12"))
+	calls := h.snapshot()
+	var preview telegramCall
+	for _, call := range calls {
+		if strings.Contains(call.markup, `"dl:mp3:320:`) {
+			preview = call
+		}
+	}
+	if preview.method == "" {
+		t.Fatalf("batch preview with a format keyboard was not shown: %#v", calls)
+	}
+	if !strings.Contains(preview.text, "links in the message: 2") || !strings.Contains(preview.text, "1. Artist — First") || !strings.Contains(preview.text, "2. Artist — Second") {
+		t.Fatalf("unexpected preview text: %q", preview.text)
+	}
+	if strings.Contains(preview.markup, `"delivery:`) {
+		t.Fatalf("small batches must not ask for a delivery mode: %s", preview.markup)
+	}
+	pending, ok := h.app.getURL(h.pendingKey(t), 10, 10)
+	if !ok || len(pending.Batch) != 2 || pending.Preview.IsPlaylist || pending.Preview.Extractor != "batch" || pending.Preview.TrackCount != 2 || pending.Preview.Title != "2 tracks" {
+		t.Fatalf("unexpected pending batch: %#v", pending)
+	}
+
+	key := h.pendingKey(t)
+	h.app.handleCallback(batchCallback("dl:mp3:320:" + key))
+	calls = h.snapshot()
+	if got := h.count("sendAudio", calls); got != 2 {
+		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)
+	}
+	if !h.hasText(calls, tr("all_sent_summary", "en", "sent", "2", "total", "2")) {
+		t.Fatalf("summary is missing: %#v", calls)
+	}
+	var status, cacheKey string
+	if err := h.state.db.QueryRow(`SELECT status, cache_key FROM download_history ORDER BY id DESC LIMIT 1`).Scan(&status, &cacheKey); err != nil || status != "delivered" || cacheKey != "" {
+		t.Fatalf("history status=%q cache_key=%q err=%v", status, cacheKey, err)
+	}
+	if _, ok := h.app.getURL(key, 10, 10); ok {
+		t.Fatal("pending batch must be consumed")
+	}
+}
+
+func TestBatchSkipsLinkWithFailedPreview(t *testing.T) {
+	h := newBatchHarness(t)
+	cacheOctaveTrack(t, h.state, "11", "First")
+
+	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/99?t=5"))
+	calls := h.snapshot()
+	var preview telegramCall
+	for _, call := range calls {
+		if strings.Contains(call.markup, `"dl:mp3:320:`) {
+			preview = call
+		}
+	}
+	if preview.method == "" {
+		t.Fatalf("preview was not shown: %#v", calls)
+	}
+	if !strings.Contains(preview.text, "links in the message: 1") || !strings.Contains(preview.text, "album/99?t=5</code> — skipped: Octave API") {
+		t.Fatalf("failed link must be listed with its error: %q", preview.text)
+	}
+	h.app.handleCallback(batchCallback("dl:mp3:320:" + h.pendingKey(t)))
+	calls = h.snapshot()
+	if got := h.count("sendAudio", calls); got != 1 {
+		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)
+	}
+}
+
+func TestBatchWithOneFailedDownloadIsPartial(t *testing.T) {
+	h := newBatchHarness(t)
+	cacheOctaveTrack(t, h.state, "11", "First")
+	cacheOctaveTrack(t, h.state, "12", "Second")
+
+	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11\nhttps://music.octavestreaming.com/album/3?t=12\nhttps://music.octavestreaming.com/track/13"))
+	h.snapshot()
+	h.app.handleCallback(batchCallback("dl:mp3:320:" + h.pendingKey(t)))
+	calls := h.snapshot()
+	if got := h.count("sendAudio", calls); got != 2 {
+		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)
+	}
+	if !h.hasText(calls, tr("batch_partial", "en", "ok", "2", "failed", "1")) {
+		t.Fatalf("partial summary is missing: %#v", calls)
+	}
+	errorReported := false
+	for _, call := range calls {
+		if call.method == "sendMessage" && strings.Contains(call.text, "error") && strings.Contains(call.text, "HTTP 404") {
+			errorReported = true
+		}
+	}
+	if !errorReported {
+		t.Fatalf("the failed link must be reported: %#v", calls)
+	}
+	stats, err := h.state.stats(context.Background())
+	if err != nil || stats.DownloadsPartial != 1 || stats.DownloadsOK != 0 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
+	}
+	var status string
+	if err := h.state.db.QueryRow(`SELECT status FROM download_history ORDER BY id DESC LIMIT 1`).Scan(&status); err != nil || status != "partial" {
+		t.Fatalf("history status=%q err=%v", status, err)
+	}
+}
+
+func TestBatchRejectsPlaylists(t *testing.T) {
+	h := newBatchHarness(t)
+	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/3"))
+	calls := h.snapshot()
+	last := calls[len(calls)-1]
+	if last.method != "sendMessage" || last.text != tr("batch_no_playlists", "en") {
+		t.Fatalf("unexpected reply: %#v", calls)
+	}
+	h.app.mu.Lock()
+	defer h.app.mu.Unlock()
+	if len(h.app.urls) != 0 {
+		t.Fatal("nothing must be stored for a rejected batch")
+	}
+}
+
+func TestBatchLimitKeepsFirstFiveLinks(t *testing.T) {
+	h := newBatchHarness(t)
+	var links []string
+	for i := 20; i < 27; i++ {
+		links = append(links, "https://music.octavestreaming.com/track/"+strconv.Itoa(i))
+	}
+	h.app.handleMessage(batchMessage(strings.Join(links, " ")))
+	calls := h.snapshot()
+	if calls[0].method != "sendMessage" || calls[0].text != tr("batch_limit", "en", "max", "5") {
+		t.Fatalf("batch_limit must be sent first: %#v", calls)
+	}
+	pending, ok := h.app.getURL(h.pendingKey(t), 10, 10)
+	if !ok || len(pending.Batch) != maxBatchLinks || pending.Batch[4] != links[4] {
+		t.Fatalf("unexpected pending batch: %#v", pending)
 	}
 }

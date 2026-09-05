@@ -26,6 +26,8 @@ const (
 	maxParallelDownloads       = 7
 	maxStoredEntries           = 5000
 	pendingURLTTL              = time.Hour
+	// maxBatchLinks caps how many links from one message are downloaded together.
+	maxBatchLinks = 5
 )
 
 var (
@@ -47,6 +49,9 @@ type pendingURL struct {
 	RangeEnd   int
 	Delivery   string
 	ExpiresAt  time.Time
+	// Batch holds every link of a multi-link message; BatchPreviews mirrors it index by index.
+	Batch         []string
+	BatchPreviews []mediaPreview
 }
 
 type activeDownload struct {
@@ -211,9 +216,13 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 		a.sendText(message.Chat.ID, tr("rate_limited", lang, "seconds", strconv.Itoa(int(retry.Seconds())+1)), "", nil)
 		return
 	}
-	url := detectURL(message.Text)
-	if url != "" {
-		a.handleIncomingURL(message, url, lang)
+	urls := detectURLs(message.Text, maxBatchLinks+1)
+	if len(urls) >= 2 {
+		a.handleIncomingBatch(message, urls, lang)
+		return
+	}
+	if len(urls) == 1 {
+		a.handleIncomingURL(message, urls[0], lang)
 		return
 	}
 	if message.Chat.IsPrivate() {
@@ -296,7 +305,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 		}
 		return a.sendText(chatID, text, parseMode, markup)
 	}
-	if pending, ok := a.getURL(urlKey, userID, chatID); ok && pending.Preview.IsPlaylist && selectedTrackCount(pending) > playlistZIPThreshold && pending.Delivery == "" {
+	if pending, ok := a.getURL(urlKey, userID, chatID); ok && (pending.Preview.IsPlaylist || len(pending.Batch) > 0) && selectedTrackCount(pending) > playlistZIPThreshold && pending.Delivery == "" {
 		showStatus(tr("choose_delivery", lang), "HTML", deliveryKeyboard(urlKey, format, quality, lang))
 		return
 	}
@@ -315,7 +324,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 	historyStatus := "failed"
 	historyError := ""
 	historyKey := ""
-	if !pending.Preview.IsPlaylist {
+	if !pending.Preview.IsPlaylist && len(pending.Batch) == 0 {
 		historyKey = sourceCacheKey(pending.Preview.Extractor, pending.Preview.SourceID, format, quality)
 		if historyKey == "" {
 			historyKey = generalCacheKey(url, format, quality)
@@ -361,6 +370,30 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 
 	var trackStarted time.Time
 	var lastProgress time.Time
+	if len(pending.Batch) > 0 {
+		report, batchErr := a.downloadBatch(downloadCtx, chatID, pending, format, quality, lang, status, reporter)
+		historyStatus = deliveryStatus(report)
+		historyError = deliveryError(report)
+		if batchErr != nil {
+			historyError = batchErr.Error()
+			if errors.Is(batchErr, context.Canceled) || downloadCtx.Err() != nil {
+				historyStatus = "cancelled"
+				if a.store != nil {
+					a.store.increment(a.ctx, "downloads_cancelled")
+				}
+				return
+			}
+			if errors.Is(batchErr, errQueueFull) {
+				a.restoreURL(urlKey, pending)
+				showStatus(tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
+				return
+			}
+			a.handleQueueError(chatID, lang, batchErr)
+			return
+		}
+		a.recordDeliveryMetrics(report)
+		return
+	}
 	if !pending.Preview.IsPlaylist {
 		reporter.stage(tr("stage_cache", lang))
 		if handled, succeeded := a.tryCachedDownload(downloadCtx, chatID, pending, format, quality, lang, func(position int) {
@@ -594,6 +627,9 @@ func (a *app) recordDeliveryMetrics(report deliveryReport) {
 }
 
 func selectedTrackCount(pending pendingURL) int {
+	if len(pending.Batch) > 0 {
+		return len(pending.Batch)
+	}
 	if !pending.Preview.IsPlaylist {
 		return 1
 	}
