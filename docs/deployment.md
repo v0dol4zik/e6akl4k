@@ -78,7 +78,7 @@ sudo docker compose down
 The HTTP server listens on `0.0.0.0:8080` inside the container, but Compose does not publish it externally:
 
 ```text
-GET /healthz   SQLite, yt-dlp, disk, and queue state as JSON
+GET /healthz   SQLite, yt-dlp, cookies (`yt_dlp_cookies`: ok/suspect), disk, and queue state as JSON
 GET /metrics   Prometheus metrics
 ```
 

@@ -76,26 +76,32 @@ func (a *app) handleAdminDownloadLog(message *tgbotapi.Message) {
 		a.sendText(message.Chat.ID, tr("admin_usage", a.langOrDefault(message.From.ID), "usage", "/log [fresh] <ссылка>"), "HTML", nil)
 		return
 	}
-	if !a.beginUserDownload(message.From.ID) {
-		a.sendText(message.Chat.ID, tr("user_download_active", a.langOrDefault(message.From.ID)), "", nil)
+	a.runDownloadTrace(message.From.ID, message.Chat.ID, rawURL, fresh)
+}
+
+// runDownloadTrace executes the diagnostic download flow for an already
+// authorised administrator and delivers the redacted trace to chatID.
+func (a *app) runDownloadTrace(userID, chatID int64, rawURL string, fresh bool) {
+	if !a.beginUserDownload(userID) {
+		a.sendText(chatID, tr("user_download_active", a.langOrDefault(userID)), "", nil)
 		return
 	}
-	defer a.finishUserDownload(message.From.ID)
+	defer a.finishUserDownload(userID)
 	trace := newDownloadTrace()
 	trace.add("mode=%s url=%s", map[bool]string{true: "fresh", false: "normal"}[fresh], safeTraceURL(rawURL))
 	if a.store != nil {
-		a.store.audit(a.ctx, message.From.ID, "download_log", message.From.ID, "fresh="+strconv.FormatBool(fresh)+" url="+safeTraceURL(rawURL))
+		a.store.audit(a.ctx, userID, "download_log", userID, "fresh="+strconv.FormatBool(fresh)+" url="+safeTraceURL(rawURL))
 	}
 	cancelKey, keyErr := randomID()
 	if keyErr != nil {
 		cancelKey = trace.id
 	}
-	status := a.sendText(message.Chat.ID, "🧪 <b>download trace</b>\n<code>"+trace.id+"</code>\ninspect…", "HTML", downloadCancelKeyboard(cancelKey, a.langOrDefault(message.From.ID)))
+	status := a.sendText(chatID, "🧪 <b>download trace</b>\n<code>"+trace.id+"</code>\ninspect…", "HTML", downloadCancelKeyboard(cancelKey, a.langOrDefault(userID)))
 
 	ctx, cancel := context.WithTimeout(a.ctx, downloadTimeout)
 	defer cancel()
 	a.mu.Lock()
-	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: message.Chat.ID, userID: message.From.ID}
+	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: chatID, userID: userID}
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
@@ -108,18 +114,18 @@ func (a *app) handleAdminDownloadLog(message *tgbotapi.Message) {
 	a.updateDownloadTraceStatus(status, trace, "inspect complete")
 	if err != nil {
 		trace.add("inspect error: %s", redactTraceText(err.Error()))
-		a.finishDownloadTrace(message.Chat.ID, status, trace)
+		a.finishDownloadTrace(chatID, status, trace)
 		return
 	}
 	trace.add("metadata extractor=%s source_id=%s title=%q artist=%q duration=%s tracks=%d", preview.Extractor, preview.SourceID, preview.Title, preview.Artist, preview.Duration, preview.TrackCount)
 	a.updateDownloadTraceStatus(status, trace, "metadata received")
 	if preview.IsPlaylist || preview.TrackCount > 1 {
 		trace.add("stopped: /log accepts one track, not a collection")
-		a.finishDownloadTrace(message.Chat.ID, status, trace)
+		a.finishDownloadTrace(chatID, status, trace)
 		return
 	}
-	pending := pendingURL{URL: rawURL, ChatID: message.Chat.ID, UserID: message.From.ID, Preview: preview}
-	lang := a.langOrDefault(message.From.ID)
+	pending := pendingURL{URL: rawURL, ChatID: chatID, UserID: userID, Preview: preview}
+	lang := a.langOrDefault(userID)
 	if !fresh {
 		if a.store != nil {
 			cacheKey := sourceCacheKey(preview.Extractor, preview.SourceID, "mp3", "320")
@@ -131,12 +137,12 @@ func (a *app) handleAdminDownloadLog(message *tgbotapi.Message) {
 		}
 		trace.add("production fast/cache path started")
 		a.updateDownloadTraceStatus(status, trace, "cache / fast path")
-		handled, succeeded := a.tryCachedDownload(ctx, message.Chat.ID, pending, "mp3", "320", lang, func(position int) {
+		handled, succeeded := a.tryCachedDownload(ctx, chatID, pending, "mp3", "320", lang, func(position int) {
 			trace.add("download queue position=%d", position)
 		})
 		trace.add("production fast/cache path handled=%t succeeded=%t", handled, succeeded)
 		if handled {
-			a.finishDownloadTrace(message.Chat.ID, status, trace)
+			a.finishDownloadTrace(chatID, status, trace)
 			return
 		}
 	} else {
@@ -152,7 +158,7 @@ func (a *app) handleAdminDownloadLog(message *tgbotapi.Message) {
 	})
 	if err != nil {
 		trace.add("download error: %s", redactTraceText(err.Error()))
-		a.finishDownloadTrace(message.Chat.ID, status, trace)
+		a.finishDownloadTrace(chatID, status, trace)
 		return
 	}
 	for index, result := range results {
@@ -160,9 +166,9 @@ func (a *app) handleAdminDownloadLog(message *tgbotapi.Message) {
 	}
 	uploadStarted := time.Now()
 	a.updateDownloadTraceStatus(status, trace, "Telegram upload")
-	report := a.sendResultsIndividually(message.Chat.ID, results, "mp3", lang)
+	report := a.sendResultsIndividually(chatID, results, "mp3", lang)
 	trace.add("telegram delivery completed in %s delivered=%d failed=%d", time.Since(uploadStarted).Truncate(time.Millisecond), report.Delivered, report.Failed)
-	a.finishDownloadTrace(message.Chat.ID, status, trace)
+	a.finishDownloadTrace(chatID, status, trace)
 }
 
 func (a *app) updateDownloadTraceStatus(status *tgbotapi.Message, trace *downloadTrace, stage string) {

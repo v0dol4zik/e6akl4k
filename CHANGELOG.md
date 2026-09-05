@@ -21,6 +21,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Added Octave-first private title search: text queries hit the Octave search API before YouTube, and the results header states explicitly when YouTube was used because Octave had no matches or was unavailable. New `search_octave` and `search_youtube_fallback` counters appear in `/stats` and `/metrics`.
 - Added search by forwarded audio in private chats: the performer and title tags (or the file name) become the query and the audio duration guides ranking.
 - Added Prometheus series for every persistent counter, per-stage P50/P95 latency and success ratios, the cache hit ratio, the Octave fast-path share, and the circuit breaker state, with SQLite aggregates cached for 30 seconds between scrapes.
+- Added a stale YouTube cookies detector that treats three HTTP 403 failures within ten minutes as a cookie problem, persists a six-hour administrator alert cooldown, adds a "check" button that runs a fresh download trace, and exposes `yt_dlp_cookies` in `/healthz`.
 
 ### Changed
 

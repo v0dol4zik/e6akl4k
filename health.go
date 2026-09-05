@@ -20,6 +20,7 @@ type healthReport struct {
 	Status          string `json:"status"`
 	Database        string `json:"database"`
 	YTDLP           string `json:"yt_dlp"`
+	YTDLPCookies    string `json:"yt_dlp_cookies"`
 	DiskFreeBytes   uint64 `json:"disk_free_bytes"`
 	ActiveDownloads int    `json:"active_downloads"`
 	QueuedDownloads int    `json:"queued_downloads"`
@@ -30,7 +31,7 @@ type healthReport struct {
 }
 
 func (a *app) health(ctx context.Context) (healthReport, bool) {
-	report := healthReport{Status: "ok", Database: "ok", YTDLP: "ok"}
+	report := healthReport{Status: "ok", Database: "ok", YTDLP: "ok", YTDLPCookies: "ok"}
 	ok := true
 	if a.store == nil || a.store.db.PingContext(ctx) != nil {
 		report.Database = "error"
@@ -53,6 +54,7 @@ func (a *app) health(ctx context.Context) (healthReport, bool) {
 	} else {
 		ok = false
 	}
+	report.YTDLPCookies = a.cookieStatus(ctx)
 	report.ActiveDownloads, report.QueuedDownloads, _ = a.downloads.snapshot()
 	report.ActiveLookups, report.QueuedLookups, _ = a.lookups.snapshot()
 	report.ActiveArchives, report.QueuedArchives, _ = a.archives.snapshot()

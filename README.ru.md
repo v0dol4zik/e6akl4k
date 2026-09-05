@@ -171,7 +171,7 @@ go build -o musicbot .
 HTTP-сервер слушает `127.0.0.1:8080` при нативном запуске и `0.0.0.0:8080` внутри контейнера:
 
 ```text
-GET /healthz   состояние SQLite, yt-dlp, диска и очередей в JSON
+GET /healthz   состояние SQLite, yt-dlp, cookies (`yt_dlp_cookies`: ok/suspect), диска и очередей в JSON
 GET /metrics   метрики Prometheus
 ```
 

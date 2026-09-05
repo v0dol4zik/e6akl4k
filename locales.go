@@ -62,6 +62,7 @@ var texts = map[string]map[string]string{
 	"history_expired":   {"ru": "этот трек уже удалён из кэша. пришли ссылку ещё раз, и я загружу его заново.", "en": "this track is no longer cached. send the link again and i'll download it anew."},
 	"history_cleared":   {"ru": "🧹 история очищена.", "en": "🧹 history cleared."},
 	"btn_history_clear": {"ru": "🧹 очистить историю", "en": "🧹 clear history"},
+	"btn_cookie_check":  {"ru": "🔎 проверить", "en": "🔎 check"},
 	"settings_title":    {"ru": "⚙️ <b>настройки</b>", "en": "⚙️ <b>settings</b>"},
 	"settings_current": {
 		"ru": "формат по умолчанию: <b>{value}</b>\nвыбери новый вариант — он будет применяться к трекам и альбомам без вопроса о формате:",
