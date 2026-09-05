@@ -60,6 +60,51 @@ func TestForbiddenFailureClassification(t *testing.T) {
 	}
 }
 
+func TestCookieFailureMarkerMatch(t *testing.T) {
+	rotated := "ERROR: [youtube] dQw4w9WgXcQ: The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser as a security measure."
+	tests := []struct {
+		message string
+		want    bool
+	}{
+		{rotated, true},
+		{humanizeError(rotated), true},
+		{"ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.", true},
+		{"ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm your age", true},
+		{humanizeError("Sign in to confirm you're not a bot"), true},
+		{"Sign in: cookies.txt is stale", true},
+		{"HTTP Error 403: Forbidden", false},
+		{"Видео приватное.", false},
+		{"Видео недоступно (удалено или заблокировано).", false},
+	}
+	for _, test := range tests {
+		if got := isCookieFailure(test.message); got != test.want {
+			t.Errorf("isCookieFailure(%q)=%v want %v", test.message, got, test.want)
+		}
+	}
+}
+
+func TestCookieAlertFromRotatedCookies(t *testing.T) {
+	dir := t.TempDir()
+	state, err := openStore(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	telegram := &cookieTestTelegram{}
+	application := newCookieTestApp(t, telegram, state, dir)
+
+	raw := "ERROR: [youtube] dQw4w9WgXcQ: The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser as a security measure."
+	application.reportDownloadFailure(raw, "www.youtube.com")
+	got := telegram.snapshot()
+	if len(got) != 1 || got[0].method != "sendMessage" || got[0].chatID != "10" || got[0].text != tr("admin_cookie_warning", "en") {
+		t.Fatalf("rotated-cookie failure must alert the admin on the first hit: %#v", got)
+	}
+	stats, err := state.stats(context.Background())
+	if err != nil || stats.CookieErrors != 1 || stats.DownloadsFailed != 1 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
+	}
+}
+
 func TestStoreMetadataRoundTrip(t *testing.T) {
 	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

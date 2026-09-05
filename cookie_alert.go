@@ -86,9 +86,27 @@ func (s *cookieAlertState) alertDue(ctx context.Context, state *store) bool {
 	return true
 }
 
+// cookieFailureMarkers are matched case-insensitively against a failure message.
+// They cover the raw yt-dlp phrases ("Sign in to confirm you're not a bot",
+// "The provided YouTube account cookies are no longer valid") as well as the
+// humanized Russian text produced by humanizeError, so the detector works no
+// matter which form of the message reaches it.
+var cookieFailureMarkers = []string{
+	"sign in to confirm",
+	"not a bot",
+	"cookies are no longer valid",
+	"cookies.txt",
+	"подтверждения, что запрос не от бота",
+}
+
 func isCookieFailure(message string) bool {
 	message = strings.ToLower(message)
-	return strings.Contains(message, "cookies.txt") || strings.Contains(message, "not a bot") || strings.Contains(message, "подтверждения, что запрос не от бота")
+	for _, marker := range cookieFailureMarkers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isForbiddenFailure(message string) bool {

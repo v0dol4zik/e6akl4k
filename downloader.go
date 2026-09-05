@@ -864,6 +864,8 @@ func humanizeError(message string) string {
 	switch {
 	case strings.Contains(low, "sign in to confirm you") || strings.Contains(low, "not a bot"):
 		return "YouTube требует подтверждения, что запрос не от бота. Нужен свежий cookies.txt из браузера, где выполнен вход в аккаунт."
+	case strings.Contains(low, "cookies are no longer valid"):
+		return "Cookies YouTube устарели (аккаунт обновил их в браузере). Нужен свежий cookies.txt из браузера, где выполнен вход в аккаунт."
 	case strings.Contains(low, "private video"):
 		return "Видео приватное."
 	case strings.Contains(low, "requested format is not available") || strings.Contains(low, "only images are available"):
