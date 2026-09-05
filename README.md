@@ -41,6 +41,7 @@
 - Show a once-daily support note after a successful download, with a permanent one-tap opt-out.
 - Remember a default format and quality per user through `/settings`, so regular users skip the format keyboard while keeping playlist range and delivery choices.
 - Re-deliver recent tracks through `/history`: the last ten downloads come back instantly from the Telegram cache without a new download, and the list can be cleared with one tap.
+- Export Prometheus metrics for every counter, per-stage latency quantiles and success ratios, the cache hit ratio, the Octave fast-path share, and the circuit breaker state, cached for 30 seconds between scrapes.
 
 The project is designed for small private installations: a personal bot shared with friends, with enough safety and observability to run unattended on a VPS.
 

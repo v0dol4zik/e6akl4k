@@ -573,6 +573,25 @@ func (s *store) increment(ctx context.Context, name string) {
 ON CONFLICT(name) DO UPDATE SET value=value+1`, name)
 }
 
+// counters returns every row of the counters table keyed by counter name.
+func (s *store) counters(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name,value FROM counters`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]int64)
+	for rows.Next() {
+		var name string
+		var value int64
+		if err := rows.Scan(&name, &value); err != nil {
+			return nil, err
+		}
+		result[name] = value
+	}
+	return result, rows.Err()
+}
+
 func (s *store) stats(ctx context.Context) (statsSnapshot, error) {
 	var snapshot statsSnapshot
 	var started string

@@ -69,6 +69,7 @@ type app struct {
 	inlineLimiter *rateLimiter
 	flights       flightGroup
 	octaveRemote  *circuitBreaker
+	metrics       metricsCache
 
 	mu            sync.Mutex
 	userLang      map[int64]string
