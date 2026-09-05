@@ -769,11 +769,21 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 		}
 		return deliveryReport{}, err
 	}
-	defer release()
+	// The download slot only covers yt-dlp/Octave work. Telegram delivery below runs after
+	// releaseDownloads so cached re-sends, archive waits and uploads never block other users.
+	released := false
+	releaseDownloads := func() {
+		if !released {
+			released = true
+			release()
+		}
+	}
+	defer releaseDownloads()
 
 	total := len(pending.Batch)
 	report := deliveryReport{}
 	var results []downloadResult
+	var cached []pendingURL
 	sessions := make(map[string]struct{})
 	defer func() {
 		for session := range sessions {
@@ -790,15 +800,10 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 		}
 		reporter.stage(tr("batch_progress", lang, "current", strconv.Itoa(i+1), "total", strconv.Itoa(total), "title", html.EscapeString(shortenRunes(firstNonEmpty(preview.Title, rawURL), 80))))
 		item := pendingURL{URL: rawURL, ChatID: pending.ChatID, UserID: pending.UserID, Preview: preview}
-		if pending.Delivery != "zip" {
-			if delivered, handled := a.sendBatchCached(ctx, chatID, item, format, quality, lang); handled {
-				if delivered {
-					report.Delivered++
-				} else {
-					report.Failed++
-				}
-				continue
-			}
+		if pending.Delivery != "zip" && a.hasCachedAudio(ctx, item, format, quality) {
+			// Cached tracks are re-sent by file_id after the download slot is released.
+			cached = append(cached, item)
+			continue
 		}
 		linkResults, downloadErr := a.downloader.downloadRange(ctx, rawURL, format, quality, 0, 0, nil)
 		for _, result := range linkResults {
@@ -823,8 +828,26 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 		}
 		results = append(results, linkResults...)
 	}
+	releaseDownloads()
 	if err := ctx.Err(); err != nil {
 		return report, err
+	}
+	for _, item := range cached {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		if delivered, handled := a.sendBatchCached(ctx, chatID, item, format, quality, lang); handled {
+			if delivered {
+				report.Delivered++
+			} else {
+				report.Failed++
+			}
+			continue
+		}
+		// The cache entry disappeared between the check and the send: report it as failed rather
+		// than re-acquiring a download slot mid-delivery.
+		report.Failed++
+		results = append(results, downloadResult{Title: item.Preview.Title, Artist: item.Preview.Artist, Error: tr("history_expired", lang)})
 	}
 	if len(results) > 0 {
 		if pending.Delivery == "zip" {
@@ -854,6 +877,20 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 	}
 	a.sendText(chatID, summary, "HTML", nil)
 	return report, nil
+}
+
+// hasCachedAudio reports whether a usable file_id cache entry exists for the item without sending it.
+func (a *app) hasCachedAudio(ctx context.Context, item pendingURL, format, quality string) bool {
+	if a.store == nil {
+		return false
+	}
+	if source := sourceCacheKey(item.Preview.Extractor, item.Preview.SourceID, format, quality); source != "" {
+		if _, ok := a.store.cachedAudio(ctx, source, a.cfg.CacheTTL); ok {
+			return true
+		}
+	}
+	_, ok := a.store.cachedAudio(ctx, generalCacheKey(item.URL, format, quality), a.cfg.CacheTTL)
+	return ok
 }
 
 // sendBatchCached re-sends a batch link from the file_id cache. handled is false when there is no

@@ -35,6 +35,8 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ### Fixed
 
+- Batch downloads now release their download slot before Telegram delivery, so cached re-sends, archive waits and uploads no longer block other users.
+- Clearing `/history` removes only the entries the list can show; failed and legacy rows stay for administrator statistics.
 - Delete the upload-progress status after successful delivery instead of leaving a stale `100%` message behind.
 
 ## [v2026.08.14] - 2026-08-14

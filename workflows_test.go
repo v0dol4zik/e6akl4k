@@ -466,6 +466,8 @@ type batchHarness struct {
 	state *store
 	mu    sync.Mutex
 	calls []telegramCall
+	// onSendAudio runs inside the fake Telegram handler for every sendAudio call.
+	onSendAudio func()
 }
 
 func (h *batchHarness) snapshot() []telegramCall {
@@ -526,6 +528,9 @@ func newBatchHarness(t *testing.T) *batchHarness {
 			h.calls = append(h.calls, telegramCall{method: method, text: r.FormValue("text"), markup: r.FormValue("reply_markup"), audio: r.FormValue("audio")})
 			h.mu.Unlock()
 			if method == "sendAudio" {
+				if h.onSendAudio != nil {
+					h.onSendAudio()
+				}
 				fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"audio":{"file_id":"cached-file","file_unique_id":"u","duration":1}}}`)
 				return
 			}
@@ -838,5 +843,37 @@ func TestBatchLimitKeepsFirstFiveLinks(t *testing.T) {
 	pending, ok := h.app.getURL(h.pendingKey(t), 10, 10)
 	if !ok || len(pending.Batch) != maxBatchLinks || pending.Batch[4] != links[4] {
 		t.Fatalf("unexpected pending batch: %#v", pending)
+	}
+}
+
+func TestBatchReleasesDownloadSlotBeforeDelivery(t *testing.T) {
+	h := newBatchHarness(t)
+	cacheOctaveTrack(t, h.state, "11", "First")
+	var activeDuringSend []int
+	h.onSendAudio = func() {
+		active, _, _ := h.app.downloads.snapshot()
+		activeDuringSend = append(activeDuringSend, active)
+	}
+
+	// One cached link and one that must really be downloaded through the fake Octave server.
+	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 and https://music.octavestreaming.com/album/3?t=12"))
+	key := h.pendingKey(t)
+	h.app.handleCallback(batchCallback("dl:mp3:320:" + key))
+	h.snapshot()
+	h.app.handleCallback(batchCallback("delivery:individual:mp3:320:" + key))
+	calls := h.snapshot()
+	if got := h.count("sendAudio", calls); got != 2 {
+		t.Fatalf("sendAudio calls=%d, calls=%#v", got, calls)
+	}
+	if len(activeDuringSend) != 2 {
+		t.Fatalf("expected two sendAudio observations, got %v", activeDuringSend)
+	}
+	for _, active := range activeDuringSend {
+		if active != 0 {
+			t.Fatalf("download slot must be released before Telegram delivery, active=%v", activeDuringSend)
+		}
+	}
+	if active, waiting, _ := h.app.downloads.snapshot(); active != 0 || waiting != 0 {
+		t.Fatalf("download gate leaked: active=%d waiting=%d", active, waiting)
 	}
 }

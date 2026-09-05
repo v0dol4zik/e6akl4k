@@ -425,8 +425,10 @@ func (s *store) historyEntry(ctx context.Context, userID, id int64) (historyItem
 	return item, true
 }
 
+// clearHistory hides the user's /history entries. Only rows that /history can show are removed;
+// failed or legacy rows stay so administrator reports keep their download counts.
 func (s *store) clearHistory(ctx context.Context, userID int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM download_history WHERE user_id=?`, userID)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM download_history WHERE user_id=? AND status='delivered' AND cache_key<>''`, userID)
 	return err
 }
 

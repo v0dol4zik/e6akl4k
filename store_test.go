@@ -344,6 +344,10 @@ func TestStoreRecentDownloadsDedupesAndClears(t *testing.T) {
 		t.Fatalf("item=%#v ok=%v", item, ok)
 	}
 
+	var before int
+	if err := state.db.QueryRow(`SELECT count(*) FROM download_history WHERE user_id=1`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	if err := state.clearHistory(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -352,5 +356,19 @@ func TestStoreRecentDownloadsDedupesAndClears(t *testing.T) {
 	}
 	if items, err := state.recentDownloads(ctx, 2, 10); err != nil || len(items) != 1 {
 		t.Fatalf("other users must keep their history: items=%#v err=%v", items, err)
+	}
+	// Failed, partial and keyless rows are administrator statistics, not /history entries, and must survive.
+	var remaining int
+	if err := state.db.QueryRow(`SELECT count(*) FROM download_history WHERE user_id=1`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if before != 6 || remaining != 3 {
+		t.Fatalf("clearHistory must only remove delivered rows with a cache key: before=%d remaining=%d", before, remaining)
+	}
+	if err := state.setLanguage(ctx, 1, "en"); err != nil {
+		t.Fatal(err)
+	}
+	if info, ok, err := state.userInfo(ctx, 1); err != nil || !ok || info.Downloads != 3 {
+		t.Fatalf("admin download count must survive clearing: info=%#v ok=%v err=%v", info, ok, err)
 	}
 }
