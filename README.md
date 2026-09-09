@@ -9,6 +9,8 @@
  ░███████   ░██████   ░█████░██ ░██    ░██░██      ░██   ░██    ░██
  ~~~
 ## A self-hosted Telegram bot for downloading music from streaming services
+[![AI Slop Inside](https://sladge.net/badge.svg)](https://sladge.net)
+
 [English](#english) | [Русский](#русский)
 
 ## English
