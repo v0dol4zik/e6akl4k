@@ -1,103 +1,76 @@
-<p align="center">
-  <img src="assets/logo.svg" alt="Go gopher listening to music and playing a keyboard" width="260">
-</p>
+# e6akl4k
+~~~
+            ░██████             ░██       ░██    ░████   ░██
+           ░██   ░██            ░██       ░██   ░██ ██   ░██
+ ░███████  ░██        ░██████   ░██    ░██░██  ░██  ██   ░██    ░██
+░██    ░██ ░███████        ░██  ░██   ░██ ░██ ░██   ██   ░██   ░██
+░█████████ ░██   ░██  ░███████  ░███████  ░██ ░█████████ ░███████
+░██        ░██   ░██ ░██   ░██  ░██   ░██ ░██      ░██   ░██   ░██
+ ░███████   ░██████   ░█████░██ ░██    ░██░██      ░██   ░██    ░██
+ ~~~
+## A self-hosted Telegram bot for downloading music from streaming services
+[English](#english) | [Русский](#русский)
 
-<h1 align="center">e6akl4k music downloader bot</h1>
+## English
 
-<p align="center">
-  A self-hosted Telegram bot for finding, converting, and downloading music from Octave Streaming and sources supported by <code>yt-dlp</code>.
-</p>
+`e6akl4k` is a self-hosted Telegram bot for finding and downloading music. Send it a song name or a link, choose the format, and receive the finished audio directly in Telegram.
 
-<p align="center">
-  <a href="https://gitlab.com/d6xd/e6akl4k/-/pipelines"><img src="https://gitlab.com/d6xd/e6akl4k/badges/main/pipeline.svg?ignore_skipped=true" alt="Pipeline status"></a>
-  <a href="https://gitlab.com/d6xd/e6akl4k/-/releases"><img src="https://gitlab.com/d6xd/e6akl4k/-/badges/release.svg" alt="Latest release"></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26"></a>
-  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" alt="Docker ready"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
-</p>
+The bot searches Octave Streaming first and uses YouTube as a fallback. It also supports albums, playlists, inline search, MP3, FLAC, M4A, OGG, download history, and Telegram file caching. Spotify, Apple Music, Deezer, Tidal, and Yandex Music links are used as search hints rather than direct audio sources.
 
-## Contents
+Try the public bot: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 
-- [Русская версия](README.ru.md)
-- [Features](#features)
-- [Quick start](#quick-start)
-- [How it works](#how-it-works)
-- [Supported media](#supported-media)
-- [Documentation](#documentation)
-- [License](#license)
+### Host your own instance
 
-## Features
+Use a Debian or Ubuntu server with root or `sudo` access:
 
-- Search Octave Streaming first for private title queries and fall back to YouTube with an explicit notice; inline queries and results are ranked and marked as exact, similar, or alternate versions.
-- Download tracks and albums directly from Octave Streaming in MP3 128/320 or lossless FLAC.
-- Let Telegram fetch eligible Octave MP3 URLs directly, with a circuit breaker, resumable local fallback, and per-stage latency logs.
-- Download from YouTube, SoundCloud, Bandcamp, VK, Mixcloud, Audiomack, and other sources supported by `yt-dlp`.
-- Use Spotify, Apple Music, Deezer, Tidal, and Yandex Music links to find matching YouTube versions with explicit user confirmation.
-- Export MP3, FLAC, M4A, and OGG; Telegram receives title and performer fields, while converted files retain embedded metadata and cover art.
-- Download complete playlists through a bounded download/upload pipeline, reuse one album cover, and split large ZIP archives automatically.
-- Reuse Telegram `file_id` values through a persistent SQLite cache and coalesce identical concurrent requests.
-- Run up to seven downloads concurrently with rate limiting and one heavy task per user.
-- Monitor the bot through health checks, Prometheus metrics, `/perf`, redacted `/log` traces, bans, dynamic administrators, and an audit log.
-- Show a once-daily support note after a successful download, with a permanent one-tap opt-out.
-- Remember a default format and quality per user through `/settings`, so regular users skip the format keyboard while keeping playlist range and delivery choices.
-- Re-deliver recent tracks through `/history`: the last ten downloads come back instantly from the Telegram cache without a new download, and the list can be cleared with one tap.
-- Search by a forwarded audio file in private chat: its performer and title tags (or the file name) become the query, and the duration helps rank the results.
-- Export Prometheus metrics for every counter, per-stage latency quantiles and success ratios, the cache hit ratio, the Octave fast-path share, and the circuit breaker state, cached for 30 seconds between scrapes.
-- Download several track links from one message (up to five) together: one format for all, delivery as individual files or one ZIP archive, sequential processing in a single slot, and a per-link failure report instead of aborting the whole batch.
-
-The project is designed for small private installations: a personal bot shared with friends, with enough safety and observability to run unattended on a VPS.
-
-## Quick start
-
-On a fresh Debian or Ubuntu server:
+1. Create a Telegram bot with [@BotFather](https://t.me/BotFather) and copy its token.
+2. Clone and deploy the project:
 
 ```bash
-git clone https://gitlab.com/d6xd/e6akl4k.git
+git clone https://github.com/v0dol4zik/e6akl4k.git
 cd e6akl4k
 chmod +x bootstrap.sh deploy.sh rollback.sh
-./bootstrap.sh
+BOT_TOKEN='your-bot-token' ./bootstrap.sh
 ./deploy.sh
 ```
 
-`bootstrap.sh` performs one-time host and SSH setup. The lean `deploy.sh` preserves secrets, backs up SQLite, deploys a versioned image, verifies health, and rolls back automatically. Pass an immutable Registry tag as its optional argument; `rollback.sh` restores the saved previous image.
+`bootstrap.sh` installs Docker and prepares persistent storage. YouTube may require a Netscape-format cookies file on VPS hosts; pass it during setup with `COOKIES_FILE=/path/to/cookies.txt`.
 
-For YouTube cookies, local development, updates, and rollback behavior, see the [deployment guide](docs/deployment.md).
+To update the bot later:
 
-## How it works
-
-```mermaid
-flowchart LR
-    U[Telegram user] --> B[Bot handlers]
-    B --> S[Scheduler and rate limits]
-    S --> D[Octave API or yt-dlp and ffmpeg]
-    D --> C[(SQLite and file_id cache)]
-    C --> T[Telegram delivery]
-    T --> U
+```bash
+git pull --ff-only origin main
+./deploy.sh
 ```
 
-Incoming Telegram updates are persisted before processing. Downloads, quick lookups, and ZIP creation use separate concurrency limits. Cached tracks are delivered through Telegram without contacting Octave or rerunning `yt-dlp` and `ffmpeg`.
+## Русский
 
-## Supported media
+`e6akl4k` — self-hosted Telegram-бот для поиска и скачивания музыки. Отправь ему название песни или ссылку, выбери формат и получи готовый аудиофайл прямо в Telegram.
 
-| Category | Support |
-| --- | --- |
-| Direct sources | Octave Streaming, YouTube, YouTube Music, SoundCloud, Bandcamp, VK, Mixcloud, Audiomack, and other `yt-dlp` extractors |
-| Metadata links | Spotify, Apple Music, Deezer, Tidal, and Yandex Music |
-| Audio formats | MP3 128/320/VBR, FLAC, M4A, and OGG Vorbis |
-| Playlists | Complete playlist, first 10/25/75 tracks, or ranges of ten tracks |
-| Telegram delivery | Audio albums, documents, split ZIP archives, and cached `file_id` delivery |
-| Telegram ID lookup | `/id` for your ID, or `/id @username` for a user previously seen by the bot |
+Бот сначала ищет музыку в Octave Streaming, а затем использует YouTube как резервный источник. Он также поддерживает альбомы, плейлисты, inline-поиск, MP3, FLAC, M4A, OGG, историю загрузок и Telegram-кэш. Ссылки Spotify, Apple Music, Deezer, Tidal и Яндекс Музыки используются как подсказки для поиска, а не как прямые источники аудио.
 
-Metadata-only services are never presented as direct audio sources. The bot searches YouTube and asks the user to confirm the selected version.
+Попробовать публичного бота: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 
-## Documentation
+### Как захостить свой инстанс
 
-- [Deployment and updates](docs/deployment.md)
-- [Configuration reference](docs/configuration.md)
-- [Architecture and project structure](docs/architecture.md)
-- [Changelog](CHANGELOG.md)
-- [Russian README](README.ru.md)
+Нужен сервер с Debian или Ubuntu и доступом root или `sudo`:
 
-## License
+1. Создай Telegram-бота через [@BotFather](https://t.me/BotFather) и скопируй его токен.
+2. Склонируй и разверни проект:
 
-The source code is distributed under the [MIT License](LICENSE). The project logo is available under CC0 1.0; see the [asset credits](assets/README.md).
+```bash
+git clone https://github.com/v0dol4zik/e6akl4k.git
+cd e6akl4k
+chmod +x bootstrap.sh deploy.sh rollback.sh
+BOT_TOKEN='токен-твоего-бота' ./bootstrap.sh
+./deploy.sh
+```
+
+`bootstrap.sh` установит Docker и подготовит постоянное хранилище. На VPS YouTube может потребовать cookies в формате Netscape; их можно передать при установке через `COOKIES_FILE=/путь/к/cookies.txt`.
+
+Для последующего обновления:
+
+```bash
+git pull --ff-only origin main
+./deploy.sh
+```
