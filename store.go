@@ -50,6 +50,7 @@ type statsSnapshot struct {
 	QueueRejected    int64
 	CookieErrors     int64
 	Cancelled        int64
+	TooLarge         int64
 	UniqueUsers      int64
 	CachedTracks     int64
 }
@@ -643,8 +644,12 @@ func (s *store) deleteCachedAudio(ctx context.Context, key string) {
 }
 
 func (s *store) increment(ctx context.Context, name string) {
-	_, _ = s.db.ExecContext(ctx, `INSERT INTO counters(name,value) VALUES(?,1)
-ON CONFLICT(name) DO UPDATE SET value=value+1`, name)
+	s.incrementBy(ctx, name, 1)
+}
+
+func (s *store) incrementBy(ctx context.Context, name string, delta int64) {
+	_, _ = s.db.ExecContext(ctx, `INSERT INTO counters(name,value) VALUES(?,?)
+ON CONFLICT(name) DO UPDATE SET value=value+excluded.value`, name, delta)
 }
 
 // counters returns every row of the counters table keyed by counter name.
@@ -728,6 +733,8 @@ func (s *store) stats(ctx context.Context) (statsSnapshot, error) {
 			snapshot.CookieErrors = value
 		case "downloads_cancelled":
 			snapshot.Cancelled = value
+		case "downloads_too_large":
+			snapshot.TooLarge = value
 		}
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&snapshot.UniqueUsers); err != nil {

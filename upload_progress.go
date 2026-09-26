@@ -101,6 +101,12 @@ func (r *statusReporter) upload(done, total int64) {
 	}
 	r.lastPct, r.lastAt = percent, now
 	r.mu.Unlock()
+	if percent == 100 {
+		// The whole file is sent, but Telegram answers only after it has stored it, which takes a
+		// while for a large one.
+		r.stage(tr("upload_processing", r.lang, "total", humanSize(total, r.lang)))
+		return
+	}
 	r.stage(tr("upload_progress", r.lang, "percent", strconv.Itoa(percent), "done", humanSize(done, r.lang), "total", humanSize(total, r.lang)))
 }
 

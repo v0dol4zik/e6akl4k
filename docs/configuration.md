@@ -18,6 +18,7 @@ chmod 600 .env
 | `INLINE_CACHE_CHAT_ID` | empty | Legacy alias for `CACHE_CHAT_ID`. |
 | `ERROR_CHAT_ID` | `CACHE_CHAT_ID` | Optional separate chat for user-facing error reports. Without both variables error reporting is disabled. |
 | `LASTFM_API_KEY` | empty | last.fm API key that enables `/lastfm`. Without it the command is hidden from the menu. Create one at https://www.last.fm/api/account/create. |
+| `TELEGRAM_API_URL` | empty | Base URL of a local Telegram Bot API server, such as `http://telegram-bot-api:8081`. Empty means the cloud Bot API. See [Files over 50 MB](#files-over-50-mb). |
 | `YANDEX_PROXY` | empty | `socks5h://`, `socks5://`, `http://`, or `https://` proxy for Yandex Music site and API requests only. See [Yandex Music outside the CIS](#yandex-music-outside-the-cis). |
 | `INLINE_PLACEHOLDER_FILE_ID` | generated | Existing silent MP3 `file_id` for inline placeholders. |
 | `ADMIN_IDS` | empty | Comma-separated immutable owner IDs. Owners manage dynamic admins; all admins can use moderation, `/perf`, and redacted `/log`. |
@@ -43,7 +44,7 @@ chmod 600 .env
 | `INLINE_RATE_LIMIT` | `60` | Inline requests allowed per `RATE_WINDOW`. |
 | `RATE_WINDOW` | `1m` | Go duration used for rate limiting. |
 | `MAX_PLAYLIST_TRACKS` | `75` | Maximum tracks accepted in one request, from 1 to 1000. |
-| `MAX_FILE_SIZE` | `52428800` | Maximum individual file size in bytes, capped at Telegram's 50 MiB bot limit. |
+| `MAX_FILE_SIZE` | `52428800` | Maximum individual file size in bytes: up to 50 MiB on the cloud Bot API and up to 2000 MiB with `TELEGRAM_API_URL`. |
 
 By default, seven downloads start immediately and there is no waiting download queue. An eighth simultaneous request receives a busy response. Lookup and archive jobs retain their own FIFO queues.
 
@@ -70,6 +71,18 @@ Structured `media_stage` log records split latency into source probing/downloadi
 Every error a user sees (link preview, search, download, playlist or ZIP delivery, cached re-send, `/history`, and inline downloads) is also posted to `ERROR_CHAT_ID` or, by default, to the cache channel. A post contains the stage, the user ID and last known username, the link with only track-identifying query parameters (`v`, `list`, `t`, `track`), the search query, the format, and the error text with signed-URL and cookie fragments removed.
 
 Cancellations, a busy queue, rate limits, and the playlist size limit are not reported. Identical stage and error pairs are folded for ten minutes (per-video IDs in `yt-dlp` messages are ignored for this comparison), and the next post of the same error shows how many repeats were folded. Per-track failures of one playlist or batch are combined into a single post. Posts are sent by one background worker at most every three seconds from a queue of 64 distinct reports; overflow is dropped and counted as `error_reports_dropped`, delivered posts as `error_reports_sent`.
+
+## Files over 50 MB
+
+The cloud Bot API accepts bot uploads up to 50 MiB, about 7 minutes of FLAC, 20 minutes of MP3 320, or 50 minutes of MP3 128. FLAC is written as 16-bit, since sources are lossy and 24 bits only make the file larger. Before a download the bot skips a track whose estimated size exceeds `MAX_FILE_SIZE`; for FLAC, OGG, M4A, and MP3 best the estimate may exceed the limit by 25%, because their real size varies with the material, and the downloaded file is checked again before upload. A track over the limit is not an error: the user gets buttons with the formats whose estimate fits the limit, or one notice with such buttons for all tracks of a playlist or batch that did not fit. These cases are not posted to the error chat; they are counted as `downloads_too_large` and `downloads_too_large_<format>` and shown in `/stats`.
+
+To send files up to 2000 MiB, run a local Telegram Bot API server. `docker-compose.yml` has an optional `telegram-bot-api` service (the `aiogram/telegram-bot-api` image in `--local` mode) that listens on port 8081 of the project network only:
+
+1. Create an application at https://my.telegram.org/apps. An existing application, for example one of a Telegram client, works too.
+2. Write its `api_id` and `api_hash` to `telegram-bot-api.env` as `TELEGRAM_API_ID=...` and `TELEGRAM_API_HASH=...`, then `chmod 600 telegram-bot-api.env`. The file is ignored by git.
+3. Add `telegram-bot-api` to `COMPOSE_PROFILES` in `.env` (profiles are comma-separated, for example `COMPOSE_PROFILES=yandex-relay,telegram-bot-api`), set `TELEGRAM_API_URL=http://telegram-bot-api:8081` and a larger `MAX_FILE_SIZE` such as `524288000` (500 MiB), then redeploy.
+
+On its first start with `TELEGRAM_API_URL`, the bot logs out of the cloud Bot API, as the local server requires, and remembers that in SQLite, so later restarts do not log out again. After the logout the cloud Bot API refuses the bot for 10 minutes: to move back, remove `TELEGRAM_API_URL` and the larger `MAX_FILE_SIZE`, wait 10 minutes, and redeploy. Until the local server answers, the bot retries for a minute and then exits, so Docker restarts it. Cached `file_id` values stay valid on both servers. The server's `/var/lib/telegram-bot-api` volume holds a directory per bot token; do not share or list it.
 
 ## Yandex Music outside the CIS
 

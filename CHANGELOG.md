@@ -24,6 +24,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Added administrator notices: `/msgall` broadcasts to every user after a preview and confirmation, `/msg <tg_id>` messages one user, and either command can copy a replied-to message with its media. Broadcasts run one at a time in the background at 20 messages a second with live progress and a final report of delivered, unreachable, and failed recipients, skip banned users, and are recorded in the audit. Every notice has a mute button, and `/notify` (`on` / `off`) switches notices per user.
 - Added `YANDEX_PROXY` for Yandex Music links from servers outside the CIS: only `music.yandex.*` and `api.music.yandex.*` requests go through the proxy, with an optional `yandex-relay` Xray sidecar (Compose profile, SOCKS on the project network only, Yandex Music hosts only) and `yandex-relay.example.json`.
 - Added batch downloads for several track links in one message (up to five): one shared format, sequential downloads inside a single slot, cached tracks re-sent by `file_id`, per-link failures reported without aborting the batch, and a ZIP-or-individual delivery choice for every batch of two or more links.
+- Added an optional local Telegram Bot API server for files up to 2000 MiB: `TELEGRAM_API_URL` points the bot at it, `MAX_FILE_SIZE` may then go up to 2000 MiB, and the `telegram-bot-api` Compose profile runs `aiogram/telegram-bot-api` in `--local` mode on the project network only, with `api_id` and `api_hash` in a separate ignored `telegram-bot-api.env`. The bot logs out of the cloud Bot API once and remembers it in SQLite, waits up to a minute for the local server, splits media groups by size, and explains the 10-minute cloud lockout if it is started on the cloud right after the switch.
 
 ### Changed
 
@@ -33,11 +34,13 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Added structured per-stage timing and throughput logs for source, conversion, Telegram upload, and cached delivery operations.
 - Pipelined large album delivery so the next bounded batch downloads while the current batch is sent.
 - Kept administrator commands out of Telegram's published command menu while preserving permission-checked manual access.
+- A track over the Telegram file limit is no longer an error: instead of «это дольше 3:37: файл не влезет в лимит Telegram» the user gets buttons with the lighter formats that fit, or one notice for all such tracks of a playlist or batch, and these cases are counted as `downloads_too_large` (also per format and in `/stats`) instead of being posted to the error chat. FLAC is written as 16-bit, about 7.2 MiB a minute instead of 12.7, and the pre-download check lets FLAC, OGG, M4A, and MP3 best estimates exceed the limit by 25% because the real file size is checked before upload.
 
 ### Fixed
 
 - Playlist, album, and artist links of Spotify, Apple Music, Deezer, Tidal, and Yandex Music are no longer searched on YouTube as a single track by their title. Deezer and Yandex Music collections show their name and track count with "tracklist as text" and "cover" buttons (the shown list is exported without a new request), other collections get a hint to send single tracks, and Deezer `link.deezer.com` share links are expanded first.
 - Yandex Music links from a geo-blocked server (HTTP 451) now explain that the service refuses the server's country, in the preview, `/export`, and `/cover`, and are reported to the operator chat, instead of searching the home page title "Яндекс Музыка — собираем музыку для вас" and offering a random video. Yandex tracks are named through the track API before the page, and any link that opens a service home page is explained rather than searched.
+- Previews and downloads of long YouTube playlists no longer fail with `context deadline exceeded`: the tracklist is read with a flat `yt-dlp` probe instead of resolving every video first.
 - A failed link preview replaces the "analyzing" status instead of leaving it behind.
 - FLAC and OGG downloads no longer fail with `module mutagen was not found`: the image installs `python3-mutagen`, which `yt-dlp` needs to embed covers into these formats, and the build checks that it imports.
 - Administrator usage hints such as `/ban <tg_id>` are HTML-escaped, so Telegram no longer rejects them as malformed markup.

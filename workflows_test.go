@@ -55,7 +55,7 @@ func TestCachedDownloadUsesTelegramFileID(t *testing.T) {
 	dl := &downloader{downloadDir: t.TempDir(), bin: os.Args[0]}
 	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour, MaxPlaylistTracks: 75}
 	app := newAppWithServices(context.Background(), bot, dl, state, cfg)
-	handled, succeeded := app.tryCachedDownload(context.Background(), 10, pending, "mp3", "320", "en", nil)
+	handled, succeeded, _ := app.tryCachedDownload(context.Background(), 10, pending, "mp3", "320", "en", nil)
 	if !handled || !succeeded || sendAudioCalls.Load() != 1 {
 		t.Fatalf("handled=%v succeeded=%v calls=%d", handled, succeeded, sendAudioCalls.Load())
 	}
@@ -91,7 +91,7 @@ func TestCachedFLACUsesTelegramDocument(t *testing.T) {
 	}
 	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour}
 	app := newAppWithServices(context.Background(), bot, &downloader{downloadDir: t.TempDir()}, state, cfg)
-	handled, succeeded := app.tryCachedDownload(context.Background(), 10, pending, "flac", "best", "en", nil)
+	handled, succeeded, _ := app.tryCachedDownload(context.Background(), 10, pending, "flac", "best", "en", nil)
 	if !handled || !succeeded || documentCalls.Load() != 1 {
 		t.Fatalf("handled=%v succeeded=%v document calls=%d", handled, succeeded, documentCalls.Load())
 	}
@@ -324,7 +324,8 @@ func (h *batchHarness) pendingKey(t *testing.T) string {
 }
 
 // newBatchHarness wires a fake Telegram and a fake yt-dlp where videos 11 and 12 download
-// successfully, 13 fails while downloading, 99 fails to probe, and playlist PL3 holds 11 and 12.
+// successfully, 13 fails while downloading, 77 is too long for FLAC under the 50 MB limit, 99 fails
+// to probe, and playlist PL3 holds 11 and 12.
 func newBatchHarness(t *testing.T) *batchHarness {
 	t.Helper()
 	h := &batchHarness{}
@@ -361,6 +362,7 @@ case "$url" in
   *youtu.be/11) id=11; title=First; duration=180 ;;
   *youtu.be/12) id=12; title=Second; duration=200 ;;
   *youtu.be/13) id=13; title=Third; duration=210 ;;
+  *youtu.be/77) id=77; title=Long; duration=1200 ;;
   *youtu.be/99) printf 'ERROR: [youtube] %s: Video unavailable\n' "$url" >&2; exit 1 ;;
   *list=PL3) id=PL3 ;;
   *youtu.be/*) id=${url##*/}; title="Track $id"; duration=120 ;;

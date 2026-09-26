@@ -132,6 +132,7 @@ var texts = map[string]map[string]string{
 	"stage_retry":           {"ru": "🔄 <b>повторяю загрузку · попытка {attempt}</b>\nсохранено: {bytes}", "en": "🔄 <b>retrying download · attempt {attempt}</b>\nsaved: {bytes}"},
 	"stage_prepare":         {"ru": "⚙️ <b>подготавливаю аудио…</b>", "en": "⚙️ <b>preparing audio…</b>"},
 	"upload_progress":       {"ru": "⬆️ <b>отправляю в Telegram: {percent}%</b>\n{done} / {total}", "en": "⬆️ <b>uploading to Telegram: {percent}%</b>\n{done} / {total}"},
+	"upload_processing":     {"ru": "⏳ <b>Telegram обрабатывает файл…</b>\n{total}", "en": "⏳ <b>Telegram is processing the file…</b>\n{total}"},
 	"archive_queued":        {"ru": "🕒 <b>архивация в очереди</b>\nпозиция: {position}", "en": "🕒 <b>archiving queued</b>\nposition: {position}"},
 	"rate_limited":          {"ru": "⏳ слишком много запросов. попробуй через {seconds} сек.", "en": "⏳ too many requests. try again in {seconds} sec."},
 	"user_download_active":  {"ru": "⏳ у тебя уже есть активная или ожидающая загрузка.", "en": "⏳ you already have an active or queued download."},
@@ -360,9 +361,21 @@ var texts = map[string]map[string]string{
 		"ru": "⚠️ [{idx}/{total}] файл не найден: {name}",
 		"en": "⚠️ [{idx}/{total}] file not found: {name}",
 	},
-	"file_too_big": {
-		"ru": "⚠️ [{idx}/{total}] <b>{title}</b>\nфайл слишком большой ({size}) — лимит telegram 50 МБ.",
-		"en": "⚠️ [{idx}/{total}] <b>{title}</b>\nthe file is too large ({size}) — telegram's limit is 50 MB.",
+	"too_large_track": {
+		"ru": "📦 <b>{title}</b> · {duration}\nв {format} это {size} — больше лимита Telegram {limit}.",
+		"en": "📦 <b>{title}</b> · {duration}\nin {format} it is {size}, over the Telegram limit of {limit}.",
+	},
+	"too_large_tracks": {
+		"ru": "📦 <b>в {format} не влезают в лимит Telegram {limit}: {count}</b>\n{list}",
+		"en": "📦 <b>over the Telegram limit of {limit} in {format}: {count}</b>\n{list}",
+	},
+	"too_large_choose": {
+		"ru": "⬇️ можно скачать в формате полегче:",
+		"en": "⬇️ a lighter format fits:",
+	},
+	"too_large_no_option": {
+		"ru": "даже в самом лёгком формате файл не влезет.",
+		"en": "the file won't fit even in the lightest format.",
 	},
 	"send_failed": {
 		"ru": "⚠️ [{idx}/{total}] не удалось отправить: <code>{error}</code>",
@@ -384,10 +397,6 @@ var texts = map[string]map[string]string{
 		"ru": "🗜 упаковываю {count} треков в ZIP…",
 		"en": "🗜 packing {count} tracks into a ZIP…",
 	},
-	"zip_too_big": {
-		"ru": "⚠️ ZIP слишком большой ({size}) — превышает лимит 50 МБ.",
-		"en": "⚠️ the ZIP is too large ({size}) — it exceeds the 50 MB limit.",
-	},
 	"zip_caption": {
 		"ru": "<b>📁 плейлист — {count} треков</b>\n📦 {size} | {fmt}{skipped}",
 		"en": "<b>📁 playlist — {count} tracks</b>\n📦 {size} | {fmt}{skipped}",
@@ -403,8 +412,8 @@ var texts = map[string]map[string]string{
 		"en": "❌ error while creating the archive: <code>{error}</code>",
 	},
 	"admin_stats": {
-		"ru": "📊 <b>статистика</b>\nпользователи: {users}\nтреки в кэше: {cached}\nуспешно доставлено: {ok}\nчастично: {partial}\nошибки: {failed}\nотменено: {cancelled}\nошибки cookies: {cookies}\nпопадания в кэш: {hits}\nпоиски: {searches}\nограничено rate limit: {limited}\nотклонено очередью: {rejected}",
-		"en": "📊 <b>statistics</b>\nusers: {users}\ndelivered successfully: {ok}\npartially delivered: {partial}\ncached tracks: {cached}\nfailed: {failed}\ncancelled: {cancelled}\ncookie errors: {cookies}\ncache hits: {hits}\nsearches: {searches}\nrate limited: {limited}\nrejected by queue: {rejected}",
+		"ru": "📊 <b>статистика</b>\nпользователи: {users}\nтреки в кэше: {cached}\nуспешно доставлено: {ok}\nчастично: {partial}\nошибки: {failed}\nотменено: {cancelled}\nне влезло в лимит Telegram: {too_large}\nошибки cookies: {cookies}\nпопадания в кэш: {hits}\nпоиски: {searches}\nограничено rate limit: {limited}\nотклонено очередью: {rejected}",
+		"en": "📊 <b>statistics</b>\nusers: {users}\ndelivered successfully: {ok}\npartially delivered: {partial}\ncached tracks: {cached}\nfailed: {failed}\ncancelled: {cancelled}\nover the Telegram limit: {too_large}\ncookie errors: {cookies}\ncache hits: {hits}\nsearches: {searches}\nrate limited: {limited}\nrejected by queue: {rejected}",
 	},
 	"admin_status": {
 		"ru": "🟢 <b>бот работает</b>\nзагрузки: {downloads_active}/{downloads_capacity}, в очереди {downloads_waiting}\nпоиск: {lookups_active}/{lookups_capacity}, в очереди {lookups_waiting}\nархивация: {archives_active}/{archives_capacity}, в очереди {archives_waiting}\nактивных пользователей: {active_users}",

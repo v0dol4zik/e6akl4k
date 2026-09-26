@@ -11,3 +11,4 @@ backups
 .deploy
 README.md
 yandex-relay.json
+telegram-bot-api.env

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"html"
 	"log"
 	"net/url"
@@ -327,9 +326,12 @@ func generalCacheKey(rawURL, format, quality string) string {
 	return "url:" + hex.EncodeToString(sum[:16]) + ":" + strings.ToLower(format) + ":" + strings.ToLower(quality)
 }
 
-func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, queued func(int), reporters ...*statusReporter) (bool, bool) {
+// tryCachedDownload delivers a single track through the file_id cache channel. handled is false when
+// the caller must download it the usual way; tooLarge means the track does not fit the Telegram
+// limit in this format and lighter formats were offered instead.
+func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, queued func(int), reporters ...*statusReporter) (handled, succeeded, tooLarge bool) {
 	if a.store == nil {
-		return false, false
+		return false, false, false
 	}
 	urlKey := generalCacheKey(pending.URL, format, quality)
 	keys := []string{}
@@ -344,17 +346,17 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 			logMediaStage("telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", true, "format", entry.Format)
 			if err == nil {
 				a.store.increment(a.ctx, "cache_hits")
-				return true, true
+				return true, true, false
 			} else if !invalidCachedFileError(err) {
 				a.reportError(errorReport{Stage: "cache_send", ChatID: chatID, UserID: pending.UserID, URL: pending.URL, Format: format + " " + quality, Error: err.Error()})
 				a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-				return true, false
+				return true, false, false
 			}
 			a.store.deleteCachedAudio(ctx, key)
 		}
 	}
 	if a.cfg.CacheChatID == 0 {
-		return false, false
+		return false, false, false
 	}
 	entry, err := a.ensureCachedAudio(ctx, pending, format, quality, queued, reporters...)
 	if err != nil {
@@ -362,12 +364,17 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 			if a.store != nil {
 				a.store.increment(a.ctx, "downloads_cancelled")
 			}
-			return true, false
+			return true, false, false
+		}
+		var oversized fileTooLargeError
+		if errors.As(err, &oversized) {
+			a.offerLighterFormats(chatID, pending.UserID, []downloadResult{oversized.Result}, format, quality, pending.Delivery, lang, &pending)
+			return true, false, true
 		}
 		a.reportDownloadFailure(err.Error(), sourceHost(pending.URL))
 		a.reportError(errorReport{Stage: "download", ChatID: chatID, UserID: pending.UserID, URL: pending.URL, Format: format + " " + quality, Error: err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-		return true, false
+		return true, false, false
 	}
 	started := time.Now()
 	err = a.sendCachedAudio(chatID, entry, lang)
@@ -375,13 +382,13 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 	if err != nil {
 		if invalidCachedFileError(err) {
 			a.store.deleteCachedAudio(ctx, entry.Key)
-			return false, false
+			return false, false, false
 		}
 		a.reportError(errorReport{Stage: "cache_send", ChatID: chatID, UserID: pending.UserID, URL: pending.URL, Format: format + " " + quality, Error: err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-		return true, false
+		return true, false, false
 	}
-	return true, true
+	return true, true, false
 }
 
 func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format, quality string, queued func(int), reporters ...*statusReporter) (cachedAudio, error) {
@@ -405,6 +412,10 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 		if downloadErr != nil {
 			return cachedAudio{}, downloadErr
 		}
+		if len(results) == 1 && results[0].TooLarge {
+			a.downloader.clearSession(results[0].Session)
+			return cachedAudio{}, fileTooLargeError{Result: results[0], Limit: a.fileLimit()}
+		}
 		if len(results) != 1 || results[0].Error != "" || !regularFileExists(results[0].FilePath) {
 			reason := "загрузка не вернула один готовый трек"
 			if len(results) > 0 && results[0].Error != "" {
@@ -422,7 +433,8 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 			return cachedAudio{}, statErr
 		}
 		if info.Size() > a.fileLimit() {
-			return cachedAudio{}, fmt.Errorf("файл слишком большой (%s)", humanSize(info.Size(), defaultLang))
+			result.TooLarge, result.Size = true, info.Size()
+			return cachedAudio{}, fileTooLargeError{Result: result, Limit: a.fileLimit()}
 		}
 		entry := cachedAudio{Key: urlKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: quality, Size: info.Size()}
 		if telegramAudioFormat(format) {
@@ -565,6 +577,7 @@ func (a *app) handleAdminStats(message *tgbotapi.Message) {
 		"partial", strconv.FormatInt(stats.DownloadsPartial, 10),
 		"failed", strconv.FormatInt(stats.DownloadsFailed, 10),
 		"cancelled", strconv.FormatInt(stats.Cancelled, 10),
+		"too_large", strconv.FormatInt(stats.TooLarge, 10),
 		"cookies", strconv.FormatInt(stats.CookieErrors, 10),
 		"hits", strconv.FormatInt(stats.CacheHits, 10),
 		"searches", strconv.FormatInt(stats.Searches, 10),
@@ -786,8 +799,12 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 		if len(linkResults) == 0 {
 			linkResults = []downloadResult{{Title: preview.Title, Artist: preview.Artist, Error: tr("unknown_error", lang)}}
 		}
-		for _, result := range linkResults {
-			if result.Error != "" {
+		for j, result := range linkResults {
+			if result.URL == "" && len(linkResults) == 1 {
+				// A lighter-format retry of this track re-downloads the link itself.
+				linkResults[j].URL = rawURL
+			}
+			if result.Error != "" && !result.TooLarge {
 				a.reportDownloadFailure(result.Error, sourceHost(rawURL))
 			}
 		}
@@ -822,19 +839,15 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 			if queueErr != nil {
 				return report, queueErr
 			}
-			zipReport := a.sendResultsAsZIP(chatID, results, format, lang)
+			report.add(a.sendResultsAsZIP(chatID, results, format, lang))
 			releaseArchive()
-			report.Delivered += zipReport.Delivered
-			report.Failed += zipReport.Failed
 			return report, nil
 		}
 		if status != nil {
 			a.editStatusMessageFinal(status, tr("download_finished", lang))
 		}
 		reporter.stage(tr("stage_prepare", lang))
-		fileReport := a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, false, reporter)
-		report.Delivered += fileReport.Delivered
-		report.Failed += fileReport.Failed
+		report.add(a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, false, reporter))
 	}
 	summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(report.Delivered), "total", strconv.Itoa(report.Delivered+report.Failed))
 	if report.Failed > 0 {

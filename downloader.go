@@ -23,17 +23,23 @@ import (
 
 const (
 	defaultMBPerMinute = 2.40
+	// sizeEstimateMargin keeps a suggested lighter format safely below the Telegram limit.
 	sizeEstimateMargin = 0.92
-	downloadTimeout    = 2 * time.Hour
+	// sizePrecheckSlack skips a variable-bitrate track before download only when its estimate
+	// exceeds the limit by a wide margin: lossless and VBR sizes vary a lot with the material, and
+	// the real file size is checked again before upload. Constant-bitrate MP3 is estimated exactly.
+	sizePrecheckSlack = 1.25
+	downloadTimeout   = 2 * time.Hour
 )
 
 var mbPerMinute = map[string]float64{
-	"mp3:128":   0.96,
-	"mp3:320":   2.40,
-	"mp3:best":  1.91,
-	"m4a:best":  3.10,
-	"ogg:best":  1.13,
-	"flac:best": 12.68,
+	"mp3:128":  0.96,
+	"mp3:320":  2.40,
+	"mp3:best": 1.91,
+	"m4a:best": 3.10,
+	"ogg:best": 1.13,
+	// 16-bit FLAC (see audioFormatArgs); ffmpeg's default 24-bit output averaged 12.68 MiB/min.
+	"flac:best": 7.20,
 }
 
 var audioExtensions = map[string]bool{
@@ -49,27 +55,35 @@ type downloadResult struct {
 	Error    string
 	Session  string
 	CacheKey string
+	// URL is the track's own page, used to offer a lighter format when the file does not fit.
+	URL             string
+	DurationSeconds int
+	// TooLarge marks a track whose file or estimate (Size) exceeds the Telegram upload limit.
+	TooLarge bool
+	Size     int64
 }
 
 type mediaInfo struct {
-	Type           string       `json:"_type"`
-	ID             string       `json:"id"`
-	Title          string       `json:"title"`
-	Track          string       `json:"track"`
-	Artist         string       `json:"artist"`
-	Uploader       string       `json:"uploader"`
-	Channel        string       `json:"channel"`
-	Duration       float64      `json:"duration"`
-	DurationString string       `json:"duration_string"`
-	FilePath       string       `json:"filepath"`
-	WebpageURL     string       `json:"webpage_url"`
-	URL            string       `json:"url"`
-	Thumbnail      string       `json:"thumbnail"`
-	PlaylistIndex  int          `json:"playlist_index"`
-	PlaylistCount  int          `json:"playlist_count"`
-	Extractor      string       `json:"extractor"`
-	ExtractorKey   string       `json:"extractor_key"`
-	Entries        []*mediaInfo `json:"entries"`
+	Type           string  `json:"_type"`
+	ID             string  `json:"id"`
+	Title          string  `json:"title"`
+	Track          string  `json:"track"`
+	Artist         string  `json:"artist"`
+	Uploader       string  `json:"uploader"`
+	Channel        string  `json:"channel"`
+	Duration       float64 `json:"duration"`
+	DurationString string  `json:"duration_string"`
+	FilePath       string  `json:"filepath"`
+	WebpageURL     string  `json:"webpage_url"`
+	URL            string  `json:"url"`
+	Thumbnail      string  `json:"thumbnail"`
+	PlaylistIndex  int     `json:"playlist_index"`
+	PlaylistCount  int     `json:"playlist_count"`
+	Extractor      string  `json:"extractor"`
+	ExtractorKey   string  `json:"extractor_key"`
+	// IEKey names the extractor of a --flat-playlist entry, which has no extractor fields.
+	IEKey   string       `json:"ie_key"`
+	Entries []*mediaInfo `json:"entries"`
 }
 
 type mediaPreview struct {
@@ -160,6 +174,18 @@ func (m *mediaInfo) resultMetadata() (string, string, string) {
 		duration = secondsToHMS(int(m.Duration))
 	}
 	return title, artist, duration
+}
+
+// pageURL returns the entry's own page. A fully probed entry's url is the media stream itself, so it is
+// used only for flat url entries.
+func (m *mediaInfo) pageURL() string {
+	if m.WebpageURL != "" {
+		return m.WebpageURL
+	}
+	if m.Type == "url" || m.Type == "url_transparent" {
+		return m.URL
+	}
+	return ""
 }
 
 type downloader struct {
@@ -260,7 +286,10 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 }
 
 func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, error) {
-	info, stderr, err := d.probe(ctx, url)
+	// A full probe of a playlist opens every video and solves its JS challenge, which takes longer
+	// than the preview may wait; the flat listing has the titles and durations. A single video is
+	// probed in full either way.
+	info, stderr, err := d.probe(ctx, url, "--flat-playlist")
 	if err != nil {
 		if ctx.Err() != nil {
 			return mediaPreview{}, ctx.Err()
@@ -295,24 +324,32 @@ func estimateAudioSize(seconds int, format, quality string) int64 {
 	if seconds <= 0 {
 		return 0
 	}
-	rate := mbPerMinute[strings.ToLower(format)+":"+strings.ToLower(quality)]
-	if rate == 0 {
-		rate = defaultMBPerMinute
-	}
-	return int64(float64(seconds) / 60 * rate * 1024 * 1024)
+	return int64(float64(seconds) / 60 * audioRate(format, quality) * 1024 * 1024)
 }
 
-func (d *downloader) maxDurationFor(format, quality string) int {
-	key := strings.ToLower(format) + ":" + strings.ToLower(quality)
-	rate, ok := mbPerMinute[key]
+// audioRate returns the typical output size in MiB per minute for a format and quality.
+func audioRate(format, quality string) float64 {
+	rate, ok := mbPerMinute[strings.ToLower(format)+":"+strings.ToLower(quality)]
 	if !ok {
 		rate, ok = mbPerMinute[strings.ToLower(format)+":best"]
 	}
 	if !ok {
 		rate = defaultMBPerMinute
 	}
-	limitMB := float64(d.maxFileSize) / (1024 * 1024) * sizeEstimateMargin
-	return int(limitMB / rate * 60)
+	return rate
+}
+
+// maxDurationFor returns the longest track the pre-download size check lets through.
+func (d *downloader) maxDurationFor(format, quality string) int {
+	limitMB := float64(d.maxFileSize) / (1024 * 1024)
+	if !constantBitrate(format, quality) {
+		limitMB *= sizePrecheckSlack
+	}
+	return int(limitMB / audioRate(format, quality) * 60)
+}
+
+func constantBitrate(format, quality string) bool {
+	return strings.EqualFold(format, "mp3") && (quality == "128" || quality == "320")
 }
 
 func (d *downloader) download(ctx context.Context, url, format, quality string, progress downloadProgress) ([]downloadResult, error) {
@@ -338,7 +375,9 @@ func (d *downloader) downloadRange(ctx context.Context, url, format, quality str
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
 
-	info, probeErrors, err := d.probe(ctx, url)
+	// Each batch of a playlist is downloaded by position, so the flat listing is enough to select
+	// it; the metadata of downloaded tracks is then taken from the yt-dlp manifest.
+	info, probeErrors, err := d.probe(ctx, url, "--flat-playlist")
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -393,9 +432,11 @@ func (d *downloader) downloadRange(ctx context.Context, url, format, quality str
 			continue
 		}
 		title, artist, duration := entry.resultMetadata()
-		results[i] = downloadResult{Title: title, Artist: artist, Duration: duration, Session: session, CacheKey: sourceCacheKey(firstNonEmpty(entry.Extractor, entry.ExtractorKey), entry.ID, format, quality)}
+		results[i] = downloadResult{Title: title, Artist: artist, Duration: duration, Session: session, CacheKey: sourceCacheKey(firstNonEmpty(entry.Extractor, entry.ExtractorKey, entry.IEKey), entry.ID, format, quality), URL: entry.pageURL(), DurationSeconds: int(entry.Duration)}
 		if entry.Duration > 0 && int(entry.Duration) > maxDuration {
-			results[i].Error = fmt.Sprintf("«%s» — %s, это дольше %s: файл не влезет в лимит Telegram.", title, secondsToHMS(int(entry.Duration)), secondsToHMS(maxDuration))
+			estimate := estimateAudioSize(int(entry.Duration), format, quality)
+			results[i].TooLarge, results[i].Size = true, estimate
+			results[i].Error = fmt.Sprintf("«%s» — %s: в %s это около %s, больше лимита Telegram %s.", title, secondsToHMS(int(entry.Duration)), strings.ToUpper(format), humanSize(estimate, defaultLang), humanSize(d.maxFileSize, defaultLang))
 			continue
 		}
 		selected = append(selected, original)
@@ -445,6 +486,7 @@ func (d *downloader) downloadRange(ctx context.Context, url, format, quality str
 			continue
 		}
 		results[resultIndex].FilePath = path
+		results[resultIndex].applyManifest(downloaded[match], format, quality)
 	}
 
 	for _, result := range results {
@@ -454,6 +496,25 @@ func (d *downloader) downloadRange(ctx context.Context, url, format, quality str
 		}
 	}
 	return results, nil
+}
+
+// applyManifest replaces the metadata of a flat playlist entry, which may lack the artist, the
+// duration or the extractor, with that of the downloaded track.
+func (r *downloadResult) applyManifest(entry mediaInfo, format, quality string) {
+	if entry.Title != "" || entry.Track != "" {
+		r.Title, r.Artist, r.Duration = entry.resultMetadata()
+	}
+	if entry.Duration > 0 {
+		r.DurationSeconds = int(entry.Duration)
+	}
+	if extractor := firstNonEmpty(entry.Extractor, entry.ExtractorKey); extractor != "" {
+		if key := sourceCacheKey(extractor, entry.ID, format, quality); key != "" {
+			r.CacheKey = key
+		}
+	}
+	if link := entry.pageURL(); link != "" {
+		r.URL = link
+	}
 }
 
 func validatePlaylistSize(count int) error {
@@ -492,7 +553,7 @@ func (d *downloader) probe(ctx context.Context, url string, extra ...string) (*m
 
 func (d *downloader) runDownload(ctx context.Context, url, format, quality, sessionDir, manifest string, selected []int, playlist bool, progress downloadProgress, total int) (string, error) {
 	started := time.Now()
-	template := "after_move:%(.{id,title,track,artist,uploader,channel,duration,duration_string,filepath,ext,playlist_index})j"
+	template := "after_move:%(.{id,title,track,artist,uploader,channel,duration,duration_string,filepath,ext,playlist_index,extractor,extractor_key,webpage_url})j"
 	progressFile := filepath.Join(sessionDir, "progress.log")
 	args := append(d.commonArgs(),
 		"--no-simulate",
@@ -892,7 +953,9 @@ func progressLineCount(path string) int {
 func audioFormatArgs(format, quality string) []string {
 	switch strings.ToLower(format) {
 	case "flac":
-		return []string{"--audio-format", "flac"}
+		// The sources are lossy (YouTube Opus), so 16 bits lose nothing; ffmpeg would otherwise
+		// write 24-bit FLAC that is about 40% larger.
+		return []string{"--audio-format", "flac", "--postprocessor-args", "ExtractAudio:-sample_fmt s16"}
 	case "m4a":
 		return []string{"--audio-format", "m4a", "--audio-quality", "0"}
 	case "ogg":

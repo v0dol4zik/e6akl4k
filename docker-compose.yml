@@ -73,3 +73,44 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+  # Optional local Telegram Bot API server: it accepts uploads up to 2000 MB instead of the cloud's 50 MB.
+  # Enabled by COMPOSE_PROFILES=telegram-bot-api and TELEGRAM_API_URL=http://telegram-bot-api:8081
+  # in .env, with TELEGRAM_API_ID and TELEGRAM_API_HASH from my.telegram.org in telegram-bot-api.env;
+  # see docs/configuration.md. It is reachable only on the project network.
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:10.2@sha256:e0c2d269555a39d37b77ed6dd6fa5e4153b8d8399c6de9f249808682cdd942a5
+    profiles:
+      - telegram-bot-api
+    restart: unless-stopped
+    env_file:
+      - path: ./telegram-bot-api.env
+        required: false
+    environment:
+      TELEGRAM_LOCAL: "1"
+    volumes:
+      # The work dir holds a directory per bot token: never list or share it.
+      - telegram-bot-api-data:/var/lib/telegram-bot-api
+      - telegram-bot-api-temp:/tmp/telegram-bot-api
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The entrypoint chowns the work dir as root, then the server drops to its own user.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  telegram-bot-api-data:
+  telegram-bot-api-temp:

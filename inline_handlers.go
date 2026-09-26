@@ -187,7 +187,17 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 	if err != nil {
 		inlineFailure = err.Error()
 		inlineCancelled = errors.Is(err, context.Canceled)
-		if !errors.Is(err, context.Canceled) {
+		var oversized fileTooLargeError
+		switch {
+		case inlineCancelled:
+		case errors.As(err, &oversized):
+			// Too long for the limit is not a bot failure: it is counted, not reported.
+			if a.store != nil {
+				a.store.increment(a.ctx, "downloads_too_large")
+				a.store.increment(a.ctx, "downloads_too_large_mp3")
+			}
+			a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", html.EscapeString(err.Error())))
+		default:
 			a.reportError(errorReport{Stage: "inline", UserID: chosen.From.ID, URL: candidate.URL, Format: "mp3 320", Error: err.Error()})
 			a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", html.EscapeString(err.Error())))
 		}

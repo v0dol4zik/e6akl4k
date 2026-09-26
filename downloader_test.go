@@ -16,11 +16,13 @@ func TestDownloadRangeSelectsOnlyRequestedPlaylistItems(t *testing.T) {
 	bin := filepath.Join(dir, "fake-yt-dlp")
 	entries := make([]string, 30)
 	for i := range entries {
-		entries[i] = fmt.Sprintf(`{"id":"id%d","title":"Track %d","duration":60,"playlist_index":%d,"extractor":"youtube"}`, i+1, i+1, i+1)
+		entries[i] = fmt.Sprintf(`{"_type":"url","ie_key":"Youtube","id":"id%d","url":"https://www.youtube.com/watch?v=id%d","title":"Track %d","duration":60}`, i+1, i+1, i+1)
 	}
+	// A full probe of the playlist would open every video; only the flat listing is answered.
 	script := `#!/bin/sh
 case " $* " in
-  *" --simulate "*) printf '%s' '{"_type":"playlist","title":"List","entries":[` + strings.Join(entries, ",") + `]}' ; exit 0 ;;
+  *" --simulate "*" --flat-playlist "*|*" --flat-playlist "*" --simulate "*) printf '%s' '{"_type":"playlist","title":"List","entries":[` + strings.Join(entries, ",") + `]}' ; exit 0 ;;
+  *" --simulate "*) exit 1 ;;
 esac
 dir=''; manifest=''; progress=''; items=''
 while [ "$#" -gt 0 ]; do
@@ -39,7 +41,7 @@ for item in $items; do
   path="$dir/$(printf '%06d' "$item")_id$item.mp3"
   printf 'audio' > "$path"
   printf '%s\n' "$item" >> "$progress"
-  printf '{"id":"id%s","title":"Track %s","duration":60,"playlist_index":%s,"filepath":"%s","extractor":"youtube"}\n' "$item" "$item" "$item" "$path" >> "$manifest"
+  printf '{"id":"id%s","title":"Track %s","uploader":"Artist %s","duration":61,"playlist_index":%s,"filepath":"%s","extractor":"youtube","webpage_url":"https://www.youtube.com/watch?v=id%s"}\n' "$item" "$item" "$item" "$item" "$path" "$item" >> "$manifest"
 done
 IFS="$oldifs"
 `
@@ -65,17 +67,44 @@ IFS="$oldifs"
 	if results[0].CacheKey != "youtube:id11:mp3:320" {
 		t.Fatalf("cache key=%q", results[0].CacheKey)
 	}
+	// The flat entry has no artist; the downloaded track's metadata replaces it.
+	if results[0].Artist != "Artist 11" || results[0].DurationSeconds != 61 || results[0].URL != "https://www.youtube.com/watch?v=id11" {
+		t.Fatalf("metadata=%+v", results[0])
+	}
+}
+
+func TestPreviewListsPlaylistFlat(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake-yt-dlp")
+	script := `#!/bin/sh
+case " $* " in
+  *" --flat-playlist "*) printf '%s' '{"_type":"playlist","title":"List","entries":[{"_type":"url","ie_key":"Youtube","id":"a","title":"A","duration":100},{"_type":"url","ie_key":"Youtube","id":"b","title":"B","duration":50}]}' ;;
+  *) sleep 5 ;;
+esac
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	d := downloader{bin: bin, downloadDir: dir, maxFileSize: maxFileSize}
+	preview, err := d.preview(context.Background(), "https://www.youtube.com/playlist?list=x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.IsPlaylist || preview.TrackCount != 2 || preview.DurationSeconds != 150 || len(preview.Tracks) != 2 {
+		t.Fatalf("preview=%+v", preview)
+	}
 }
 
 func TestMaxDurationFor(t *testing.T) {
 	d := downloader{maxFileSize: maxFileSize}
 	tests := map[string]int{
-		"mp3:128":   2875,
-		"mp3:320":   1150,
-		"mp3:best":  1445,
-		"m4a:best":  890,
-		"ogg:best":  2442,
-		"flac:best": 217,
+		// Constant-bitrate MP3 is checked exactly, the rest with sizePrecheckSlack.
+		"mp3:128":   3125,
+		"mp3:320":   1250,
+		"mp3:best":  1963,
+		"m4a:best":  1209,
+		"ogg:best":  3318,
+		"flac:best": 520,
 	}
 	for key, want := range tests {
 		parts := strings.SplitN(key, ":", 2)
@@ -93,7 +122,7 @@ func TestAudioFormatArgs(t *testing.T) {
 	}{
 		{"mp3", "best", []string{"--audio-format", "mp3", "--audio-quality", "0"}},
 		{"mp3", "320", []string{"--audio-format", "mp3", "--audio-quality", "320K"}},
-		{"flac", "best", []string{"--audio-format", "flac"}},
+		{"flac", "best", []string{"--audio-format", "flac", "--postprocessor-args", "ExtractAudio:-sample_fmt s16"}},
 		{"ogg", "best", []string{"--audio-format", "vorbis", "--audio-quality", "5"}},
 	}
 	for _, test := range tests {

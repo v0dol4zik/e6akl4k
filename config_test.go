@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
-	keys := []string{"BOT_TOKEN", "CACHE_CHAT_ID", "INLINE_CACHE_CHAT_ID", "ERROR_CHAT_ID", "DOWNLOAD_WORKERS", "DOWNLOAD_QUEUE_SIZE", "YTDLP_SLEEP_REQUESTS", "YTDLP_CONCURRENT_FRAGMENTS", "RATE_WINDOW", "ADMIN_IDS", "MAX_FILE_SIZE", "XDG_DATA_HOME"}
+	keys := []string{"BOT_TOKEN", "CACHE_CHAT_ID", "INLINE_CACHE_CHAT_ID", "ERROR_CHAT_ID", "DOWNLOAD_WORKERS", "DOWNLOAD_QUEUE_SIZE", "YTDLP_SLEEP_REQUESTS", "YTDLP_CONCURRENT_FRAGMENTS", "RATE_WINDOW", "ADMIN_IDS", "MAX_FILE_SIZE", "TELEGRAM_API_URL", "XDG_DATA_HOME"}
 	for _, key := range keys {
 		key := key
 		old, ok := os.LookupEnv(key)
@@ -93,6 +93,41 @@ func TestLoadConfigYandexProxy(t *testing.T) {
 		t.Setenv("YANDEX_PROXY", value)
 		if _, err := loadConfig(); err == nil || strings.Contains(err.Error(), "secret") {
 			t.Fatalf("YANDEX_PROXY=%q err=%v", value, err)
+		}
+	}
+}
+
+func TestLoadConfigTelegramAPIURL(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "token")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("TELEGRAM_API_URL", "")
+	t.Setenv("MAX_FILE_SIZE", "524288000")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("the cloud Bot API must not accept files over 50 MB")
+	}
+
+	t.Setenv("TELEGRAM_API_URL", " http://telegram-bot-api:8081/ ")
+	cfg, err := loadConfig()
+	if err != nil || cfg.TelegramAPIURL != "http://telegram-bot-api:8081" || cfg.MaxFileSize != 524288000 {
+		t.Fatalf("url=%q size=%d err=%v", cfg.TelegramAPIURL, cfg.MaxFileSize, err)
+	}
+	if limit := (&app{cfg: cfg}).fileLimit(); limit != 524288000 {
+		t.Fatalf("fileLimit=%d", limit)
+	}
+	t.Setenv("MAX_FILE_SIZE", "")
+	if cfg, err = loadConfig(); err != nil || cfg.MaxFileSize != maxFileSize {
+		t.Fatalf("the limit stays 50 MB until MAX_FILE_SIZE is raised: size=%d err=%v", cfg.MaxFileSize, err)
+	}
+	t.Setenv("MAX_FILE_SIZE", "2097152001")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("MAX_FILE_SIZE over the local server limit was accepted")
+	}
+
+	t.Setenv("MAX_FILE_SIZE", "")
+	for _, value := range []string{"telegram-bot-api:8081", "ftp://telegram-bot-api", "http://", "http://telegram-bot-api:8081/bot", "http://user:secret@telegram-bot-api:8081", "http://telegram-bot-api:8081?x=1", "http://telegram-bot-api:8081/#x"} {
+		t.Setenv("TELEGRAM_API_URL", value)
+		if _, err := loadConfig(); err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("TELEGRAM_API_URL=%q err=%v", value, err)
 		}
 	}
 }

@@ -134,10 +134,10 @@ func (a *app) runDownloadTrace(userID, chatID int64, rawURL string, fresh bool) 
 		}
 		trace.add("production fast/cache path started")
 		a.updateDownloadTraceStatus(status, trace, "cache / fast path")
-		handled, succeeded := a.tryCachedDownload(ctx, chatID, pending, "mp3", "320", lang, func(position int) {
+		handled, succeeded, tooLarge := a.tryCachedDownload(ctx, chatID, pending, "mp3", "320", lang, func(position int) {
 			trace.add("download queue position=%d", position)
 		})
-		trace.add("production fast/cache path handled=%t succeeded=%t", handled, succeeded)
+		trace.add("production fast/cache path handled=%t succeeded=%t too_large=%t", handled, succeeded, tooLarge)
 		if handled {
 			a.finishDownloadTrace(chatID, status, trace)
 			return

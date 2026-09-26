@@ -28,7 +28,8 @@ func TestProgressFileCanBeReopenedAndReportsBytes(t *testing.T) {
 	}
 	select {
 	case update := <-reporter.updates:
-		if !strings.Contains(update, "100%") {
+		// A fully read file waits for Telegram to store it.
+		if !strings.Contains(update, "processing the file") || !strings.Contains(update, "10.0 B") {
 			t.Fatalf("unexpected progress update: %q", update)
 		}
 	default:

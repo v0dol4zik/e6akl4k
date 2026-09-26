@@ -19,7 +19,10 @@ import (
 )
 
 const (
-	maxFileSize          int64 = 50 * 1024 * 1024
+	maxFileSize int64 = 50 * 1024 * 1024
+	// localMaxFileSize is the upload limit of a local Telegram Bot API server in --local mode.
+	localMaxFileSize     int64 = 2000 * 1024 * 1024
+	mediaGroupMaxBytes         = 10 * maxFileSize
 	playlistZIPThreshold       = 10
 	maxPlaylistTracks          = 75
 	maxTitleLength             = 200
@@ -38,6 +41,15 @@ var (
 type deliveryReport struct {
 	Delivered int
 	Failed    int
+	// TooLarge lists the failed tracks that did not fit the Telegram upload limit; they are
+	// answered with lighter formats instead of an error.
+	TooLarge []downloadResult
+}
+
+func (r *deliveryReport) add(other deliveryReport) {
+	r.Delivered += other.Delivered
+	r.Failed += other.Failed
+	r.TooLarge = append(r.TooLarge, other.TooLarge...)
 }
 
 type pendingURL struct {
@@ -435,6 +447,9 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			a.deleteStatusMessage(status)
 			a.maybeSendSupportNotice(chatID, userID, lang)
 		}
+		if historyStatus == "too_large" {
+			a.deleteStatusMessage(status)
+		}
 	}()
 	a.mu.Lock()
 	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: chatID, userID: userID}
@@ -480,11 +495,12 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			return
 		}
 		a.recordDeliveryMetrics(report)
+		a.offerLighterFormats(chatID, userID, report.TooLarge, format, quality, pending.Delivery, lang, nil)
 		return
 	}
 	if !pending.Preview.IsPlaylist {
 		reporter.stage(tr("stage_cache", lang))
-		if handled, succeeded := a.tryCachedDownload(downloadCtx, chatID, pending, format, quality, lang, func(position int) {
+		if handled, succeeded, tooLarge := a.tryCachedDownload(downloadCtx, chatID, pending, format, quality, lang, func(position int) {
 			if status != nil {
 				a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
 			}
@@ -492,6 +508,9 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			if succeeded {
 				historyStatus = "delivered"
 				a.recordDeliveryMetrics(deliveryReport{Delivered: 1})
+			}
+			if tooLarge {
+				historyStatus = "too_large"
 			}
 			if !succeeded && downloadCtx.Err() != nil {
 				historyStatus = "cancelled"
@@ -507,6 +526,9 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 		historyStatus = deliveryStatus(report)
 		historyError = deliveryError(report)
 		a.recordDeliveryMetrics(report)
+		if batchErr == nil {
+			a.offerLighterFormats(chatID, userID, report.TooLarge, format, quality, pending.Delivery, lang, nil)
+		}
 		if batchErr != nil {
 			historyError = batchErr.Error()
 			if errors.Is(batchErr, context.Canceled) {
@@ -583,15 +605,27 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 		return
 	}
 	if len(results) == 0 || allFailed(results) {
-		reason := tr("unknown_error", lang)
-		if len(results) > 0 && results[0].Error != "" {
-			reason = results[0].Error
+		if len(results) > 0 {
 			a.downloader.clearSession(results[0].Session)
+		}
+		oversized := tooLargeResults(results)
+		if len(results) > 0 && len(oversized) == len(results) {
+			historyStatus = "too_large"
+			a.offerLighterFormats(chatID, userID, oversized, format, quality, pending.Delivery, lang, singleRequest(pending))
+			return
+		}
+		reason := tr("unknown_error", lang)
+		for _, result := range results {
+			if result.Error != "" && !result.TooLarge {
+				reason = result.Error
+				break
+			}
 		}
 		a.reportDownloadFailure(reason, sourceHost(url))
 		a.reportError(errorReport{Stage: "download", ChatID: chatID, UserID: userID, URL: url, Format: format + " " + quality, Error: reason})
 		historyError = reason
 		a.sendText(chatID, tr("nothing_downloaded", lang, "error", reason), "", nil)
+		a.offerLighterFormats(chatID, userID, oversized, format, quality, pending.Delivery, lang, nil)
 		return
 	}
 	validCount := 0
@@ -616,6 +650,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 		historyStatus = deliveryStatus(report)
 		historyError = deliveryError(report)
 		a.recordDeliveryMetrics(report)
+		a.offerLighterFormats(chatID, userID, report.TooLarge, format, quality, pending.Delivery, lang, singleRequest(pending))
 		return
 	}
 	if status != nil {
@@ -626,6 +661,16 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 	historyStatus = deliveryStatus(report)
 	historyError = deliveryError(report)
 	a.recordDeliveryMetrics(report)
+	a.offerLighterFormats(chatID, userID, report.TooLarge, format, quality, pending.Delivery, lang, singleRequest(pending))
+}
+
+// singleRequest returns the request itself when it is a single track, so that the lighter-format
+// buttons reuse it; a playlist or a batch is retried by the links of its oversized tracks.
+func singleRequest(pending pendingURL) *pendingURL {
+	if pending.Preview.IsPlaylist || len(pending.Batch) > 0 {
+		return nil
+	}
+	return &pending
 }
 
 func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, status *tgbotapi.Message, reporter *statusReporter) (deliveryReport, error) {
@@ -671,9 +716,7 @@ func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, 
 		if batch.err != nil {
 			return report, batch.err
 		}
-		batchReport := a.sendResultsIndividuallyWithSummary(chatID, batch.results, format, lang, false, reporter)
-		report.Delivered += batchReport.Delivered
-		report.Failed += batchReport.Failed
+		report.add(a.sendResultsIndividuallyWithSummary(chatID, batch.results, format, lang, false, reporter))
 		if err := pipelineCtx.Err(); err != nil {
 			return report, err
 		}
@@ -692,6 +735,9 @@ func deliveryStatus(report deliveryReport) string {
 	}
 	if report.Delivered > 0 {
 		return "partial"
+	}
+	if report.Failed > 0 && report.Failed == len(report.TooLarge) {
+		return "too_large"
 	}
 	return "delivery_failed"
 }
@@ -963,8 +1009,13 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 		size   int64
 	}
 	items := make([]batchAudio, 0, len(results))
+	var tooLarge []downloadResult
 	for i, result := range results {
 		idx, total := strconv.Itoa(i+1), strconv.Itoa(len(results))
+		if result.TooLarge {
+			tooLarge = append(tooLarge, result)
+			continue
+		}
 		if result.Error != "" {
 			failures.add(i+1, result.Error)
 			a.sendText(chatID, tr("send_error", lang, "idx", idx, "total", total, "error", html.EscapeString(result.Error)), "HTML", nil)
@@ -977,8 +1028,8 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 			continue
 		}
 		if info.Size() > a.fileLimit() {
-			failures.add(i+1, "file too large: "+humanSize(info.Size(), "en"))
-			a.sendText(chatID, tr("file_too_big", lang, "idx", idx, "total", total, "title", html.EscapeString(shortenRunes(result.Title, maxTitleLength)), "size", humanSize(info.Size(), lang)), "HTML", nil)
+			result.TooLarge, result.Size = true, info.Size()
+			tooLarge = append(tooLarge, result)
 			continue
 		}
 		items = append(items, batchAudio{index: i, result: result, size: info.Size()})
@@ -1006,12 +1057,17 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 		if showSummary {
 			a.sendText(chatID, summary, "", nil)
 		}
-		return deliveryReport{Delivered: sent, Failed: len(results) - sent}
+		return deliveryReport{Delivered: sent, Failed: len(results) - sent, TooLarge: tooLarge}
 	}
 	sent := 0
-	for start := 0; start < len(items); start += 10 {
-		end := min(start+10, len(items))
+	sizes := make([]int64, len(items))
+	for i, item := range items {
+		sizes[i] = item.size
+	}
+	for start := 0; start < len(items); {
+		end := mediaGroupEnd(sizes, start)
 		batch := items[start:end]
+		start = end
 		var batchSize int64
 		for _, item := range batch {
 			batchSize += item.size
@@ -1079,7 +1135,7 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 	if showSummary {
 		a.sendText(chatID, summary, "", nil)
 	}
-	return deliveryReport{Delivered: sent, Failed: len(results) - sent}
+	return deliveryReport{Delivered: sent, Failed: len(results) - sent, TooLarge: tooLarge}
 }
 
 func (a *app) cacheDeliveredAudio(result downloadResult, format string, size int64, delivered tgbotapi.Message) {
@@ -1107,16 +1163,28 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 	failures := deliveryFailures{total: len(results)}
 	defer func() { a.reportDeliveryFailures("zip", chatID, format, failures) }()
 	valid := make([]downloadResult, 0, len(results))
+	var tooLarge []downloadResult
 	for i, result := range results {
-		if result.Error == "" && regularFileExists(result.FilePath) {
-			valid = append(valid, result)
-		} else if result.Error != "" {
+		switch {
+		case result.TooLarge:
+			tooLarge = append(tooLarge, result)
+		case result.Error != "":
 			failures.add(i+1, result.Error)
+		case regularFileExists(result.FilePath):
+			// A file over the limit would make its archive part too large as well.
+			if size := regularFileSize(result.FilePath); size > a.fileLimit() {
+				result.TooLarge, result.Size = true, size
+				tooLarge = append(tooLarge, result)
+				continue
+			}
+			valid = append(valid, result)
 		}
 	}
 	if len(valid) == 0 {
-		a.sendText(chatID, tr("no_files_for_zip", lang), "", nil)
-		return deliveryReport{Failed: len(results)}
+		if len(tooLarge) == 0 {
+			a.sendText(chatID, tr("no_files_for_zip", lang), "", nil)
+		}
+		return deliveryReport{Failed: len(results), TooLarge: tooLarge}
 	}
 	a.sendText(chatID, tr("zipping", lang, "count", strconv.Itoa(len(valid))), "", nil)
 	chunks := splitResultsBySize(valid, a.fileLimit()*9/10)
@@ -1131,24 +1199,29 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
 		}
 		zipPath := filepath.Join(filepath.Dir(valid[0].FilePath), fmt.Sprintf("playlist_%02d_of_%02d_%s.zip", part+1, len(chunks), zipID))
 		if err := createZIP(zipPath, chunk); err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
 		}
 		info, err := os.Stat(zipPath)
 		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
 		}
 		if info.Size() > a.fileLimit() {
-			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: "archive too large: " + humanSize(info.Size(), "en")})
-			a.sendText(chatID, tr("zip_too_big", lang, "size", humanSize(info.Size(), lang)), "", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
+			// Only a part of one file just under the limit can outgrow it with the archive
+			// overhead; its tracks are offered in a lighter format and the other parts still go.
+			_ = os.Remove(zipPath)
+			for _, result := range chunk {
+				result.TooLarge, result.Size = true, regularFileSize(result.FilePath)
+				tooLarge = append(tooLarge, result)
+			}
+			continue
 		}
 		document := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(zipPath))
 		partLine := ""
@@ -1157,15 +1230,19 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		}
 		document.Caption = tr("zip_caption", lang, "count", strconv.Itoa(len(chunk)), "size", humanSize(info.Size(), lang), "fmt", strings.ToUpper(format), "skipped", skippedLine+partLine)
 		document.ParseMode = "HTML"
-		if _, err := sendTelegram(a.bot, document); err != nil {
+		_, err = sendTelegram(a.bot, document)
+		_ = os.Remove(zipPath)
+		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
 		}
 		delivered += len(chunk)
 	}
-	a.sendText(chatID, tr("zip_sent", lang), "", nil)
-	return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
+	if delivered > 0 {
+		a.sendText(chatID, tr("zip_sent", lang), "", nil)
+	}
+	return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
 }
 
 func splitResultsBySize(results []downloadResult, limit int64) [][]downloadResult {
@@ -1191,8 +1268,26 @@ func splitResultsBySize(results []downloadResult, limit int64) [][]downloadResul
 	return chunks
 }
 
+// mediaGroupEnd returns where the media group starting at start ends: a group holds up to 10
+// tracks and, behind a local Bot API server with its larger files, no more than mediaGroupMaxBytes
+// unless a single track is larger, so one request stays bounded.
+func mediaGroupEnd(sizes []int64, start int) int {
+	end := start
+	var total int64
+	for end < len(sizes) && end-start < 10 && (end == start || total+sizes[end] <= mediaGroupMaxBytes) {
+		total += sizes[end]
+		end++
+	}
+	return end
+}
+
+// fileLimit is the upload limit: MAX_FILE_SIZE, capped by what the Bot API server accepts.
 func (a *app) fileLimit() int64 {
-	if a.cfg.MaxFileSize > 0 && a.cfg.MaxFileSize <= maxFileSize {
+	limit := maxFileSize
+	if a.cfg.TelegramAPIURL != "" {
+		limit = localMaxFileSize
+	}
+	if a.cfg.MaxFileSize > 0 && a.cfg.MaxFileSize <= limit {
 		return a.cfg.MaxFileSize
 	}
 	return maxFileSize

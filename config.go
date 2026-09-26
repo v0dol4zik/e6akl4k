@@ -18,6 +18,7 @@ type config struct {
 	ErrorChatID        int64
 	LastfmAPIKey       string
 	YandexProxy        *url.URL
+	TelegramAPIURL     string
 	HTTPAddr           string
 	DownloadWorkers    int
 	DownloadQueueSize  int
@@ -89,7 +90,14 @@ func loadConfig() (config, error) {
 	if cfg.MaxPlaylistTracks, err = strictEnvInt("MAX_PLAYLIST_TRACKS", maxPlaylistTracks, 1, 1000); err != nil {
 		return config{}, err
 	}
-	if cfg.MaxFileSize, err = strictEnvInt64("MAX_FILE_SIZE", maxFileSize, 1024*1024, maxFileSize); err != nil {
+	if cfg.TelegramAPIURL, err = envTelegramAPIURL("TELEGRAM_API_URL"); err != nil {
+		return config{}, err
+	}
+	fileSizeCap := maxFileSize
+	if cfg.TelegramAPIURL != "" {
+		fileSizeCap = localMaxFileSize
+	}
+	if cfg.MaxFileSize, err = strictEnvInt64("MAX_FILE_SIZE", maxFileSize, 1024*1024, fileSizeCap); err != nil {
 		return config{}, err
 	}
 	if cfg.RateWindow, err = strictEnvDuration("RATE_WINDOW", time.Minute); err != nil {
@@ -155,6 +163,21 @@ func envProxyURL(key string) (*url.URL, error) {
 		}
 	}
 	return nil, fmt.Errorf("%s должен быть адресом прокси вида socks5h://host:port или http://host:port", key)
+}
+
+// envTelegramAPIURL reads the base address of a local Telegram Bot API server, such as
+// http://telegram-bot-api:8081, without a trailing slash; "" means the cloud Bot API.
+func envTelegramAPIURL(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" && parsed.User == nil &&
+		strings.Trim(parsed.Path, "/") == "" && parsed.RawQuery == "" && parsed.Fragment == "" && !strings.ContainsAny(value, "%?#") {
+		return parsed.Scheme + "://" + parsed.Host, nil
+	}
+	return "", fmt.Errorf("%s должен быть адресом Bot API сервера вида http://telegram-bot-api:8081", key)
 }
 
 func strictEnvInt(key string, fallback, min, max int) (int, error) {

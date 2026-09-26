@@ -72,7 +72,7 @@ Every `yt-dlp` process receives an isolated temporary copy of `cookies.txt`. The
 
 ## Delivery constraints
 
-- The official Telegram Bot API accepts bot uploads up to 50 MiB.
+- The official Telegram Bot API accepts bot uploads up to 50 MiB; an optional local Bot API server raises the limit to 2000 MiB. A track over the limit gets buttons with lighter formats that fit instead of an error.
 - Telegram's music player supports MP3 and M4A; FLAC and OGG are sent as documents.
 - ZIP archives are split automatically, but every individual file must still fit within Telegram's limit.
 - Large individual playlists use a two-stage producer/consumer pipeline: the next batch downloads while the current batch uploads, with at most two batches on disk.

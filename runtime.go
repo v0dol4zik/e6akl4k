@@ -93,7 +93,7 @@ func main() {
 			IdleConnTimeout:       90 * time.Second,
 		}, requestLimit: telegramRequestTimeout, uploadLimit: telegramUploadTimeout, pollLimit: 75 * time.Second},
 	}, secrets: []string{cfg.BotToken}}
-	bot, err := tgbotapi.NewBotAPIWithClient(cfg.BotToken, tgbotapi.APIEndpoint, telegramHTTP)
+	bot, err := connectTelegram(context.Background(), cfg, telegramHTTP, state)
 	if err != nil {
 		log.Fatalf("Не удалось подключиться к Telegram: %v", err)
 	}

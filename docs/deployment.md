@@ -51,6 +51,15 @@ Without an argument, `deploy.sh` builds a uniquely tagged local image. To deploy
 
 The script validates Compose, free space, and SQLite, creates a timestamped database backup, deploys the exact image, and waits for a healthy container. Failure restores the previous image automatically. A manual rollback is available through `./rollback.sh`.
 
+### Switching to a local Telegram Bot API server
+
+Images older than `TELEGRAM_API_URL` support refuse to start with `MAX_FILE_SIZE` above 50 MiB and would talk to the cloud Bot API, which refuses the bot for 10 minutes after the switch. Switch in two deployments, so that an automatic rollback never lands on such an image:
+
+1. Deploy the new code with the unchanged `.env` and check that the bot is healthy.
+2. Create `telegram-bot-api.env` (see [Files over 50 MB](configuration.md#files-over-50-mb)), back up `.env`, add `telegram-bot-api` to `COMPOSE_PROFILES`, `TELEGRAM_API_URL=http://telegram-bot-api:8081`, and the larger `MAX_FILE_SIZE`, then run `./deploy.sh "$(cat .deploy/current-image)"`. The bot log should show the logout from the cloud and `Telegram Bot API: локальный сервер http://telegram-bot-api:8081`.
+
+To move back, restore the previous `.env`, redeploy the current image 10 minutes after the switch at the earliest, and stop the server with `docker compose stop telegram-bot-api`. Roll back to an image without local server support only after that.
+
 GitLab CI publishes `$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA` for the default branch and tags. Authenticate the server with `docker login registry.gitlab.com` before its first Registry deployment.
 
 ## YouTube cookies

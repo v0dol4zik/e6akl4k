@@ -22,10 +22,12 @@ func languageKeyboard() *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
-// downloadOptions lists the selectable format/quality pairs in keyboard order.
-var downloadOptions = []struct {
+type downloadOption struct {
 	labelKey, format, quality string
-}{
+}
+
+// downloadOptions lists the selectable format/quality pairs in keyboard order.
+var downloadOptions = []downloadOption{
 	{"btn_mp3_best", "mp3", "best"},
 	{"btn_mp3_128", "mp3", "128"},
 	{"btn_mp3_320", "mp3", "320"},
