@@ -2,22 +2,17 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"html"
 	"log"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 const (
@@ -26,7 +21,12 @@ const (
 	inlineQueryTTL    = 9 * time.Second
 	inlineDebounce    = 450 * time.Millisecond
 	inlineMinQueryLen = 3
+	// Inline mode always sends MP3 320, the format Telegram's player plays everywhere.
+	inlineFormat  = "mp3"
+	inlineQuality = "320"
 )
+
+var youtubeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
 
 type inlineCandidate struct {
 	URL        string
@@ -36,6 +36,7 @@ type inlineCandidate struct {
 	Duration   string
 	SourceID   string
 	Extractor  string
+	Thumbnail  string
 	Confidence int
 	Match      string
 	UserID     int64
@@ -54,51 +55,29 @@ type inlineActiveQuery struct {
 }
 
 type inlineService struct {
-	bot           *tgbotapi.BotAPI
-	downloader    *downloader
-	cacheChatID   int64
-	placeholderID string
-	cachePath     string
-	store         *store
-	cacheTTL      time.Duration
+	store    *store
+	cacheTTL time.Duration
 
 	mu          sync.Mutex
 	candidates  map[string]inlineCandidate
 	resultOrder []string
 	active      map[string]inlineActiveDownload
-	activeUser  map[int64]string
 	queries     map[int64]inlineActiveQuery
 	querySeq    uint64
-	fileIDs     map[string]string
 }
 
-func newInlineService(ctx context.Context, bot *tgbotapi.BotAPI, dl *downloader, cacheChatID int64) (*inlineService, error) {
-	service := &inlineService{
-		bot:         bot,
-		downloader:  dl,
-		cacheChatID: cacheChatID,
-		cachePath:   inlineCachePath(dl.downloadDir),
-		candidates:  make(map[string]inlineCandidate),
-		active:      make(map[string]inlineActiveDownload),
-		activeUser:  make(map[int64]string),
-		queries:     make(map[int64]inlineActiveQuery),
-		fileIDs:     make(map[string]string),
+func newInlineService(state *store, cacheTTL time.Duration) *inlineService {
+	return &inlineService{
+		store:      state,
+		cacheTTL:   cacheTTL,
+		candidates: make(map[string]inlineCandidate),
+		active:     make(map[string]inlineActiveDownload),
+		queries:    make(map[int64]inlineActiveQuery),
 	}
-	if err := service.loadCache(); err != nil {
-		return nil, fmt.Errorf("прочитать inline-кэш: %w", err)
-	}
-	placeholderID := strings.TrimSpace(os.Getenv("INLINE_PLACEHOLDER_FILE_ID"))
-	if placeholderID == "" {
-		var err error
-		placeholderID, err = service.uploadPlaceholder(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("подготовить inline placeholder: %w", err)
-		}
-	}
-	service.placeholderID = placeholderID
-	return service, nil
 }
 
+// beginQuery starts the lookup of a user's newest inline query and cancels the previous one,
+// which Telegram no longer shows.
 func (s *inlineService) beginQuery(parent context.Context, userID int64) (context.Context, uint64) {
 	ctx, cancel := context.WithTimeout(parent, inlineQueryTTL)
 	s.mu.Lock()
@@ -130,6 +109,16 @@ func (s *inlineService) cancelQuery(userID int64) {
 	s.mu.Unlock()
 }
 
+func (s *inlineService) cachedFileID(key string) string {
+	if s.store == nil || key == "" {
+		return ""
+	}
+	if entry, ok := s.store.cachedAudio(context.Background(), key, s.cacheTTL); ok {
+		return entry.FileID
+	}
+	return ""
+}
+
 func inlineCachePath(downloadDir string) string {
 	if cacheDir := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); cacheDir != "" {
 		return filepath.Join(cacheDir, "inline-audio-cache.json")
@@ -137,135 +126,34 @@ func inlineCachePath(downloadDir string) string {
 	return filepath.Join(downloadDir, "inline-audio-cache.json")
 }
 
-func (s *inlineService) uploadPlaceholder(ctx context.Context) (string, error) {
-	ffmpeg, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		return "", errors.New("ffmpeg не найден в PATH")
-	}
-	file, err := os.CreateTemp(s.downloader.downloadDir, ".inline-placeholder-*.mp3")
-	if err != nil {
-		return "", err
-	}
-	path := file.Name()
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", err
-	}
-	defer os.Remove(path)
-
-	placeholderCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(placeholderCtx, ffmpeg,
-		"-hide_banner", "-loglevel", "error", "-y",
-		"-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-		"-t", "1", "-q:a", "9", "-acodec", "libmp3lame", "-vn",
-		"-metadata", "title=Downloading…", "-metadata", "artist=e6akl4k bot",
-		path,
-	)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("ffmpeg: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	audio := tgbotapi.NewAudio(s.cacheChatID, tgbotapi.FilePath(path))
-	audio.Title = "Downloading…"
-	audio.Performer = "e6akl4k bot"
-	sent, err := sendTelegram(s.bot, audio)
-	if err != nil {
-		return "", fmt.Errorf("загрузить placeholder в cache-канал: %w", err)
-	}
-	if sent.Audio == nil || sent.Audio.FileID == "" {
-		return "", errors.New("Telegram не вернул file_id placeholder")
-	}
-	log.Printf("Inline placeholder загружен в cache-чат %d", s.cacheChatID)
-	return sent.Audio.FileID, nil
-}
-
-func (s *inlineService) loadCache() error {
-	data, err := os.ReadFile(s.cachePath)
+// migrateLegacyInlineCache imports the file_id map that inline mode kept in a JSON file before
+// the SQLite cache and renames the file, so it is read only once.
+func migrateLegacyInlineCache(ctx context.Context, state *store, path string, ttl time.Duration) error {
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if len(data) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(data, &s.fileIDs); err != nil {
-		return err
-	}
-	if s.fileIDs == nil {
-		s.fileIDs = make(map[string]string)
-	}
-	return nil
-}
-
-func (s *inlineService) cachedFileID(key string) string {
-	if s.store != nil {
-		if entry, ok := s.store.cachedAudio(context.Background(), key, s.cacheTTL); ok {
-			return entry.FileID
+	legacy := make(map[string]string)
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &legacy); err != nil {
+			return err
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.fileIDs[key]
-}
-
-func (s *inlineService) cacheFileID(key, fileID string) error {
-	if s.store != nil {
-		return s.store.putCachedAudio(context.Background(), cachedAudio{Key: key, FileID: fileID, Format: "mp3", Quality: "320"})
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.fileIDs[key] = fileID
-	data, err := json.MarshalIndent(s.fileIDs, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.cachePath), 0o700); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(s.cachePath), ".inline-cache-*.json")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, s.cachePath)
-}
-
-func (s *inlineService) attachStore(state *store, ttl time.Duration) error {
-	if state == nil {
-		return nil
-	}
-	s.mu.Lock()
-	legacy := make(map[string]string, len(s.fileIDs))
-	for key, value := range s.fileIDs {
-		legacy[key] = value
-	}
-	s.store, s.cacheTTL = state, ttl
-	s.fileIDs = make(map[string]string)
-	s.mu.Unlock()
 	for key, fileID := range legacy {
-		if _, ok := state.cachedAudio(context.Background(), key, ttl); !ok {
-			if err := state.putCachedAudio(context.Background(), cachedAudio{Key: key, FileID: fileID, Format: "mp3", Quality: "320"}); err != nil {
-				return err
-			}
+		if _, ok := state.cachedAudio(ctx, key, ttl); ok {
+			continue
+		}
+		if err := state.putCachedAudio(ctx, cachedAudio{Key: key, FileID: fileID, Format: inlineFormat, Quality: inlineQuality}); err != nil {
+			return err
 		}
 	}
-	if len(legacy) > 0 {
-		_ = os.Rename(s.cachePath, s.cachePath+".migrated")
+	if err := os.Rename(path, path+".migrated"); err != nil {
+		return err
 	}
+	log.Printf("Inline-кэш из %s перенесён в SQLite: %d записей", path, len(legacy))
 	return nil
 }
 
@@ -302,22 +190,16 @@ func (s *inlineService) takeCandidate(id string, userID int64) (inlineCandidate,
 	return candidate, true
 }
 
-func (s *inlineService) setActive(id string, active inlineActiveDownload) bool {
+// setActive registers a running download for its cancel button; the per-user download guard
+// already keeps one download per user.
+func (s *inlineService) setActive(id string, active inlineActiveDownload) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.activeUser[active.userID]; exists {
-		return false
-	}
 	s.active[id] = active
-	s.activeUser[active.userID] = id
-	return true
+	s.mu.Unlock()
 }
 
 func (s *inlineService) clearActive(id string) {
 	s.mu.Lock()
-	if active, ok := s.active[id]; ok && s.activeUser[active.userID] == id {
-		delete(s.activeUser, active.userID)
-	}
 	delete(s.active, id)
 	s.mu.Unlock()
 }
@@ -335,27 +217,86 @@ func (s *inlineService) cancelDownload(id string, userID int64, inlineMessageID 
 	return ok
 }
 
-func inlineCacheKey(url, id string) string {
-	if id != "" {
-		return "youtube:" + id + ":mp3:320"
+// inlineCacheKey is the cache key of the MP3 320 inline mode sends. It is the key private-chat
+// downloads use too, so a track downloaded either way is reused by both.
+func inlineCacheKey(rawURL, extractor, id string) string {
+	if key := sourceCacheKey(extractor, id, inlineFormat, inlineQuality); key != "" {
+		return key
 	}
-	sum := sha256.Sum256([]byte(url))
-	return "url:" + hex.EncodeToString(sum[:16]) + ":mp3:320"
+	return generalCacheKey(rawURL, inlineFormat, inlineQuality)
 }
 
-func inlineResultCaption(candidate inlineCandidate, lang string, loading bool) string {
-	lines := make([]string, 0, 4)
-	if loading {
-		lines = append(lines, tr("inline_loading", lang))
+// youtubeCandidate is the inline result of one YouTube video; its title comes from the caller.
+func youtubeCandidate(id string) inlineCandidate {
+	link := "https://www.youtube.com/watch?v=" + id
+	return inlineCandidate{
+		URL: link, CacheKey: inlineCacheKey(link, "youtube", id), SourceID: id, Extractor: "youtube",
+		Thumbnail: youtubeThumbnail(id),
 	}
-	lines = append(lines, "<b>"+html.EscapeString(shortenRunes(candidate.Title, maxTitleLength))+"</b>")
-	if candidate.Artist != "" {
-		lines = append(lines, "👤 "+html.EscapeString(shortenRunes(candidate.Artist, maxTitleLength)))
+}
+
+// youtubeThumbnail is the 320×180 JPEG preview of a video, which Telegram can show next to an
+// inline result without fetching the page.
+func youtubeThumbnail(id string) string {
+	if !youtubeIDPattern.MatchString(id) {
+		return ""
 	}
-	if candidate.Duration != "" {
-		lines = append(lines, "⏱ "+html.EscapeString(candidate.Duration))
+	return "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg"
+}
+
+// youtubeLinkTarget reads the video ID of a YouTube link. playlist is true for a playlist link
+// without a video; channels and other pages return neither.
+func youtubeLinkTarget(rawURL string) (id string, playlist bool) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", false
+	}
+	host := strings.TrimPrefix(strings.ToLower(strings.TrimSuffix(parsed.Hostname(), ".")), "www.")
+	segments := strings.FieldsFunc(parsed.Path, func(r rune) bool { return r == '/' })
+	switch {
+	case host == "youtu.be":
+		if len(segments) > 0 {
+			id = segments[0]
+		}
+	case host == "youtube.com" || strings.HasSuffix(host, ".youtube.com"):
+		switch {
+		case len(segments) == 1 && segments[0] == "watch":
+			id = parsed.Query().Get("v")
+		case len(segments) >= 2 && (segments[0] == "shorts" || segments[0] == "live" || segments[0] == "embed"):
+			id = segments[1]
+		}
+		if id == "" && parsed.Query().Get("list") != "" {
+			return "", true
+		}
+	default:
+		return "", false
+	}
+	if !youtubeIDPattern.MatchString(id) {
+		return "", false
+	}
+	return id, false
+}
+
+// inlineMessageText is the text of an inline message that is not audio yet: a status line over
+// the track it is about.
+func inlineMessageText(status string, candidate inlineCandidate) string {
+	lines := []string{status, "<b>" + html.EscapeString(shortenRunes(firstNonEmpty(candidate.Title, "Unknown"), maxTitleLength)) + "</b>"}
+	if details := inlineDetails(candidate); details != "" {
+		lines = append(lines, html.EscapeString(details))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// inlineDetails is the "artist · duration" line under a result title.
+func inlineDetails(candidate inlineCandidate) string {
+	parts := make([]string, 0, 2)
+	if candidate.Artist != "" {
+		parts = append(parts, shortenRunes(candidate.Artist, maxTitleLength))
+	}
+	if candidate.Duration != "" {
+		parts = append(parts, candidate.Duration)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func inlineDurationSeconds(value string) int {

@@ -162,15 +162,23 @@ func musicServiceName(rawURL, lang string) string {
 	return host
 }
 
-// expandMusicShortLink follows a Deezer share link (link.deezer.com/s/...) to the release it
-// names, so that playlists and albums are recognised; other links are returned unchanged.
+// expandMusicShortLink turns a share link into the release page it names, so that playlists and
+// albums are recognised and oEmbed can read the title. A Deezer share link (link.deezer.com/s/...)
+// is followed; a bare spotify.com link is moved to open.spotify.com, because spotify.com itself
+// redirects to the marketing site. Other links are returned unchanged.
 func expandMusicShortLink(ctx context.Context, rawURL string) string {
 	parsed, err := url.Parse(rawURL)
-	if err != nil || !strings.EqualFold(strings.TrimSuffix(parsed.Hostname(), "."), "link.deezer.com") {
+	if err != nil {
 		return rawURL
 	}
-	if final := resolveShortLink(ctx, rawURL); final != "" && !strings.Contains(final, "link.deezer.com") {
-		return final
+	switch strings.ToLower(strings.TrimSuffix(parsed.Hostname(), ".")) {
+	case "spotify.com", "www.spotify.com":
+		parsed.Host = "open.spotify.com"
+		return parsed.String()
+	case "link.deezer.com":
+		if final := resolveShortLink(ctx, rawURL); final != "" && !strings.Contains(final, "link.deezer.com") {
+			return final
+		}
 	}
 	return rawURL
 }

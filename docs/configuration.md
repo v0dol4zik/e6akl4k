@@ -20,7 +20,6 @@ chmod 600 .env
 | `LASTFM_API_KEY` | empty | last.fm API key that enables `/lastfm`. Without it the command is hidden from the menu. Create one at https://www.last.fm/api/account/create. |
 | `TELEGRAM_API_URL` | empty | Base URL of a local Telegram Bot API server, such as `http://telegram-bot-api:8081`. Empty means the cloud Bot API. See [Files over 50 MB](#files-over-50-mb). |
 | `YANDEX_PROXY` | empty | `socks5h://`, `socks5://`, `http://`, or `https://` proxy for Yandex Music site and API requests only. See [Yandex Music outside the CIS](#yandex-music-outside-the-cis). |
-| `INLINE_PLACEHOLDER_FILE_ID` | generated | Existing silent MP3 `file_id` for inline placeholders. |
 | `ADMIN_IDS` | empty | Comma-separated immutable owner IDs. Owners manage dynamic admins; all admins can use moderation, `/perf`, and redacted `/log`. |
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory. |
 | `DATABASE_PATH` | `$XDG_DATA_HOME/musicbot.db` | SQLite database path. Falls back under `DOWNLOAD_DIR` when `XDG_DATA_HOME` is unset. |
@@ -108,7 +107,7 @@ Every notice carries a button that mutes further notices; users can also switch 
 2. Add the bot as an administrator with permission to post messages.
 3. Set its numeric ID as `CACHE_CHAT_ID`.
 4. Run `/setinline` in `@BotFather` and configure a placeholder such as `Find music`.
-5. Run `/setinlinefeedback` and set it to `100`.
+5. Run `/setinlinefeedback` and set it to `100`. Without inline feedback, Telegram does not tell the bot which result was sent, so a track that is not cached yet stays a loading message.
 6. Restart the bot and type `@username song name` in any chat.
 
-On its first launch, the bot creates a one-second silent MP3 and uploads it to the cache channel. Set `INLINE_PLACEHOLDER_FILE_ID` only when you want to provide this `file_id` explicitly.
+Inline results show the track title, artist, duration, and YouTube thumbnail. A track already in the cache channel is sent as audio right away; any other track is sent as a loading message with a cancel button, and the bot turns that message into the audio once the MP3 320 is downloaded and cached. A pasted YouTube, SoundCloud, or other supported link becomes one result, and a music-service track link is searched on YouTube by its title. Playlists and albums are left to the bot chat, and the button above the results says why the list is empty.

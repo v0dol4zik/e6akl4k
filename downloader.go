@@ -19,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 const (
@@ -98,35 +99,65 @@ type mediaPreview struct {
 	Estimated320    int64
 	SourceID        string
 	Extractor       string
+	Thumbnail       string
 	// Tracks holds the "Artist - Title" export lines, one per playlist position.
 	Tracks []exportTrack
 }
 
-func (d *downloader) inlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
-	return d.searchLookup(ctx, query, 0)
-}
+// errNothingFound means a search returned no results: the query's outcome, not a bot failure.
+var errNothingFound = errors.New("ничего не найдено")
 
-// searchLookup resolves a pasted link or searches YouTube through yt-dlp and ranks the results.
+// searchRelaxRetries caps how many trailing words a query that finds nothing may lose.
+const searchRelaxRetries = 2
+
+// searchLookup searches YouTube through yt-dlp and ranks the results. A query that finds nothing
+// is retried without its last word, which is often a typo or a tag no video title has; the results
+// are ranked against the query that found them.
 func (d *downloader) searchLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, error) {
-	if candidates, handled, err := d.directURLCandidates(ctx, query); handled {
-		return candidates, err
+	candidates, err := d.youtubeInlineLookup(ctx, query)
+	for retry := 0; errors.Is(err, errNothingFound) && retry < searchRelaxRetries; retry++ {
+		shorter, ok := dropLastSearchWord(query)
+		if !ok {
+			break
+		}
+		query = shorter
+		candidates, err = d.youtubeInlineLookup(ctx, query)
 	}
-	youtube, err := d.youtubeInlineLookup(ctx, query)
 	if err != nil {
 		return nil, err
 	}
-	return rankCandidates(query, expectedDuration, youtube), nil
+	return rankCandidates(query, expectedDuration, candidates), nil
 }
 
-// directURLCandidates resolves a pasted link into a single candidate; handled is false for free-text queries.
-func (d *downloader) directURLCandidates(ctx context.Context, query string) ([]inlineCandidate, bool, error) {
-	directURL := detectURL(query)
-	if directURL == "" {
-		return nil, false, nil
+// dropLastSearchWord removes the last word of a query together with the dashes and other
+// punctuation-only fields around it. ok is false when fewer than two words would remain.
+func dropLastSearchWord(query string) (string, bool) {
+	fields := strings.Fields(query)
+	trimPunctuation := func() {
+		for len(fields) > 0 && !hasLetterOrDigit(fields[len(fields)-1]) {
+			fields = fields[:len(fields)-1]
+		}
 	}
-	return []inlineCandidate{{
-		URL: directURL, CacheKey: inlineCacheKey(directURL, ""), Title: directURL,
-	}}, true, nil
+	trimPunctuation()
+	if len(fields) == 0 {
+		return "", false
+	}
+	fields = fields[:len(fields)-1]
+	trimPunctuation()
+	words := 0
+	for _, field := range fields {
+		if hasLetterOrDigit(field) {
+			words++
+		}
+	}
+	if words < 2 {
+		return "", false
+	}
+	return strings.Join(fields, " "), true
+}
+
+func hasLetterOrDigit(text string) bool {
+	return strings.IndexFunc(text, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) >= 0
 }
 
 func (d *downloader) youtubeInlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
@@ -136,7 +167,7 @@ func (d *downloader) youtubeInlineLookup(ctx context.Context, query string) ([]i
 		return nil, fmt.Errorf("%s", humanizeError(firstNonEmpty(stderr, errorText(err))))
 	}
 	if len(bytes.TrimSpace(stdout)) == 0 || bytes.Equal(bytes.TrimSpace(stdout), []byte("null")) {
-		return nil, errors.New("ничего не найдено")
+		return nil, errNothingFound
 	}
 	var info mediaInfo
 	if err := json.Unmarshal(stdout, &info); err != nil {
@@ -153,15 +184,15 @@ func (d *downloader) youtubeInlineLookup(ctx context.Context, query string) ([]i
 		}
 		title, artist, duration := entry.resultMetadata()
 		candidates = append(candidates, inlineCandidate{
-			URL: url, CacheKey: inlineCacheKey(url, entry.ID), Title: title, Artist: artist,
-			Duration: duration, SourceID: entry.ID, Extractor: "youtube",
+			URL: url, CacheKey: inlineCacheKey(url, "youtube", entry.ID), Title: title, Artist: artist,
+			Duration: duration, SourceID: entry.ID, Extractor: "youtube", Thumbnail: youtubeThumbnail(entry.ID),
 		})
 		if len(candidates) == inlineResultLimit {
 			break
 		}
 	}
 	if len(candidates) == 0 {
-		return nil, errors.New("ничего не найдено")
+		return nil, errNothingFound
 	}
 	return candidates, nil
 }
@@ -299,6 +330,7 @@ func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, err
 	preview := mediaPreview{URL: url}
 	preview.SourceID = info.ID
 	preview.Extractor = firstNonEmpty(info.Extractor, info.ExtractorKey)
+	preview.Thumbnail = info.Thumbnail
 	preview.Title, preview.Artist, preview.Duration = info.resultMetadata()
 	preview.DurationSeconds = int(info.Duration)
 	preview.IsPlaylist = info.Type == "playlist" || len(info.Entries) > 0

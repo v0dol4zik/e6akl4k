@@ -281,17 +281,57 @@ var texts = map[string]map[string]string{
 		"ru": "❌ загрузка отменена.",
 		"en": "❌ download cancelled.",
 	},
-	"inline_already_active": {
-		"ru": "⚠️ у тебя уже есть активная inline-загрузка.",
-		"en": "⚠️ you already have an active inline download.",
-	},
 	"inline_error": {
-		"ru": "❌ <b>ошибка inline-загрузки:</b> {error}",
-		"en": "❌ <b>inline download error:</b> {error}",
+		"ru": "❌ <b>не удалось скачать:</b> {error}",
+		"en": "❌ <b>couldn't download:</b> {error}",
 	},
-	"inline_too_big": {
-		"ru": "файл слишком большой ({size})",
-		"en": "the file is too large ({size})",
+	"inline_expired": {
+		"ru": "⚠️ результат устарел, выбери трек ещё раз.",
+		"en": "⚠️ this result has expired, pick the track again.",
+	},
+	"inline_interrupted": {
+		"ru": "⚠️ бот перезапускается, выбери трек ещё раз через минуту.",
+		"en": "⚠️ the bot is restarting, pick the track again in a minute.",
+	},
+	"inline_too_large": {
+		"ru": "⚠️ файл больше лимита Telegram ({limit}). открой бота и выбери формат полегче.",
+		"en": "⚠️ the file exceeds the Telegram limit ({limit}). open the bot and pick a lighter format.",
+	},
+	"inline_hint_empty": {
+		"ru": "🔎 введи название трека или ссылку",
+		"en": "🔎 type a track name or paste a link",
+	},
+	"inline_hint_short": {
+		"ru": "✏️ введи хотя бы три символа",
+		"en": "✏️ type at least three characters",
+	},
+	"inline_hint_nothing": {
+		"ru": "🤷 ничего не найдено",
+		"en": "🤷 nothing found",
+	},
+	"inline_hint_limited": {
+		"ru": "⏳ слишком много запросов, подожди немного",
+		"en": "⏳ too many requests, wait a little",
+	},
+	"inline_hint_busy": {
+		"ru": "⚠️ бот занят, попробуй чуть позже",
+		"en": "⚠️ the bot is busy, try again shortly",
+	},
+	"inline_hint_error": {
+		"ru": "❌ поиск не удался, попробуй ещё раз",
+		"en": "❌ the search failed, try again",
+	},
+	"inline_hint_playlist": {
+		"ru": "📀 плейлисты и альбомы — в чате с ботом",
+		"en": "📀 playlists and albums work in the bot chat",
+	},
+	"inline_hint_blocked": {
+		"ru": "⚠️ этот сервис сейчас недоступен",
+		"en": "⚠️ this service is unavailable right now",
+	},
+	"inline_hint_link": {
+		"ru": "⚠️ ссылка не ведёт на трек",
+		"en": "⚠️ this link doesn't point to a track",
 	},
 	"inline_switch_pm": {
 		"ru": "ℹ️ открыть бота",

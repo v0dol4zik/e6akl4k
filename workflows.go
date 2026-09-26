@@ -45,11 +45,7 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 		return
 	}
 	if requiresMusicResolution(rawURL) {
-		query := strings.TrimSpace(strings.Join([]string{preview.Artist, preview.Title}, " "))
-		if query == "" {
-			query = preview.Title
-		}
-		a.presentSearchResults(message.Chat.ID, message.From.ID, query, lang, status, true, preview.DurationSeconds)
+		a.presentSearchResults(message.Chat.ID, message.From.ID, musicSearchQuery(preview), lang, status, true, preview.DurationSeconds)
 		return
 	}
 	key, err := a.storeURL(pendingURL{URL: rawURL, ChatID: message.Chat.ID, UserID: message.From.ID, Preview: preview})
@@ -149,6 +145,11 @@ func (a *app) presentSearchResults(chatID, userID int64, query, lang string, sta
 	ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
 	defer cancel()
 	candidates, err := a.runRankedLookup(ctx, query, expectedDuration)
+	if errors.Is(err, errNothingFound) {
+		// A query with no results is an answer, not a failure to report.
+		a.replaceStatusText(chatID, status, tr("nothing_found", lang))
+		return
+	}
 	if err != nil {
 		a.handleQueueError(chatID, lang, err, errorReport{Stage: "search", UserID: userID, Query: query})
 		return
@@ -264,6 +265,12 @@ func (a *app) handleRangeChoice(callback *tgbotapi.CallbackQuery) {
 	}
 	text := previewText(pending.Preview, lang) + "\n" + tr("selected_range", lang, "start", strconv.Itoa(start), "end", strconv.Itoa(end))
 	a.safeEdit(callback, text, "HTML", formatKeyboard(parts[2], lang))
+}
+
+// musicSearchQuery is the YouTube query for a music-service track: "Artist Title", or the title
+// alone when the service names no artist.
+func musicSearchQuery(preview mediaPreview) string {
+	return strings.TrimSpace(preview.Artist + " " + preview.Title)
 }
 
 func requiresMusicResolution(raw string) bool {

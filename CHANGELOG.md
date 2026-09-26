@@ -49,6 +49,12 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Batch downloads now release their download slot before Telegram delivery, so cached re-sends, archive waits and uploads no longer block other users.
 - Clearing `/history` removes only the entries the list can show; failed and legacy rows stay for administrator statistics.
 - Delete the upload-progress status after successful delivery instead of leaving a stale `100%` message behind.
+- Inline results show real track titles, artists, durations, and YouTube thumbnails instead of the "Downloading…" placeholder audio. A track that is not cached yet is sent as a loading text message with a cancel button, which the bot edits into the audio once it is cached; cached tracks are still sent as audio right away. The silent placeholder MP3 and `INLINE_PLACEHOLDER_FILE_ID` are gone.
+- Inline mode no longer loses messages or overwrites a delivered track: failures, cancellations, the Telegram size limit, a bot restart, and expired results are written into the sent message instead of an edit that Telegram rejected, and a cancel tapped as the upload finishes can no longer replace the audio with "cancelled".
+- Inline queries no longer wait behind the same user's running download or earlier keystrokes, so typing a query cancels the previous search instead of queueing it. Empty, short, rate-limited, and failed queries, playlists, blocked services, and links to a service home page get an explanatory button above the results instead of an empty list.
+- Pasted links in inline mode are read like in a private chat: a YouTube video is named through oEmbed without a slow `yt-dlp` probe, other supported links are probed, and Spotify, Apple Music, Deezer, Tidal, and Yandex Music track links are searched on YouTube by their title instead of being offered as the raw URL.
+- A search that finds nothing is retried without its last word, up to twice, so a trailing typo such as "subtronics — sploinky dub vshj" still finds the track. A search that still finds nothing answers "nothing found" in place of the "searching" status and is no longer posted to the error chat.
+- Spotify links without the `open.` prefix (`spotify.com/track/...`) are moved to `open.spotify.com` before reading their title. Music-service track links skip the `yt-dlp` probe, which has no extractor for these services and failed with TLS handshake timeouts while downloading their pages.
 
 ## [v2026.08.14] - 2026-08-14
 

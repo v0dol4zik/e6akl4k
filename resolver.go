@@ -23,17 +23,16 @@ var (
 	errGenericLinkPage = errors.New("ссылка открыла общую страницу сервиса")
 )
 
+// inspectURL reads what a link points to. A music-service track is named from the service's own
+// metadata: yt-dlp has no extractor for these services, so its generic probe only downloads the
+// page, slowly or not at all (Yandex blocks the server's country).
 func (a *app) inspectURL(ctx context.Context, rawURL string) (mediaPreview, error) {
-	preview, probeErr := a.downloader.preview(ctx, rawURL)
-	if probeErr == nil || !requiresMusicResolution(rawURL) {
-		return preview, probeErr
+	if !requiresMusicResolution(rawURL) {
+		return a.downloader.preview(ctx, rawURL)
 	}
 	title, artist, err := resolveLinkMetadata(ctx, rawURL)
-	if errors.Is(err, errMusicServiceBlocked) || errors.Is(err, errGenericLinkPage) {
-		return mediaPreview{}, err
-	}
 	if err != nil {
-		return mediaPreview{}, probeErr
+		return mediaPreview{}, err
 	}
 	return mediaPreview{URL: rawURL, Title: title, Artist: artist, TrackCount: 1}, nil
 }

@@ -272,6 +272,8 @@ type telegramCall struct {
 	text   string
 	markup string
 	audio  string
+	// form holds every parameter of the call, such as the results of answerInlineQuery.
+	form url.Values
 }
 
 type batchHarness struct {
@@ -325,7 +327,8 @@ func (h *batchHarness) pendingKey(t *testing.T) string {
 
 // newBatchHarness wires a fake Telegram and a fake yt-dlp where videos 11 and 12 download
 // successfully, 13 fails while downloading, 77 is too long for FLAC under the 50 MB limit, 99 fails
-// to probe, and playlist PL3 holds 11 and 12.
+// to probe, and playlist PL3 holds 11 and 12. A search finds video 11 unless its query contains
+// "nothing".
 func newBatchHarness(t *testing.T) *batchHarness {
 	t.Helper()
 	h := &batchHarness{}
@@ -337,15 +340,19 @@ func newBatchHarness(t *testing.T) *batchHarness {
 		case "getMe":
 			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
 			return
-		case "sendMessage", "editMessageText", "sendAudio", "sendDocument":
+		case "sendMessage", "editMessageText", "sendAudio", "sendDocument", "answerInlineQuery", "editMessageMedia":
 			h.mu.Lock()
-			h.calls = append(h.calls, telegramCall{method: method, text: r.FormValue("text"), markup: r.FormValue("reply_markup"), audio: r.FormValue("audio")})
+			h.calls = append(h.calls, telegramCall{method: method, text: r.FormValue("text"), markup: r.FormValue("reply_markup"), audio: r.FormValue("audio"), form: r.Form})
 			h.mu.Unlock()
 			if method == "sendAudio" {
 				if h.onSendAudio != nil {
 					h.onSendAudio()
 				}
 				fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"audio":{"file_id":"cached-file","file_unique_id":"u","duration":1}}}`)
+				return
+			}
+			if method == "answerInlineQuery" || r.FormValue("inline_message_id") != "" {
+				fmt.Fprint(w, `{"ok":true,"result":true}`)
 				return
 			}
 			fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":10,"type":"private"},"text":"status"}}`)
@@ -366,6 +373,8 @@ case "$url" in
   *youtu.be/99) printf 'ERROR: [youtube] %s: Video unavailable\n' "$url" >&2; exit 1 ;;
   *list=PL3) id=PL3 ;;
   *youtu.be/*) id=${url##*/}; title="Track $id"; duration=120 ;;
+  ytsearch*nothing*) printf '%s' '{"entries":[]}'; exit 0 ;;
+  ytsearch*) printf '%s' '{"entries":[{"id":"11","title":"First","uploader":"Artist","duration":180,"url":"11"}]}'; exit 0 ;;
   *) printf 'ERROR: [youtube] %s: Video unavailable\n' "$url" >&2; exit 1 ;;
 esac
 case " $* " in

@@ -121,14 +121,10 @@ func main() {
 	_ = startHTTPServer(ctx, application, cfg.HTTPAddr)
 	application.startDiskMonitor(ctx)
 	if cfg.CacheChatID != 0 {
-		inline, inlineErr := newInlineService(ctx, bot, dl, cfg.CacheChatID)
-		if inlineErr != nil {
-			log.Fatalf("Не удалось запустить inline-режим: %v", inlineErr)
+		if err := migrateLegacyInlineCache(ctx, state, inlineCachePath(dl.downloadDir), cfg.CacheTTL); err != nil {
+			log.Printf("Мигрировать inline-кэш: %v", err)
 		}
-		if inlineErr = inline.attachStore(state, cfg.CacheTTL); inlineErr != nil {
-			log.Fatalf("Мигрировать inline-кэш: %v", inlineErr)
-		}
-		application.inline = inline
+		application.inline = newInlineService(state, cfg.CacheTTL)
 		log.Printf("Inline-режим включён, cache-чат: %d", cfg.CacheChatID)
 	} else {
 		log.Print("CACHE_CHAT_ID/INLINE_CACHE_CHAT_ID не задан: inline-режим отключён")

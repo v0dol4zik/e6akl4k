@@ -49,8 +49,8 @@ Heavy downloads, quick lookups, archive creation, and Telegram update handling h
 | `scheduler.go` | Queues, rate limits, and request deduplication. |
 | `app_state.go` | One-time actions and active jobs. |
 | `bot_ui.go` | Keyboards, URL validation, and formatting. |
-| `inline.go` | Inline state and placeholder audio. |
-| `inline_handlers.go` | Inline search, download, and audio replacement. |
+| `inline.go` | Inline state, result text, and YouTube link parsing. |
+| `inline_handlers.go` | Inline answers, downloads, and editing the sent message into audio. |
 | `downloader.go` | `yt-dlp`, metadata, playlist ranges, and output files. |
 | `archive.go` | ZIP creation and splitting. |
 | `health.go` | `/healthz`, `/metrics`, and disk monitoring. |

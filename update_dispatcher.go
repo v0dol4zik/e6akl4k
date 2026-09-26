@@ -115,13 +115,16 @@ func updateOwnerKey(update tgbotapi.Update) int64 {
 	if update.CallbackQuery != nil && (strings.HasPrefix(update.CallbackQuery.Data, "cancel_download:") || strings.HasPrefix(update.CallbackQuery.Data, "inline_cancel:")) {
 		return -int64(update.UpdateID) - 1
 	}
+	if update.InlineQuery != nil {
+		// Inline queries arrive on every keystroke and must not wait for one another or for the
+		// user's download: a newer query cancels the older one through inlineService.beginQuery.
+		return -int64(update.UpdateID) - 1
+	}
 	switch {
 	case update.Message != nil && update.Message.From != nil:
 		return update.Message.From.ID
 	case update.CallbackQuery != nil && update.CallbackQuery.From != nil:
 		return update.CallbackQuery.From.ID
-	case update.InlineQuery != nil && update.InlineQuery.From != nil:
-		return update.InlineQuery.From.ID
 	case update.ChosenInlineResult != nil && update.ChosenInlineResult.From != nil:
 		return update.ChosenInlineResult.From.ID
 	default:

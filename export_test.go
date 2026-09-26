@@ -866,6 +866,34 @@ func TestDeezerShortLinkIsExpandedBeforeClassifying(t *testing.T) {
 	}
 }
 
+func TestBareSpotifyLinkMovesToOpenSpotify(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://spotify.com/track/42xMecWO2yqJzGxiAbHcKN?si=abc":      "https://open.spotify.com/track/42xMecWO2yqJzGxiAbHcKN?si=abc",
+		"https://www.spotify.com/album/1":                              "https://open.spotify.com/album/1",
+		"https://open.spotify.com/track/42xMecWO2yqJzGxiAbHcKN?si=abc": "https://open.spotify.com/track/42xMecWO2yqJzGxiAbHcKN?si=abc",
+	} {
+		if got := expandMusicShortLink(context.Background(), raw); got != want {
+			t.Errorf("expandMusicShortLink(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestMusicLinkIsInspectedWithoutYTDLP(t *testing.T) {
+	link := "https://open.spotify.com/track/42xMecWO2yqJzGxiAbHcKN"
+	api := &exportAPIClient{responses: map[string]string{
+		"open.spotify.com/oembed?url=" + url.QueryEscape(link): `{"title":"Sploinky Dub","author_name":"Subtronics"}`,
+	}}
+	api.install(t)
+	a := &app{downloader: &downloader{bin: "/does/not/exist"}}
+	preview, err := a.inspectURL(context.Background(), link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Title != "Sploinky Dub" || preview.Artist != "Subtronics" || musicSearchQuery(preview) != "Subtronics Sploinky Dub" {
+		t.Fatalf("preview = %+v", preview)
+	}
+}
+
 func TestYandexMusicHostSelectsOnlyGeoBlockedHosts(t *testing.T) {
 	for host, want := range map[string]bool{
 		"api.music.yandex.net": true,

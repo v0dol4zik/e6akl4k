@@ -915,18 +915,6 @@ func (a *app) runDownload(ctx context.Context, url, format, quality string, prog
 	return a.runDownloadRange(ctx, url, format, quality, 0, 0, progress)
 }
 
-func (a *app) runInlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
-	_, release, err := a.lookups.acquire(ctx)
-	if err != nil {
-		if errors.Is(err, errQueueFull) && a.store != nil {
-			a.store.increment(a.ctx, "queue_rejected")
-		}
-		return nil, err
-	}
-	defer release()
-	return a.downloader.searchLookup(ctx, query, 0)
-}
-
 // runRankedLookup performs a YouTube text search and ranks the candidates.
 func (a *app) runRankedLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, error) {
 	_, release, err := a.lookups.acquire(ctx)

@@ -264,17 +264,6 @@ printf '%s' '{"entries":[{"id":"youtube-id","title":"Track","uploader":"Artist",
 	}
 }
 
-func TestSearchLookupKeepsDirectLinksWithoutSearching(t *testing.T) {
-	d := &downloader{bin: "/does/not/exist"}
-	candidates, err := d.searchLookup(context.Background(), "https://youtu.be/video-id", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 1 || candidates[0].URL != "https://youtu.be/video-id" {
-		t.Fatalf("candidates=%#v", candidates)
-	}
-}
-
 func TestCookieForbiddenRetryPredicate(t *testing.T) {
 	ctx := context.Background()
 	cancelled, cancel := context.WithCancel(ctx)
