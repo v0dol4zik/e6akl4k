@@ -178,6 +178,9 @@ func (a *app) statusComponents(ctx context.Context, m *statusMonitor, now time.T
 	if a.cfg.YandexProxy != nil {
 		components = append(components, a.relayStatus(ctx, m, lang))
 	}
+	if a.cfg.YTDLPPOTProviderURL != "" {
+		components = append(components, a.potStatus(ctx, m, lang))
+	}
 	components = append(components, a.ytdlpStatus(ctx, m, now, lang), a.reportsStatus(ctx, m, now, lang))
 	return components
 }
@@ -268,10 +271,28 @@ func (a *app) cookieStatusComponent(ctx context.Context, now time.Time, lang str
 }
 
 func (a *app) relayStatus(ctx context.Context, m *statusMonitor, lang string) statusComponent {
-	component := statusComponent{Key: "relay", Label: tr("status_relay", lang), Detail: tr("status_works", lang)}
+	return dialStatus(ctx, m, statusComponent{Key: "relay", Label: tr("status_relay", lang)}, proxyDialAddress(a.cfg.YandexProxy), lang)
+}
+
+// potStatus checks that the PO token server accepts connections: without it YouTube answers most
+// downloads with 403.
+func (a *app) potStatus(ctx context.Context, m *statusMonitor, lang string) statusComponent {
+	component := statusComponent{Key: "pot", Label: tr("status_pot", lang)}
+	provider, err := url.Parse(a.cfg.YTDLPPOTProviderURL)
+	if err != nil {
+		component.Level = statusFail
+		component.Detail = tr("status_unknown", lang)
+		return component
+	}
+	return dialStatus(ctx, m, component, proxyDialAddress(provider), lang)
+}
+
+// dialStatus fills component from a TCP connection attempt to address.
+func dialStatus(ctx context.Context, m *statusMonitor, component statusComponent, address, lang string) statusComponent {
+	component.Detail = tr("status_works", lang)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	conn, err := m.dial(ctx, "tcp", proxyDialAddress(a.cfg.YandexProxy))
+	conn, err := m.dial(ctx, "tcp", address)
 	if err != nil {
 		// The proxy address may carry credentials, so only the kind of failure is shown.
 		component.Level = statusFail

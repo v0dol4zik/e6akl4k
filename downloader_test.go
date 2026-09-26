@@ -135,13 +135,19 @@ func TestAudioFormatArgs(t *testing.T) {
 func TestYTDLPNetworkArgsAreConfigurable(t *testing.T) {
 	d := downloader{}
 	defaults := d.commonArgs()
-	if !containsArgPair(defaults, "--concurrent-fragments", "4") || containsArg(defaults, "--sleep-requests") {
+	if !containsArgPair(defaults, "--concurrent-fragments", "4") || containsArg(defaults, "--sleep-requests") || containsArg(defaults, "--plugin-dirs") ||
+		strings.Contains(strings.Join(defaults, " "), "youtubepot") {
 		t.Fatalf("default args=%q", defaults)
 	}
 	d.ytdlpFragments = 8
 	d.ytdlpSleepRequests = 2
+	d.potProviderURL = "http://bgutil-pot:4416"
+	d.pluginDir = ytdlpPluginDir
 	configured := d.commonArgs()
-	if !containsArgPair(configured, "--concurrent-fragments", "8") || !containsArgPair(configured, "--sleep-requests", "2") {
+	if !containsArgPair(configured, "--concurrent-fragments", "8") || !containsArgPair(configured, "--sleep-requests", "2") ||
+		!containsArgPair(configured, "--plugin-dirs", "/opt/yt-dlp-plugins") ||
+		!containsArgPair(configured, "--extractor-args", "youtubepot-bgutilhttp:base_url=http://bgutil-pot:4416") ||
+		!containsArgPair(configured, "--extractor-args", "vk:force_mobile=1") {
 		t.Fatalf("configured args=%q", configured)
 	}
 }

@@ -45,6 +45,9 @@ type config struct {
 	// anonymous and the signed-in download; "default" keeps yt-dlp's choice.
 	YTDLPYouTubeClients       string
 	YTDLPYouTubeCookieClients string
+	// YTDLPPOTProviderURL is the bgutil PO token server for YouTube, such as
+	// http://bgutil-pot:4416; "" leaves yt-dlp without a PO token provider.
+	YTDLPPOTProviderURL string
 
 	// StatusMessage keeps a pinned bot status message in the error chat.
 	StatusMessage       bool
@@ -76,6 +79,9 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	if cfg.YTDLPYouTubeCookieClients, err = strictEnvClients("YTDLP_YOUTUBE_COOKIE_CLIENTS", "mweb"); err != nil {
+		return config{}, err
+	}
+	if cfg.YTDLPPOTProviderURL, err = envServerURL("YTDLP_POT_PROVIDER_URL", "сервера PO-токенов вида http://bgutil-pot:4416"); err != nil {
 		return config{}, err
 	}
 	if cfg.LookupWorkers, err = strictEnvInt("LOOKUP_WORKERS", 2, 1, 32); err != nil {
@@ -192,16 +198,23 @@ func envProxyURL(key string) (*url.URL, error) {
 // envTelegramAPIURL reads the base address of a local Telegram Bot API server, such as
 // http://telegram-bot-api:8081, without a trailing slash; "" means the cloud Bot API.
 func envTelegramAPIURL(key string) (string, error) {
+	return envServerURL(key, "Bot API сервера вида http://telegram-bot-api:8081")
+}
+
+// envServerURL reads the base address of a sidecar server: http or https, a host and an optional
+// port, without credentials, path, or query, and without a trailing slash; "" means none. Commas
+// and semicolons are refused too, because yt-dlp splits extractor arguments on them.
+func envServerURL(key, what string) (string, error) {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
 		return "", nil
 	}
 	parsed, err := url.Parse(value)
 	if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" && parsed.User == nil &&
-		strings.Trim(parsed.Path, "/") == "" && parsed.RawQuery == "" && parsed.Fragment == "" && !strings.ContainsAny(value, "%?#") {
+		strings.Trim(parsed.Path, "/") == "" && parsed.RawQuery == "" && parsed.Fragment == "" && !strings.ContainsAny(value, "%?#,;") {
 		return parsed.Scheme + "://" + parsed.Host, nil
 	}
-	return "", fmt.Errorf("%s должен быть адресом Bot API сервера вида http://telegram-bot-api:8081", key)
+	return "", fmt.Errorf("%s должен быть адресом %s", key, what)
 }
 
 func strictEnvInt(key string, fallback, min, max int) (int, error) {

@@ -32,6 +32,9 @@ const (
 	// the real file size is checked again before upload. Constant-bitrate MP3 is estimated exactly.
 	sizePrecheckSlack = 1.25
 	downloadTimeout   = 2 * time.Hour
+	// ytdlpPluginDir holds the bgutil PO token plugin in the Docker image. It is not one of
+	// yt-dlp's default plugin folders, so the plugin loads only with a PO token provider set.
+	ytdlpPluginDir = "/opt/yt-dlp-plugins"
 )
 
 var mbPerMinute = map[string]float64{
@@ -235,6 +238,10 @@ type downloader struct {
 	// signed-in YouTube download; empty keeps yt-dlp's defaults.
 	youtubeClients       string
 	youtubeCookieClients string
+	// potProviderURL is the bgutil PO token server that yt-dlp asks for YouTube PO tokens, and
+	// pluginDir the folder with its yt-dlp plugin; both are empty without a provider.
+	potProviderURL string
+	pluginDir      string
 	// youtubeDefaultFirst remembers that yt-dlp's default clients, not youtubeClients, got the
 	// last anonymous YouTube download through, so the next one starts with them.
 	youtubeDefaultFirst atomic.Bool
@@ -841,6 +848,12 @@ func (d *downloader) commonArgs() []string {
 	}
 	if d.ytdlpSleepRequests > 0 {
 		args = append(args, "--sleep-requests", strconv.Itoa(d.ytdlpSleepRequests))
+	}
+	if d.pluginDir != "" {
+		args = append(args, "--plugin-dirs", d.pluginDir)
+	}
+	if d.potProviderURL != "" {
+		args = append(args, "--extractor-args", "youtubepot-bgutilhttp:base_url="+d.potProviderURL)
 	}
 	return args
 }

@@ -11,6 +11,11 @@ FROM debian:bookworm-slim
 ARG TARGETARCH
 ARG YTDLP_VERSION=2026.08.19
 ARG DENO_VERSION=2.9.5
+# The yt-dlp plugin for the bgutil PO token server; its version must match the bgutil-pot image
+# in docker-compose.yml. It sits outside yt-dlp's default plugin folders and loads only with
+# YTDLP_POT_PROVIDER_URL set.
+ARG BGUTIL_PLUGIN_VERSION=2.0.0
+ARG BGUTIL_PLUGIN_SHA256=bce874dfa25896c2798e0f4f8147b7b22e785479eb1e459ab232bf2506c95016
 # apt keeps one mirror address per run, and a stalled CDN node can hang it past its own timeouts,
 # so every networked apt-get call gets a hard limit and a fresh run on retry; release downloads
 # get the same connect, stall and retry limits as the package fetches.
@@ -50,10 +55,14 @@ RUN fetch() { \
     && mv "/tmp/${DENO_ASSET}" /tmp/deno.zip \
     && unzip -q /tmp/deno.zip -d /usr/local/bin \
     && chmod 0755 /usr/local/bin/yt-dlp /usr/local/bin/deno \
+    && fetch "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${BGUTIL_PLUGIN_VERSION}/bgutil-ytdlp-pot-provider.zip" -o /tmp/bgutil-ytdlp-pot-provider.zip \
+    && echo "${BGUTIL_PLUGIN_SHA256}  /tmp/bgutil-ytdlp-pot-provider.zip" | sha256sum -c - \
+    && unzip -tq /tmp/bgutil-ytdlp-pot-provider.zip \
+    && install -D -m 0644 /tmp/bgutil-ytdlp-pot-provider.zip /opt/yt-dlp-plugins/bgutil-ytdlp-pot-provider.zip \
     && yt-dlp --version \
     && python3 -c "import mutagen" \
     && deno --version \
-    && rm -f /tmp/deno.zip /tmp/yt-dlp /tmp/yt-dlp.sha256 "/tmp/${DENO_ASSET}.sha256sum" \
+    && rm -f /tmp/deno.zip /tmp/yt-dlp /tmp/yt-dlp.sha256 "/tmp/${DENO_ASSET}.sha256sum" /tmp/bgutil-ytdlp-pot-provider.zip \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin musicbot \
     && mkdir -p /app/downloads /app/cache \

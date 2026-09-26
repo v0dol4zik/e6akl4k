@@ -92,7 +92,7 @@ sudo docker exec e6akl4k-music_bot-1 sh -c 'yt-dlp --ignore-config -f bestaudio 
 
 If only the first command fails with `403` while the Watch Later check passes, the cookies are fine and the bot already works around it; fresh cookies help only when the login check fails.
 
-When YouTube changes which clients work, compare them with the same command and `--extractor-args youtube:player_client=<client>` (with and without `--cookies`), then set the clients that download fully in `.env` without rebuilding the image. `--test` is not enough: it fetches only the first 10 KiB, which often succeeds where the full download gets `403`. A PO token provider plugin, such as bgutil, is the longer-term fix, but it runs third-party code next to the bot, so it is not installed by default.
+When YouTube changes which clients work, compare them with the same command and `--extractor-args youtube:player_client=<client>` (with and without `--cookies`), then set the clients that download fully in `.env` without rebuilding the image. `--test` is not enough: it fetches only the first 10 KiB, which often succeeds where the full download gets `403`. The longer-term fix is a PO token provider: the optional `bgutil-pot` service runs third-party code next to the bot, so it is off by default; see [YouTube PO tokens](configuration.md#youtube-po-tokens). With `YTDLP_POT_PROVIDER_URL` set, add `--plugin-dirs /opt/yt-dlp-plugins --extractor-args youtubepot-bgutilhttp:base_url=http://bgutil-pot:4416 -v` to the commands above; the verbose log then lists `bgutil:http` among the PO token providers.
 
 ## Operations
 

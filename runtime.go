@@ -78,6 +78,15 @@ func main() {
 	dl.ytdlpFragments = cfg.YTDLPFragments
 	dl.youtubeClients = cfg.YTDLPYouTubeClients
 	dl.youtubeCookieClients = cfg.YTDLPYouTubeCookieClients
+	if dl.potProviderURL = cfg.YTDLPPOTProviderURL; dl.potProviderURL != "" {
+		// yt-dlp refuses to start with a missing --plugin-dirs folder; without the image's folder
+		// the plugin must sit in one of yt-dlp's default plugin folders.
+		if info, err := os.Stat(ytdlpPluginDir); err == nil && info.IsDir() {
+			dl.pluginDir = ytdlpPluginDir
+		} else {
+			log.Printf("Папки плагинов yt-dlp %s нет: плагин bgutil ищется в папках yt-dlp по умолчанию", ytdlpPluginDir)
+		}
+	}
 	state, err := openStore(cfg.DatabasePath)
 	if err != nil {
 		log.Fatalf("Не удалось открыть SQLite: %v", err)

@@ -339,6 +339,38 @@ func TestRelayStatusHidesAddress(t *testing.T) {
 	}
 }
 
+func TestPOTStatusDialsProvider(t *testing.T) {
+	application, _, monitor, _ := newStatusTestApp(t, &statusTestTelegram{})
+	if components := application.statusComponents(context.Background(), monitor, time.Now()); hasStatusComponent(components, "pot") {
+		t.Fatal("the PO token line must stay hidden without a provider")
+	}
+	application.cfg.YTDLPPOTProviderURL = "http://bgutil-pot:4416"
+	var dialed string
+	monitor.dial = func(_ context.Context, _, address string) (net.Conn, error) {
+		dialed = address
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	}
+	component := application.potStatus(context.Background(), monitor, "en")
+	if dialed != "bgutil-pot:4416" || component.Level != statusFail || component.Label != "YouTube PO tokens" || !strings.Contains(component.Detail, "connection refused") {
+		t.Fatalf("dialed %q, component=%#v", dialed, component)
+	}
+	client, server := net.Pipe()
+	defer server.Close()
+	monitor.dial = func(context.Context, string, string) (net.Conn, error) { return client, nil }
+	if component := application.potStatus(context.Background(), monitor, "en"); component.Level != statusOK {
+		t.Fatalf("reachable provider=%#v", component)
+	}
+}
+
+func hasStatusComponent(components []statusComponent, key string) bool {
+	for _, component := range components {
+		if component.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProxyDialAddressDefaults(t *testing.T) {
 	for raw, want := range map[string]string{
 		"socks5://relay":      "relay:1080",

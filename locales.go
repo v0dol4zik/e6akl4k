@@ -514,6 +514,7 @@ var texts = map[string]map[string]string{
 	"status_disk":                      {"ru": "диск", "en": "disk"},
 	"status_cookies":                   {"ru": "cookies YouTube", "en": "YouTube cookies"},
 	"status_relay":                     {"ru": "relay для Yandex", "en": "Yandex relay"},
+	"status_pot":                       {"ru": "токены YouTube (PO)", "en": "YouTube PO tokens"},
 	"status_reports":                   {"ru": "отчёты об ошибках", "en": "error reports"},
 	"status_works":                     {"ru": "работает", "en": "works"},
 	"status_unknown":                   {"ru": "не удалось определить", "en": "unknown"},

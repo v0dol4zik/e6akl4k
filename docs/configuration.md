@@ -28,6 +28,7 @@ chmod 600 .env
 | `YTDLP_CONCURRENT_FRAGMENTS` | `4` | Concurrent HLS/DASH fragments per `yt-dlp` process, from 1 to 16. |
 | `YTDLP_YOUTUBE_CLIENTS` | `tv_simply` | Comma-separated YouTube player clients that the download without cookies alternates with the `yt-dlp` default clients, for example `tv_simply,web` or `default,-web`; `default` keeps only the `yt-dlp` choice. See [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies). |
 | `YTDLP_YOUTUBE_COOKIE_CLIENTS` | `mweb` | Player clients for the download with cookies after YouTube asks to sign in. |
+| `YTDLP_POT_PROVIDER_URL` | empty | Base address of a bgutil PO token server for YouTube, such as `http://bgutil-pot:4416`; empty runs `yt-dlp` without PO tokens. See [YouTube PO tokens](#youtube-po-tokens). |
 
 ## Scheduling and limits
 
@@ -95,6 +96,7 @@ With `STATUS_MESSAGE=true` the bot posts a status message to the error chat, pin
 - free disk space: yellow below `DISK_WARNING_BYTES`, red below a quarter of it;
 - YouTube cookies: the result and age of the last login check (the same Watch Later check as the stale-cookie detector, scheduled every `COOKIE_CHECK_INTERVAL`) and the age of the cookies file;
 - the Yandex relay, when `YANDEX_PROXY` is set, with a TCP connection to the proxy; the address is never shown;
+- the YouTube PO token server, when `YTDLP_POT_PROVIDER_URL` is set, with a TCP connection to it;
 - `yt-dlp`: the installed version and, once every six hours, the newest release on GitHub;
 - error reports: yellow for an hour after the report queue dropped reports.
 
@@ -125,6 +127,17 @@ Yandex Music answers HTTP 451 to servers outside the CIS: its links then get a "
 3. Append `COMPOSE_PROFILES=yandex-relay` and `YANDEX_PROXY=socks5h://yandex-relay:1080` to `.env`, then redeploy.
 
 The relay routes only Yandex Music host names and drops every other destination, so it cannot be used as a general exit. Use `socks5h` so that the host name, not a local DNS answer, reaches the relay.
+
+## YouTube PO tokens
+
+YouTube answers media requests without a proof-of-origin (PO) token with `403` for more and more clients, and which clients still work without one changes from hour to hour (see [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies)). `docker-compose.yml` has an optional `bgutil-pot` service, the [bgutil PO token server](https://github.com/Brainicism/bgutil-ytdlp-pot-provider), which listens on port 4416 of the project network only. The bot image ships the matching `yt-dlp` plugin in `/opt/yt-dlp-plugins`, outside the default plugin folders, so it loads only when the provider is set:
+
+1. Add `bgutil-pot` to `COMPOSE_PROFILES` in `.env` (for example `COMPOSE_PROFILES=yandex-relay,telegram-bot-api,bgutil-pot`; a later line overrides an earlier one) and append `YTDLP_POT_PROVIDER_URL=http://bgutil-pot:4416`.
+2. Redeploy. Every `yt-dlp` call then gets `--plugin-dirs /opt/yt-dlp-plugins --extractor-args youtubepot-bgutilhttp:base_url=http://bgutil-pot:4416`, and the status message gets a "токены YouTube (PO)" line ("YouTube PO tokens" in English).
+
+The server sends YouTube's challenge to YouTube from its own container and never sees the cookies. A token takes a few seconds on the first request and is cached by the server afterwards. With tokens, on 2026-09-26 the anonymous `tv_simply`, `mweb`, and default clients and the signed-in `mweb` client downloaded fully, while the default signed-in clients still got `403`, so the default `YTDLP_YOUTUBE_CLIENTS` and `YTDLP_YOUTUBE_COOKIE_CLIENTS` stay right.
+
+The plugin refuses a server of another version: bump the `bgutil-pot` image in `docker-compose.yml` and `BGUTIL_PLUGIN_VERSION` with `BGUTIL_PLUGIN_SHA256` in the `Dockerfile` together. Both are third-party code, pinned by digest and checksum; review a release before bumping it. To turn the provider off, remove `YTDLP_POT_PROVIDER_URL` and redeploy.
 
 ## Notices
 

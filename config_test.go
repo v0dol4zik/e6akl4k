@@ -153,3 +153,22 @@ func TestLoadConfigTelegramAPIURL(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadConfigPOTProviderURL(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "token")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("YTDLP_POT_PROVIDER_URL", "")
+	if cfg, err := loadConfig(); err != nil || cfg.YTDLPPOTProviderURL != "" {
+		t.Fatalf("the provider is off by default: url=%q err=%v", cfg.YTDLPPOTProviderURL, err)
+	}
+	t.Setenv("YTDLP_POT_PROVIDER_URL", " http://bgutil-pot:4416/ ")
+	if cfg, err := loadConfig(); err != nil || cfg.YTDLPPOTProviderURL != "http://bgutil-pot:4416" {
+		t.Fatalf("url=%q err=%v", cfg.YTDLPPOTProviderURL, err)
+	}
+	for _, value := range []string{"bgutil-pot:4416", "socks5://bgutil-pot:4416", "http://bgutil-pot:4416/get_pot", "http://user:secret@bgutil-pot:4416", "http://bgutil-pot:4416,x", "http://bgutil-pot:4416;youtube:x"} {
+		t.Setenv("YTDLP_POT_PROVIDER_URL", value)
+		if _, err := loadConfig(); err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("YTDLP_POT_PROVIDER_URL=%q err=%v", value, err)
+		}
+	}
+}

@@ -74,6 +74,38 @@ services:
         max-size: 10m
         max-file: "3"
 
+  # Optional YouTube PO token provider (bgutil): without PO tokens YouTube answers most media
+  # requests with 403. Enabled by COMPOSE_PROFILES=bgutil-pot and
+  # YTDLP_POT_PROVIDER_URL=http://bgutil-pot:4416 in .env; the bot image ships the matching yt-dlp
+  # plugin. See docs/configuration.md. It is reachable only on the project network.
+  bgutil-pot:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.0@sha256:ed86b6fdd5e430ddd7c8ce1adb55e1ab54db7c7dbc1bcbf3a82454a85b971164
+    profiles:
+      - bgutil-pot
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4416/ping').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   # Optional local Telegram Bot API server: it accepts uploads up to 2000 MB instead of the cloud's 50 MB.
   # Enabled by COMPOSE_PROFILES=telegram-bot-api and TELEGRAM_API_URL=http://telegram-bot-api:8081
   # in .env, with TELEGRAM_API_ID and TELEGRAM_API_HASH from my.telegram.org in telegram-bot-api.env;
