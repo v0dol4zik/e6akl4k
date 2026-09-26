@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,9 +97,10 @@ func TestCookieAlertFromRotatedCookies(t *testing.T) {
 
 	raw := "ERROR: [youtube] dQw4w9WgXcQ: The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser as a security measure."
 	application.reportDownloadFailure(raw, "www.youtube.com")
+	application.cookieAlerts.checks.Wait()
 	got := telegram.snapshot()
 	if len(got) != 1 || got[0].method != "sendMessage" || got[0].chatID != "10" || got[0].text != tr("admin_cookie_warning", "en") {
-		t.Fatalf("rotated-cookie failure must alert the admin on the first hit: %#v", got)
+		t.Fatalf("rotated-cookie failure with a failed login check must alert the admin on the first hit: %#v", got)
 	}
 	stats, err := state.stats(context.Background())
 	if err != nil || stats.CookieErrors != 1 || stats.DownloadsFailed != 1 {
@@ -173,6 +176,7 @@ func newCookieTestApp(t *testing.T, telegram *cookieTestTelegram, state *store, 
 	application := newAppWithServices(context.Background(), bot, &downloader{bin: filepath.Join(dir, "missing-yt-dlp"), downloadDir: dir}, state, cfg)
 	application.setLang(10, "en")
 	application.setLang(11, "en")
+	application.cookieLoginCheck = func(context.Context) (cookieLogin, string) { return cookieLoginInvalid, "test" }
 	return application
 }
 
@@ -189,10 +193,12 @@ func TestCookieAlertFromForbiddenWindowAndPersistedCooldown(t *testing.T) {
 	first.reportDownloadFailure("HTTP Error 403: Forbidden", "soundcloud.com")
 	first.reportDownloadFailure("HTTP Error 403: Forbidden", "www.youtube.com")
 	first.reportDownloadFailure("HTTP Error 403: Forbidden", "www.youtube.com")
+	first.cookieAlerts.checks.Wait()
 	if got := telegram.snapshot(); len(got) != 0 {
 		t.Fatalf("two YouTube 403s must not alert: %#v", got)
 	}
 	first.reportDownloadFailure("HTTP Error 403: Forbidden", "youtu.be")
+	first.cookieAlerts.checks.Wait()
 	got := telegram.snapshot()
 	if len(got) != 1 || got[0].method != "sendMessage" || got[0].chatID != "10" || got[0].text != tr("admin_cookie_warning", "en") {
 		t.Fatalf("third YouTube 403 must alert the admin: %#v", got)
@@ -209,12 +215,14 @@ func TestCookieAlertFromForbiddenWindowAndPersistedCooldown(t *testing.T) {
 	}
 
 	first.reportDownloadFailure("YouTube требует подтверждения, что запрос не от бота", "www.youtube.com")
+	first.cookieAlerts.checks.Wait()
 	if got := telegram.snapshot(); len(got) != 0 {
 		t.Fatalf("cooldown must suppress the second alert: %#v", got)
 	}
 
 	second := newCookieTestApp(t, telegram, state, dir)
 	second.reportDownloadFailure("Sign in: cookies.txt is stale", "www.youtube.com")
+	second.cookieAlerts.checks.Wait()
 	if got := telegram.snapshot(); len(got) != 0 {
 		t.Fatalf("cooldown must survive a restart sharing the store: %#v", got)
 	}
@@ -224,6 +232,7 @@ func TestCookieAlertFromForbiddenWindowAndPersistedCooldown(t *testing.T) {
 	}
 	third := newCookieTestApp(t, telegram, state, dir)
 	third.reportDownloadFailure("Sign in: cookies.txt is stale", "www.youtube.com")
+	third.cookieAlerts.checks.Wait()
 	if got := telegram.snapshot(); len(got) != 1 {
 		t.Fatalf("expired cooldown must allow a new alert: %#v", got)
 	}
@@ -308,10 +317,12 @@ func TestCookieRetryAlertsAdminAfterWindow(t *testing.T) {
 
 	application.reportCookieRetry()
 	application.reportCookieRetry()
+	application.cookieAlerts.checks.Wait()
 	if got := telegram.snapshot(); len(got) != 0 {
 		t.Fatalf("two retries inside the window must not alert yet: %#v", got)
 	}
 	application.reportCookieRetry()
+	application.cookieAlerts.checks.Wait()
 	got := telegram.snapshot()
 	if len(got) != 1 || got[0].method != "sendMessage" || got[0].chatID != "10" || got[0].text != tr("admin_cookie_degraded", "en") {
 		t.Fatalf("third retry must alert the admin with the degraded text: %#v", got)
@@ -328,7 +339,196 @@ func TestCookieRetryAlertsAdminAfterWindow(t *testing.T) {
 	application.reportCookieRetry()
 	application.reportCookieRetry()
 	application.reportCookieRetry()
+	application.cookieAlerts.checks.Wait()
 	if got := telegram.snapshot(); len(got) != 0 {
 		t.Fatalf("alert cooldown must suppress repeated messages: %#v", got)
+	}
+}
+
+// TestCookieAlertNeedsFailedLoginCheck covers the false alarm: YouTube answers a working cookie
+// session with a 403 now and then, so an alert goes out only when the login check itself fails.
+func TestCookieAlertNeedsFailedLoginCheck(t *testing.T) {
+	dir := t.TempDir()
+	state, err := openStore(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	telegram := &cookieTestTelegram{}
+	application := newCookieTestApp(t, telegram, state, dir)
+	now := time.Now()
+	application.cookieAlerts.now = func() time.Time { return now }
+	var mu sync.Mutex
+	calls := 0
+	result := cookieLoginValid
+	application.cookieLoginCheck = func(context.Context) (cookieLogin, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return result, "test"
+	}
+	setResult := func(value cookieLogin) {
+		mu.Lock()
+		result = value
+		mu.Unlock()
+	}
+	callCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+	rotated := "The provided YouTube account cookies are no longer valid."
+
+	application.reportDownloadFailure(rotated, "www.youtube.com")
+	application.cookieAlerts.checks.Wait()
+	if got := telegram.snapshot(); len(got) != 0 || callCount() != 1 {
+		t.Fatalf("a working login must suppress the alert: calls=%d sent=%#v", callCount(), got)
+	}
+	if !state.cookieAlertTime(context.Background()).IsZero() || application.cookieStatus(context.Background()) != "ok" {
+		t.Fatal("a suppressed alert must not start the cooldown or mark cookies suspect")
+	}
+
+	application.reportDownloadFailure(rotated, "www.youtube.com")
+	application.cookieAlerts.checks.Wait()
+	if callCount() != 1 {
+		t.Fatalf("a recent working login must not be checked again: calls=%d", callCount())
+	}
+
+	now = now.Add(cookieLoginTrust + time.Minute)
+	setResult(cookieLoginUnknown)
+	application.reportDownloadFailure(rotated, "www.youtube.com")
+	application.cookieAlerts.checks.Wait()
+	if got := telegram.snapshot(); len(got) != 0 || callCount() != 2 {
+		t.Fatalf("an inconclusive check must not alert: calls=%d sent=%#v", callCount(), got)
+	}
+
+	setResult(cookieLoginInvalid)
+	application.reportDownloadFailure(rotated, "www.youtube.com")
+	application.cookieAlerts.checks.Wait()
+	got := telegram.snapshot()
+	if callCount() != 3 || len(got) != 1 || got[0].text != tr("admin_cookie_warning", "en") {
+		t.Fatalf("an inconclusive check must be retried and a failed one must alert: calls=%d sent=%#v", callCount(), got)
+	}
+
+	application.reportDownloadFailure(rotated, "www.youtube.com")
+	application.cookieAlerts.checks.Wait()
+	if callCount() != 3 {
+		t.Fatalf("the alert cooldown must skip the login check: calls=%d", callCount())
+	}
+	counters, err := state.counters(context.Background())
+	if err != nil || counters["youtube_cookie_errors"] != 5 || counters["youtube_cookie_login_ok"] != 1 || counters["youtube_cookie_login_unknown"] != 1 || counters["youtube_cookie_login_failed"] != 1 {
+		t.Fatalf("counters=%#v err=%v", counters, err)
+	}
+}
+
+func TestCookieLoginCheckRunsOneAtATime(t *testing.T) {
+	dir := t.TempDir()
+	telegram := &cookieTestTelegram{}
+	application := newCookieTestApp(t, telegram, nil, dir)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	application.cookieLoginCheck = func(context.Context) (cookieLogin, string) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return cookieLoginInvalid, "test"
+	}
+	application.reportCookieRetry()
+	application.reportCookieRetry()
+	application.reportCookieRetry()
+	<-started
+	application.reportDownloadFailure("Sign in to confirm you're not a bot", "www.youtube.com")
+	close(release)
+	application.cookieAlerts.checks.Wait()
+	got := telegram.snapshot()
+	if calls.Load() != 1 || len(got) != 1 || got[0].text != tr("admin_cookie_degraded", "en") {
+		t.Fatalf("a running check must absorb new suspicions: calls=%d sent=%#v", calls.Load(), got)
+	}
+}
+
+func TestClassifyCookieLogin(t *testing.T) {
+	exit := errors.New("exit status 1")
+	tests := []struct {
+		name   string
+		stderr string
+		err    error
+		want   cookieLogin
+	}{
+		{"signed in with an empty watch later", "", nil, cookieLoginValid},
+		{"anonymous session", "WARNING: [youtube:tab] YouTube said: The playlist does not exist.\nERROR: [youtube:tab] WL: YouTube said: The playlist does not exist.\n", exit, cookieLoginInvalid},
+		{"rotated cookies", "WARNING: [youtube:tab] Incomplete yt initial data received\nWARNING: [youtube:tab] The provided YouTube account cookies are no longer valid. They have likely been rotated in the browser as a security measure.\nERROR: [youtube:tab] WL: YouTube said: The playlist does not exist.\n", exit, cookieLoginInvalid},
+		{"rotated warning on success", "WARNING: [youtube:tab] The provided YouTube account cookies are no longer valid.\n", nil, cookieLoginInvalid},
+		{"bot check", "ERROR: [youtube:tab] WL: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.\n", exit, cookieLoginInvalid},
+		{"network error", "ERROR: [youtube:tab] WL: Unable to download API page: <urlopen error [Errno -3] Temporary failure in name resolution>\n", exit, cookieLoginUnknown},
+		{"rate limited", "ERROR: [youtube:tab] WL: HTTP Error 429: Too Many Requests\n", exit, cookieLoginUnknown},
+		{"timeout", "", context.DeadlineExceeded, cookieLoginUnknown},
+		{"missing yt-dlp", "", errors.New("fork/exec /missing/yt-dlp: no such file or directory"), cookieLoginUnknown},
+	}
+	for _, test := range tests {
+		got, detail := classifyCookieLogin(test.stderr, test.err)
+		if got != test.want {
+			t.Errorf("%s: got %s (%s) want %s", test.name, got, detail, test.want)
+		}
+	}
+	if _, detail := classifyCookieLogin("WARNING: first\nERROR: [youtube:tab] WL: YouTube said: The playlist does not exist.\n", exit); detail != "ERROR: [youtube:tab] WL: YouTube said: The playlist does not exist." {
+		t.Fatalf("detail must be the last yt-dlp error line: %q", detail)
+	}
+}
+
+func TestCheckCookieLoginOpensWatchLaterWithIsolatedCookies(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args.txt")
+	copyFile := filepath.Join(dir, "cookies-seen.txt")
+	bin := filepath.Join(dir, "yt-dlp")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\n" +
+		"while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --cookies ]; then cat \"$2\" > " + copyFile + "; fi; shift; done\n" +
+		"if grep -q dead " + copyFile + "; then echo 'ERROR: [youtube:tab] WL: YouTube said: The playlist does not exist.' >&2; exit 1; fi\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cookies := filepath.Join(dir, "cookies.txt")
+	if err := os.WriteFile(cookies, []byte("# Netscape HTTP Cookie File\nlive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(dir, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dl := &downloader{bin: bin, downloadDir: work, cookiesFile: cookies}
+	if err := dl.refreshCookieSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, detail := dl.checkCookieLogin(context.Background()); got != cookieLoginValid {
+		t.Fatalf("working cookies: got %s (%s)", got, detail)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(args), "--\n:ytwatchlater\n") || !strings.Contains(string(args), "--cookies\n"+work+string(os.PathSeparator)) {
+		t.Fatalf("login check must open Watch Later with an isolated cookies copy: %s", args)
+	}
+	if seen, _ := os.ReadFile(copyFile); !strings.Contains(string(seen), "live") {
+		t.Fatalf("isolated copy must hold the cookies: %q", seen)
+	}
+	if entries, _ := os.ReadDir(work); len(entries) != 0 {
+		t.Fatalf("isolated cookies copy must be removed: %v", entries)
+	}
+
+	if err := os.WriteFile(cookies, []byte("# Netscape HTTP Cookie File\ndead\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := dl.refreshCookieSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if got, detail := dl.checkCookieLogin(context.Background()); got != cookieLoginInvalid || !strings.Contains(detail, "does not exist") {
+		t.Fatalf("dead cookies: got %s (%s)", got, detail)
+	}
+
+	if got, _ := (&downloader{bin: bin, downloadDir: work}).checkCookieLogin(context.Background()); got != cookieLoginInvalid {
+		t.Fatalf("no cookies file means no login: got %s", got)
 	}
 }

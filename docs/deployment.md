@@ -68,7 +68,9 @@ If the bot check returns, replace the mounted file explicitly and run the deploy
 
 ### `HTTP Error 403: Forbidden` with valid cookies
 
-YouTube sometimes binds a signed-in cookie session to SABR-only streaming. The metadata probe still succeeds, but every media URL returns `403`, while the same request without cookies downloads normally. The bot handles this automatically: a YouTube download or search that fails with `403` while cookies are attached is retried once without cookies. The retry is logged as `cookie_forbidden_retry`, counted in `youtube_cookie_retries`, and three retries within ten minutes send administrators a "degraded cookies" alert with a check button. Age-restricted and private videos are unavailable until the cookies are replaced.
+YouTube sometimes binds a signed-in cookie session to SABR-only streaming. The metadata probe still succeeds, but every media URL returns `403`, while the same request without cookies downloads normally. The bot handles this automatically: a YouTube download or search that fails with `403` while cookies are attached is retried once without cookies. The retry is logged as `cookie_forbidden_retry` and counted in `youtube_cookie_retries`. Age-restricted and private videos are unavailable while the cookies do not work.
+
+YouTube also sends an occasional `403` to cookies that still work, so a suspicion alone never alerts. When three retries happen within ten minutes, or a download fails with a bot check or rotated cookies, the bot first opens the account's Watch Later playlist (`:ytwatchlater`) with an isolated copy of the cookies; YouTube serves it only to a signed-in session. Administrators get an alert with a check button only when this login check fails. A working login is trusted for 30 minutes, a network error or timeout is logged without an alert, and results are counted in `youtube_cookie_login_ok`, `youtube_cookie_login_failed`, and `youtube_cookie_login_unknown`. Alerts are sent at most once every six hours.
 
 To confirm the diagnosis manually, run the same download inside the container with and without `--cookies`:
 

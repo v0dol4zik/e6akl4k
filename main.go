@@ -75,6 +75,8 @@ type app struct {
 	flights       flightGroup
 	metrics       metricsCache
 	errorReports  *errorReporter
+	// cookieLoginCheck confirms a suspected cookie failure before administrators are alerted.
+	cookieLoginCheck func(context.Context) (cookieLogin, string)
 
 	mu           sync.Mutex
 	userLang     map[int64]string
@@ -109,7 +111,7 @@ func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *d
 	if cfg.RateWindow <= 0 {
 		cfg.RateWindow = time.Minute
 	}
-	return &app{
+	application := &app{
 		bot:           bot,
 		downloader:    downloader,
 		ctx:           ctx,
@@ -126,6 +128,10 @@ func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *d
 		active:        make(map[string]activeDownload),
 		activeUser:    make(map[int64]bool),
 	}
+	if downloader != nil {
+		application.cookieLoginCheck = downloader.checkCookieLogin
+	}
+	return application
 }
 
 func (a *app) handleUpdate(update tgbotapi.Update) (success bool) {

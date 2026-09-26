@@ -419,12 +419,12 @@ var texts = map[string]map[string]string{
 		"en": "⚠️ disk space is running low: {free} available.",
 	},
 	"admin_cookie_warning": {
-		"ru": "⚠️ YouTube отклоняет cookies или требует bot-check. обнови cookies.txt и проверь /status.",
-		"en": "⚠️ YouTube is rejecting the cookies or requiring a bot check. refresh cookies.txt and check /status.",
+		"ru": "⚠️ cookies YouTube больше не работают: YouTube отклонил загрузку, и проверка входа с этими cookies не прошла. обнови cookies.txt и проверь /status.",
+		"en": "⚠️ the YouTube cookies no longer work: YouTube rejected a download and a login check with these cookies failed. refresh cookies.txt and check /status.",
 	},
 	"admin_cookie_degraded": {
-		"ru": "⚠️ YouTube отдаёт 403 с текущими cookies, загрузки идут повторно без cookies. треки 18+ и приватные недоступны — обнови cookies.txt.",
-		"en": "⚠️ YouTube returns 403 with the current cookies, so downloads are retried without them. age-restricted and private tracks are unavailable — refresh cookies.txt.",
+		"ru": "⚠️ YouTube отдаёт 403 с текущими cookies, и проверка входа с ними не прошла. загрузки идут без cookies, треки 18+ и приватные недоступны — обнови cookies.txt.",
+		"en": "⚠️ YouTube returns 403 with the current cookies and a login check with them failed. downloads continue without cookies, so age-restricted and private tracks are unavailable — refresh cookies.txt.",
 	},
 	"error_report_title":   {"ru": "🐞 <b>ошибка у пользователя</b> · <code>{stage}</code>", "en": "🐞 <b>user-facing error</b> · <code>{stage}</code>"},
 	"error_report_user":    {"ru": "пользователь: {user}", "en": "user: {user}"},
