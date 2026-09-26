@@ -17,6 +17,12 @@ import (
 )
 
 func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) {
+	a.openURL(message, rawURL, lang, "", "")
+}
+
+// openURL previews a link and offers the format keyboard, or starts a single track right away
+// with the given format (the error report buttons) or the user's default format.
+func (a *app) openURL(message *tgbotapi.Message, rawURL, lang, format, quality string) {
 	status := a.sendText(message.Chat.ID, tr("analyzing", lang), "HTML", nil)
 	ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
 	defer cancel()
@@ -54,7 +60,11 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 		return
 	}
 	if !preview.IsPlaylist {
-		if format, quality, ok := a.getPreference(message.From.ID); ok {
+		ready := validDownloadOption(format, quality)
+		if !ready {
+			format, quality, ready = a.getPreference(message.From.ID)
+		}
+		if ready {
 			a.deleteStatusMessage(status)
 			a.startDownload(message.From.ID, message.Chat.ID, key, format, quality, lang, nil)
 			return

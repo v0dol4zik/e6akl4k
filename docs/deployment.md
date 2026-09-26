@@ -81,6 +81,8 @@ Without a PO token provider, YouTube binds a signed-in cookie session to SABR-on
 
 YouTube also sends an occasional `403` to cookies that still work, so a suspicion alone never alerts. When three retries happen within ten minutes, or a download fails with a bot check or rotated cookies, the bot first opens the account's Watch Later playlist (`:ytwatchlater`) with an isolated copy of the cookies; YouTube serves it only to a signed-in session. Administrators get an alert with a check button only when this login check fails. A working login is trusted for 30 minutes, a network error or timeout is logged without an alert, and results are counted in `youtube_cookie_login_ok`, `youtube_cookie_login_failed`, and `youtube_cookie_login_unknown`. Alerts are sent at most once every six hours.
 
+The status message runs the same login check on a schedule, every `COOKIE_CHECK_INTERVAL` (three hours by default), and shows its result and age together with the age of the cookies file. The first check after a start runs at once when the last one is older than the interval.
+
 To confirm the diagnosis manually, run the same download inside the container with and without `--cookies`:
 
 ```bash
@@ -107,6 +109,10 @@ GET /metrics   Prometheus metrics
 ```
 
 Use an authenticated reverse proxy or a local-only port binding before exposing either endpoint.
+
+### Status message
+
+With `STATUS_MESSAGE=true` (the default) the bot keeps a pinned status message in the error chat (`ERROR_CHAT_ID`, or the cache channel): Telegram API, SQLite, disk, cookies, the Yandex relay, the `yt-dlp` version, error counts, and the queue. Make the bot an administrator of that chat with the rights to post, edit, and pin messages. If it cannot pin, the message is still posted and edited, and administrators get one private message about the missing right. The message ID is stored in SQLite, so deployments edit the same message; after it is deleted, the next edit (on the next change, or within ten minutes) posts and pins a new one.
 
 ### Prometheus scrape
 

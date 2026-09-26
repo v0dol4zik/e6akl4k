@@ -367,6 +367,8 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		a.handleNotifyCallback(callback)
 	case strings.HasPrefix(data, noticeConfirmCallback):
 		a.handleNoticeConfirm(callback)
+	case strings.HasPrefix(data, errorReportCallback):
+		a.handleErrorReportCallback(callback)
 	}
 }
 

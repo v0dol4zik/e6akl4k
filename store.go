@@ -199,6 +199,23 @@ CREATE TABLE IF NOT EXISTS media_stage_samples (
   quality TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS error_reports (
+  id TEXT PRIMARY KEY,
+  stage TEXT NOT NULL,
+  class TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  chat_id INTEGER NOT NULL DEFAULT 0,
+  user_id INTEGER NOT NULL DEFAULT 0,
+  url TEXT NOT NULL DEFAULT '',
+  query TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  version TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER NOT NULL DEFAULT 0,
+  resolved_by INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS error_reports_created_at ON error_reports(created_at);
 CREATE INDEX IF NOT EXISTS telegram_updates_status_id ON telegram_updates(status, update_id);
 CREATE INDEX IF NOT EXISTS download_history_created_at ON download_history(created_at);
 CREATE INDEX IF NOT EXISTS bans_created_at ON bans(created_at);
@@ -762,6 +779,9 @@ func (s *store) cleanup(ctx context.Context, ttl time.Duration) error {
 	}
 	if err == nil {
 		_, err = s.db.ExecContext(ctx, `DELETE FROM media_stage_samples WHERE id NOT IN (SELECT id FROM media_stage_samples ORDER BY id DESC LIMIT 50000)`)
+	}
+	if err == nil {
+		err = s.pruneErrorReports(ctx, time.Now().Add(-errorReportRetention))
 	}
 	return err
 }

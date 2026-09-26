@@ -145,6 +145,15 @@ func (s *cookieAlertState) finishLoginCheck(result cookieLogin) {
 	}
 }
 
+// noteLoginResult lets a scheduled login check suppress checks the way a suspected failure's does.
+func (s *cookieAlertState) noteLoginResult(result cookieLogin) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if result == cookieLoginValid {
+		s.trustedUntil = s.clock().Add(cookieLoginTrust)
+	}
+}
+
 // cookieFailureMarkers are matched case-insensitively against a failure message.
 // They cover the raw yt-dlp phrases ("Sign in to confirm you're not a bot",
 // "The provided YouTube account cookies are no longer valid") as well as the
@@ -220,6 +229,7 @@ func (a *app) suspectStaleCookies(alertKey string) {
 		a.cookieAlerts.finishLoginCheck(result)
 		if a.store != nil {
 			a.store.increment(a.ctx, "youtube_cookie_login_"+result.String())
+			a.recordCookieLogin(a.ctx, result, detail)
 		}
 		if result != cookieLoginInvalid {
 			log.Printf("Проверка входа YouTube по cookies: %s (%s), уведомление администраторам не отправлено", result, detail)

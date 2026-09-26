@@ -36,7 +36,12 @@ Heavy downloads, quick lookups, archive creation, and Telegram update handling h
 | `store.go` | SQLite languages, observed Telegram users, cache, roles, bans, audit, samples, updates, and history. |
 | `admin.go` | Owner/admin authorization, moderation commands, `/perf`, and audit views. |
 | `download_trace.go` | Redacted administrator download diagnostics. |
-| `error_report.go` | Deduplicated, redacted forwarding of user-facing errors to the cache or error chat. |
+| `error_report.go` | Deduplicated, redacted forwarding of user-facing errors to the cache or error chat, with report IDs, expected/real classification, and spike alerts. |
+| `error_report_store.go` | SQLite storage of error reports for the buttons, the digest, and the status message. |
+| `error_report_actions.go` | Administrator buttons under a report: retry, fixed-and-notify, and a developer copy. |
+| `error_digest.go` | Silent periodic digest of expected errors. |
+| `status_monitor.go` | Pinned status message, component health checks, failure and recovery alerts, and the scheduled cookie login check. |
+| `buildinfo.go` | Bot commit stamped by `git archive` and the cached `yt-dlp` version. |
 | `export.go` | `/export` and preview-button tracklists as "Artist - Title" lines or a `.txt` file. |
 | `export_sources.go` | Deezer and Yandex Music public API tracklists and single tracks of other streaming services. |
 | `cover.go` | `/cover` artwork from music APIs (largest CDN rendition first) or `yt-dlp` thumbnails, with square selection and lossless PNG Topic cropping; sent as a document to keep full quality. |

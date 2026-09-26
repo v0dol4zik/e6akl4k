@@ -1,0 +1,2 @@
+# git archive stamps the commit into the binary built from an uploaded archive.
+buildinfo.go export-subst

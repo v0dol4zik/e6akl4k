@@ -41,6 +41,11 @@ type config struct {
 	DropPendingUpdates bool
 	YTDLPSleepRequests int
 	YTDLPFragments     int
+
+	// StatusMessage keeps a pinned bot status message in the error chat.
+	StatusMessage       bool
+	CookieCheckInterval time.Duration
+	ErrorDigestInterval time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -116,6 +121,15 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	if cfg.DropPendingUpdates, err = strictEnvBool("DROP_PENDING_UPDATES", false); err != nil {
+		return config{}, err
+	}
+	if cfg.StatusMessage, err = strictEnvBool("STATUS_MESSAGE", true); err != nil {
+		return config{}, err
+	}
+	if cfg.CookieCheckInterval, err = strictEnvDuration("COOKIE_CHECK_INTERVAL", 3*time.Hour); err != nil {
+		return config{}, err
+	}
+	if cfg.ErrorDigestInterval, err = strictEnvDuration("ERROR_DIGEST_INTERVAL", 24*time.Hour); err != nil {
 		return config{}, err
 	}
 	if cfg.AdminIDs, err = strictIDSet("ADMIN_IDS", os.Getenv("ADMIN_IDS")); err != nil {

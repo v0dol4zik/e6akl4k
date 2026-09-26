@@ -60,6 +60,9 @@ The zero request delay and four concurrent fragments favor download latency. Inc
 | `LOG_FORMAT` | text | Set to `json` for structured logs. |
 | `DISK_WARNING_BYTES` | `536870912` | Free-space threshold that triggers an administrator warning. |
 | `DISK_CHECK_INTERVAL` | `10m` | Disk monitoring interval. |
+| `STATUS_MESSAGE` | `true` | Keep a pinned status message in the error chat and announce failures and recoveries there. See [Status message](#status-message). |
+| `COOKIE_CHECK_INTERVAL` | `3h` | How often the status monitor checks the YouTube login with the configured cookies. `0` disables the scheduled check. |
+| `ERROR_DIGEST_INTERVAL` | `24h` | Window of the silent digest of expected errors. `0` disables the digest. |
 
 Completed tracks, user language, observed Telegram username-to-ID mappings, dismissed support notices, counters, pending Telegram updates, dynamic administrators, bans, audit records, bounded performance samples, and 90 days of download history are stored in SQLite. `/id @username` can resolve only users previously visible to the bot because the Bot API does not provide arbitrary username lookup. The post-download support notice is shown at most once per 24 hours until the user permanently hides it. IDs in `ADMIN_IDS` are immutable owners; only owners may use `/addadmin` and `/deladmin`. The old `inline-audio-cache.json` is imported automatically and renamed with a `.migrated` suffix.
 
@@ -70,6 +73,32 @@ Structured `media_stage` log records split latency into source probing/downloadi
 Every error a user sees (link preview, search, download, playlist or ZIP delivery, cached re-send, `/history`, and inline downloads) is also posted to `ERROR_CHAT_ID` or, by default, to the cache channel. A post contains the stage, the user ID and last known username, the link with only track-identifying query parameters (`v`, `list`, `t`, `track`), the search query, the format, and the error text with signed-URL and cookie fragments removed.
 
 Cancellations, a busy queue, rate limits, and the playlist size limit are not reported. Identical stage and error pairs are folded for ten minutes (per-video IDs in `yt-dlp` messages are ignored for this comparison), and the next post of the same error shows how many repeats were folded. Per-track failures of one playlist or batch are combined into a single post. Posts are sent by one background worker at most every three seconds from a queue of 64 distinct reports; overflow is dropped and counted as `error_reports_dropped`, delivered posts as `error_reports_sent`.
+
+Every report has a short ID such as `r1a2b3c4`, which is also written to the `error_report id=…` log line, and shows the bot commit and `yt-dlp` version. Reports are kept in SQLite for 14 days.
+
+Errors caused by the content itself (a deleted, private, members-only, or geo-blocked video, an unsupported link, nothing found, HTTP 404) are expected: they are not posted one by one but summarised in a silent digest once per `ERROR_DIGEST_INTERVAL`, grouped by stage and error with the number of distinct users. An error that mentions a 403, a bot check, a rate limit, or "try again later" is always real, as is any error with a line that matches no expected pattern. Real errors are posted silently; when the same error reaches three different users within 15 minutes, a loud 🚨 spike post goes out even inside the folding window, at most once an hour per error.
+
+Buttons under a report work for administrators only, and their answers go to the administrator's private chat:
+
+- «повторить» repeats a link preview, download, playlist, batch, cached re-send, or inline request with the reported format, and the result comes to the administrator.
+- «починено → пользователю» asks for confirmation, then tells the user the error was fixed and repeats the request for them. The report is claimed first, so two administrators cannot notify a user twice; banned users are skipped, and the action is recorded in the audit as `report_fix_sent`.
+- «для разработчика» sends a plain-text copy for an issue: report ID, time, version, stage, source, redacted link, query, format, and error, without the user ID or username.
+
+## Status message
+
+With `STATUS_MESSAGE=true` the bot posts a status message to the error chat, pins it silently, and checks every minute:
+
+- Telegram API (the local server when `TELEGRAM_API_URL` is set) with `getMe`;
+- SQLite;
+- free disk space: yellow below `DISK_WARNING_BYTES`, red below a quarter of it;
+- YouTube cookies: the result and age of the last login check (the same Watch Later check as the stale-cookie detector, scheduled every `COOKIE_CHECK_INTERVAL`) and the age of the cookies file;
+- the Yandex relay, when `YANDEX_PROXY` is set, with a TCP connection to the proxy; the address is never shown;
+- `yt-dlp`: the installed version and, once every six hours, the newest release on GitHub;
+- error reports: yellow for an hour after the report queue dropped reports.
+
+The message also shows real and expected errors of the last 24 hours, the last real error with its ID, the last spike, the download queue, the version, the uptime, and the update time. It is edited as soon as something changes and at least every ten minutes. When a component turns red, a loud 🔴 post goes out; a yellow component gets a silent 🟡 post and a recovery a silent 🟢 post with the duration of the problem (loud if the failure itself could not be posted). Component states and the message ID are kept in SQLite, so a restart neither repeats alerts nor posts a second message. If the message is deleted, the next edit posts and pins a new one.
+
+The bot needs to post, edit, and pin messages in the error chat. In a channel that means the "post messages", "edit messages of others", and pin rights; if pinning fails, administrators get one private message about it.
 
 ## Files over 50 MB
 
