@@ -36,6 +36,12 @@ Heavy downloads, quick lookups, archive creation, and Telegram update handling h
 | `store.go` | SQLite languages, observed Telegram users, cache, roles, bans, audit, samples, updates, and history. |
 | `admin.go` | Owner/admin authorization, moderation commands, `/perf`, and audit views. |
 | `download_trace.go` | Redacted administrator download diagnostics. |
+| `error_report.go` | Deduplicated, redacted forwarding of user-facing errors to the cache or error chat. |
+| `export.go` | `/export` and preview-button tracklists as "Artist - Title" lines or a `.txt` file. |
+| `export_sources.go` | Deezer and Yandex Music public API tracklists and single tracks of other streaming services. |
+| `cover.go` | `/cover` artwork from music APIs (largest CDN rendition first) or `yt-dlp` thumbnails, with square selection and lossless PNG Topic cropping; sent as a document to keep full quality. |
+| `lastfm.go` | `/lastfm` profile linking, recent, loved and top track lists from the last.fm API, and a YouTube search for a picked track. |
+| `notify.go` | Admin-only `/msgall` broadcasts with preview and confirmation, `/msg <tg_id>` direct notices, and the per-user `/notify` mute switch. |
 | `media_metrics.go` | Bounded stage-sample recorder and performance aggregation. |
 | `upload_progress.go` | Throttled status and multipart upload progress. |
 | `support_notice.go` | Throttled post-download support message and persistent opt-out. |

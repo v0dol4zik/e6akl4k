@@ -35,17 +35,26 @@ var downloadOptions = []struct {
 }
 
 func formatKeyboard(key, lang string) *tgbotapi.InlineKeyboardMarkup {
-	buttons := make([][2]string, 0, len(downloadOptions)+1)
+	buttons := make([][2]string, 0, len(downloadOptions))
 	for _, option := range downloadOptions {
 		buttons = append(buttons, [2]string{tr(option.labelKey, lang), "dl:" + option.format + ":" + option.quality + ":" + key})
 	}
-	buttons = append(buttons, [2]string{tr("btn_cancel", lang), "cancel:" + key})
-	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(buttons))
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(buttons)+2)
 	for _, button := range buttons {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(button[0], button[1])))
 	}
+	rows = append(rows, exportRow(key, lang))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)))
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &markup
+}
+
+// exportRow offers the tracklist and the cover of a shown preview without consuming it.
+func exportRow(key, lang string) []tgbotapi.InlineKeyboardButton {
+	return tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(tr("btn_export", lang), "export:"+key),
+		tgbotapi.NewInlineKeyboardButtonData(tr("btn_cover", lang), "cover:"+key),
+	)
 }
 
 // settingsKeyboard offers the formatKeyboard options as defaults plus "ask each time".
@@ -154,6 +163,7 @@ func rangeKeyboard(key string, count, limit int, lang string) *tgbotapi.InlineKe
 	if len(rangeRow) > 0 {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(rangeRow...))
 	}
+	rows = append(rows, exportRow(key, lang))
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)))
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &markup

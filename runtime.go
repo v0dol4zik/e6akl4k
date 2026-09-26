@@ -106,13 +106,14 @@ func main() {
 			adminIDs[record.UserID] = true
 		}
 	}
-	registerBotCommands(bot, adminIDs)
+	registerBotCommands(bot, adminIDs, cfg.LastfmAPIKey != "")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	startMediaMetricsRecorder(ctx, state)
 	application := newAppWithServices(ctx, bot, dl, state, cfg)
 	dl.onCookieRetry = application.reportCookieRetry
+	application.startErrorReporter(ctx)
 	_ = startHTTPServer(ctx, application, cfg.HTTPAddr)
 	application.startDiskMonitor(ctx)
 	if cfg.CacheChatID != 0 {
@@ -251,45 +252,55 @@ func (slogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func registerBotCommands(bot *tgbotapi.BotAPI, admins map[int64]bool) {
+// registerBotCommands publishes the command menu. /lastfm is listed only when LASTFM_API_KEY is
+// set; admin commands are never listed, but admins get the same per-chat menu so that a chat
+// scope left over from an older release is overwritten.
+func registerBotCommands(bot *tgbotapi.BotAPI, admins map[int64]bool, lastfm bool) {
 	defaultScope := tgbotapi.NewBotCommandScopeDefault()
-	if _, err := bot.Request(tgbotapi.NewSetMyCommands(botCommands(defaultLang, false)...)); err != nil {
+	if _, err := bot.Request(tgbotapi.NewSetMyCommands(botCommands(defaultLang, lastfm)...)); err != nil {
 		log.Printf("Установить команды: %v", err)
 	}
 	for _, lang := range languageOrder {
-		config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(defaultScope, lang, botCommands(lang, false)...)
+		config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(defaultScope, lang, botCommands(lang, lastfm)...)
 		if _, err := bot.Request(config); err != nil {
 			log.Printf("Установить команды для языка %s: %v", lang, err)
 		}
 	}
 	for adminID := range admins {
-		registerChatCommands(bot, adminID, true)
+		registerChatCommands(bot, adminID, lastfm)
 	}
 }
 
-func registerChatCommands(bot *tgbotapi.BotAPI, chatID int64, admin bool) {
+func registerChatCommands(bot *tgbotapi.BotAPI, chatID int64, lastfm bool) {
 	if bot == nil {
 		return
 	}
 	scope := tgbotapi.NewBotCommandScopeChat(chatID)
-	if _, err := bot.Request(tgbotapi.NewSetMyCommandsWithScope(scope, botCommands(defaultLang, admin)...)); err != nil {
+	if _, err := bot.Request(tgbotapi.NewSetMyCommandsWithScope(scope, botCommands(defaultLang, lastfm)...)); err != nil {
 		log.Printf("Установить команды %d: %v", chatID, err)
 	}
 	for _, lang := range languageOrder {
-		config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(scope, lang, botCommands(lang, admin)...)
+		config := tgbotapi.NewSetMyCommandsWithScopeAndLanguage(scope, lang, botCommands(lang, lastfm)...)
 		if _, err := bot.Request(config); err != nil {
 			log.Printf("Установить команды %d для языка %s: %v", chatID, lang, err)
 		}
 	}
 }
 
-func botCommands(lang string, _ bool) []tgbotapi.BotCommand {
-	return []tgbotapi.BotCommand{
+func botCommands(lang string, lastfm bool) []tgbotapi.BotCommand {
+	commands := []tgbotapi.BotCommand{
 		{Command: "start", Description: tr("command_start", lang)},
 		{Command: "help", Description: tr("command_help", lang)},
 		{Command: "language", Description: tr("command_language", lang)},
 		{Command: "settings", Description: tr("command_settings", lang)},
 		{Command: "history", Description: tr("command_history", lang)},
-		{Command: "id", Description: tr("command_id", lang)},
+		{Command: "export", Description: tr("command_export", lang)},
+		{Command: "cover", Description: tr("command_cover", lang)},
 	}
+	if lastfm {
+		commands = append(commands, tgbotapi.BotCommand{Command: "lastfm", Description: tr("command_lastfm", lang)})
+	}
+	return append(commands,
+		tgbotapi.BotCommand{Command: "notify", Description: tr("command_notify", lang)},
+		tgbotapi.BotCommand{Command: "id", Description: tr("command_id", lang)})
 }

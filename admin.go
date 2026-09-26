@@ -125,6 +125,12 @@ func (a *app) rejectBannedUpdate(update tgbotapi.Update) bool {
 	return true
 }
 
+// adminUsage escapes a usage line: placeholders such as <tg_id> would otherwise be read as
+// HTML tags and Telegram would refuse the whole message.
+func adminUsage(lang, usage string) string {
+	return tr("admin_usage", lang, "usage", html.EscapeString(usage))
+}
+
 func parseAdminTarget(arguments string) (int64, string, bool) {
 	fields := strings.Fields(arguments)
 	if len(fields) == 0 {
@@ -163,7 +169,7 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 		}
 		username, valid := normalizeTelegramUsername(fields[0])
 		if len(fields) != 1 || !valid {
-			a.sendText(message.Chat.ID, tr("admin_usage", lang, "usage", "/id [@username]"), "HTML", nil)
+			a.sendText(message.Chat.ID, adminUsage(lang, "/id [@username]"), "HTML", nil)
 			return true
 		}
 		if a.store == nil {
@@ -194,7 +200,7 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 	case "log":
 		a.handleAdminDownloadLog(message)
 		return true
-	case "ban", "pardon", "unban", "addadmin", "deladmin", "admins", "banlist", "userinfo", "adminlog":
+	case "ban", "pardon", "unban", "addadmin", "deladmin", "admins", "banlist", "userinfo", "adminlog", "msgall", "msg":
 		// handled below
 	default:
 		return false
@@ -211,7 +217,7 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 	case "ban":
 		target, reason, ok := parseAdminTarget(message.CommandArguments())
 		if !ok {
-			a.sendText(message.Chat.ID, tr("admin_usage", lang, "usage", "/ban <tg_id> [причина]"), "HTML", nil)
+			a.sendText(message.Chat.ID, adminUsage(lang, "/ban <tg_id> [причина]"), "HTML", nil)
 			return true
 		}
 		if a.isAdmin(target) {
@@ -233,7 +239,7 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 	case "pardon", "unban":
 		target, _, ok := parseAdminTarget(message.CommandArguments())
 		if !ok {
-			a.sendText(message.Chat.ID, tr("admin_usage", lang, "usage", "/pardon <tg_id>"), "HTML", nil)
+			a.sendText(message.Chat.ID, adminUsage(lang, "/pardon <tg_id>"), "HTML", nil)
 			return true
 		}
 		changed, err := a.store.pardonUser(a.ctx, target)
@@ -250,7 +256,7 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 	case "addadmin":
 		target, _, ok := parseAdminTarget(message.CommandArguments())
 		if !ok {
-			a.sendText(message.Chat.ID, tr("admin_usage", lang, "usage", "/addadmin <tg_id>"), "HTML", nil)
+			a.sendText(message.Chat.ID, adminUsage(lang, "/addadmin <tg_id>"), "HTML", nil)
 			return true
 		}
 		if a.isOwner(target) {
@@ -265,7 +271,7 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 		if changed {
 			_, _ = a.store.pardonUser(a.ctx, target)
 			a.store.audit(a.ctx, message.From.ID, "addadmin", target, "")
-			registerChatCommands(a.bot, target, true)
+			registerChatCommands(a.bot, target, a.cfg.LastfmAPIKey != "")
 			a.adminDone(message, "addadmin", target)
 		} else {
 			a.adminNoChange(message, target)
@@ -273,7 +279,7 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 	case "deladmin":
 		target, _, ok := parseAdminTarget(message.CommandArguments())
 		if !ok {
-			a.sendText(message.Chat.ID, tr("admin_usage", lang, "usage", "/deladmin <tg_id>"), "HTML", nil)
+			a.sendText(message.Chat.ID, adminUsage(lang, "/deladmin <tg_id>"), "HTML", nil)
 			return true
 		}
 		if a.isOwner(target) {
@@ -287,11 +293,15 @@ func (a *app) handleAdminCommand(message *tgbotapi.Message) bool {
 		}
 		if changed {
 			a.store.audit(a.ctx, message.From.ID, "deladmin", target, "")
-			registerChatCommands(a.bot, target, false)
+			registerChatCommands(a.bot, target, a.cfg.LastfmAPIKey != "")
 			a.adminDone(message, "deladmin", target)
 		} else {
 			a.adminNoChange(message, target)
 		}
+	case "msgall":
+		a.handleBroadcastCommand(message, lang)
+	case "msg":
+		a.handleDirectNoticeCommand(message, lang)
 	case "admins":
 		a.sendAdminList(message)
 	case "banlist":
@@ -371,7 +381,7 @@ func (a *app) sendBanList(message *tgbotapi.Message) {
 func (a *app) sendUserInfo(message *tgbotapi.Message) {
 	target, _, ok := parseAdminTarget(message.CommandArguments())
 	if !ok {
-		a.sendText(message.Chat.ID, tr("admin_usage", a.langOrDefault(message.From.ID), "usage", "/userinfo <tg_id>"), "HTML", nil)
+		a.sendText(message.Chat.ID, adminUsage(a.langOrDefault(message.From.ID), "/userinfo <tg_id>"), "HTML", nil)
 		return
 	}
 	info, known, err := a.store.userInfo(a.ctx, target)
@@ -428,7 +438,7 @@ func (a *app) handleAdminPerf(message *tgbotapi.Message) {
 	case "7d":
 		window, label = 7*24*time.Hour, "7d"
 	default:
-		a.sendText(message.Chat.ID, tr("admin_usage", a.langOrDefault(message.From.ID), "usage", "/perf [1h|24h|7d]"), "HTML", nil)
+		a.sendText(message.Chat.ID, adminUsage(a.langOrDefault(message.From.ID), "/perf [1h|24h|7d]"), "HTML", nil)
 		return
 	}
 	rows, err := a.store.mediaPerformance(a.ctx, time.Now().Add(-window))

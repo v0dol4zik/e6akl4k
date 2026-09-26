@@ -74,6 +74,7 @@ type app struct {
 	inlineLimiter *rateLimiter
 	flights       flightGroup
 	metrics       metricsCache
+	errorReports  *errorReporter
 
 	mu           sync.Mutex
 	userLang     map[int64]string
@@ -83,6 +84,8 @@ type app struct {
 	active       map[string]activeDownload
 	activeUser   map[int64]bool
 	cookieAlerts cookieAlertState
+	notices      map[string]pendingNotice
+	broadcasting bool
 }
 
 func newApp(ctx context.Context, bot *tgbotapi.BotAPI, downloader *downloader) *app {
@@ -190,6 +193,24 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 		case "history":
 			if lang, ok := a.getLang(userID); ok {
 				a.sendHistory(message.Chat.ID, userID, lang)
+			} else {
+				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
+			}
+		case "export", "cover":
+			if lang, ok := a.getLang(userID); ok {
+				a.handleExportCommand(message, lang, message.Command() == "cover")
+			} else {
+				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
+			}
+		case "lastfm":
+			if lang, ok := a.getLang(userID); ok {
+				a.handleLastfmCommand(message, lang)
+			} else {
+				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
+			}
+		case "notify":
+			if lang, ok := a.getLang(userID); ok {
+				a.handleNotifyCommand(message, lang)
 			} else {
 				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 			}
@@ -316,6 +337,18 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		a.handleRangeChoice(callback)
 	case strings.HasPrefix(data, "dl:"):
 		a.handleDownload(callback)
+	case strings.HasPrefix(data, "export:"):
+		a.handleExportCallback(callback)
+	case strings.HasPrefix(data, "cover:"):
+		a.handleCoverCallback(callback)
+	case strings.HasPrefix(data, "lfm:"):
+		a.handleLastfmCallback(callback)
+	case strings.HasPrefix(data, "lfs:"):
+		a.handleLastfmPick(callback)
+	case strings.HasPrefix(data, notifyCallback):
+		a.handleNotifyCallback(callback)
+	case strings.HasPrefix(data, noticeConfirmCallback):
+		a.handleNoticeConfirm(callback)
 	}
 }
 
@@ -383,6 +416,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 
 	cancelKey, err := randomID()
 	if err != nil {
+		a.reportError(errorReport{Stage: "download", ChatID: chatID, UserID: userID, URL: url, Error: "randomID: " + err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", tr("internal_id_error", lang)), "HTML", nil)
 		return
 	}
@@ -436,7 +470,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 				showStatus(tr("queue_full", lang), "", formatKeyboard(urlKey, lang))
 				return
 			}
-			a.handleQueueError(chatID, lang, batchErr)
+			a.handleQueueError(chatID, lang, batchErr, errorReport{Stage: "batch", UserID: userID, Format: format + " " + quality})
 			return
 		}
 		a.recordDeliveryMetrics(report)
@@ -486,6 +520,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 				return
 			}
 			a.reportDownloadFailure(batchErr.Error(), sourceHost(url))
+			a.reportError(errorReport{Stage: "playlist", ChatID: chatID, UserID: userID, URL: url, Format: format + " " + quality, Error: batchErr.Error()})
 			a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(batchErr.Error())), "HTML", nil)
 		}
 		return
@@ -537,6 +572,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 		}
 		log.Printf("Ошибка загрузки source=%s user_id=%d: %v", sourceHost(url), userID, err)
 		a.reportDownloadFailure(err.Error(), sourceHost(url))
+		a.reportError(errorReport{Stage: "download", ChatID: chatID, UserID: userID, URL: url, Format: format + " " + quality, Error: err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return
 	}
@@ -547,6 +583,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			a.downloader.clearSession(results[0].Session)
 		}
 		a.reportDownloadFailure(reason, sourceHost(url))
+		a.reportError(errorReport{Stage: "download", ChatID: chatID, UserID: userID, URL: url, Format: format + " " + quality, Error: reason})
 		historyError = reason
 		a.sendText(chatID, tr("nothing_downloaded", lang, "error", reason), "", nil)
 		return
@@ -565,7 +602,7 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			historyError = queueErr.Error()
 			a.downloader.clearSession(results[0].Session)
 			a.restoreURL(urlKey, pending)
-			a.handleQueueError(chatID, lang, queueErr)
+			a.handleQueueError(chatID, lang, queueErr, errorReport{Stage: "archive", UserID: userID, URL: url, Format: format + " " + quality})
 			return
 		}
 		defer releaseArchive()
@@ -785,6 +822,7 @@ func (a *app) handleHistoryChoice(callback *tgbotapi.CallbackQuery) {
 			a.sendText(chatID, tr("history_expired", lang), "HTML", nil)
 			return
 		}
+		a.reportError(errorReport{Stage: "history_send", ChatID: chatID, UserID: userID, Format: entry.Format, Error: err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return
 	}
@@ -910,6 +948,8 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 		session = results[0].Session
 	}
 	defer a.downloader.clearSession(session)
+	failures := deliveryFailures{total: len(results)}
+	defer func() { a.reportDeliveryFailures("send", chatID, format, failures) }()
 
 	type batchAudio struct {
 		index  int
@@ -920,15 +960,18 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 	for i, result := range results {
 		idx, total := strconv.Itoa(i+1), strconv.Itoa(len(results))
 		if result.Error != "" {
+			failures.add(i+1, result.Error)
 			a.sendText(chatID, tr("send_error", lang, "idx", idx, "total", total, "error", html.EscapeString(result.Error)), "HTML", nil)
 			continue
 		}
 		info, err := os.Stat(result.FilePath)
 		if err != nil || !info.Mode().IsRegular() {
+			failures.add(i+1, "file not found: "+filepath.Base(result.FilePath))
 			a.sendText(chatID, tr("file_not_found", lang, "idx", idx, "total", total, "name", filepath.Base(result.FilePath)), "", nil)
 			continue
 		}
 		if info.Size() > a.fileLimit() {
+			failures.add(i+1, "file too large: "+humanSize(info.Size(), "en"))
 			a.sendText(chatID, tr("file_too_big", lang, "idx", idx, "total", total, "title", html.EscapeString(shortenRunes(result.Title, maxTitleLength)), "size", humanSize(info.Size(), lang)), "HTML", nil)
 			continue
 		}
@@ -943,6 +986,7 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 			document.ParseMode = "HTML"
 			message, err := sendTelegram(a.bot, document)
 			if err != nil {
+				failures.add(item.index+1, err.Error())
 				a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(err.Error())), "HTML", nil)
 				continue
 			}
@@ -993,6 +1037,7 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 			log.Printf("Не удалось отправить группу аудио: %v", sendErr)
 			if !canFallbackToIndividual(sendErr) {
 				for _, item := range batch {
+					failures.add(item.index+1, sendErr.Error())
 					a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(sendErr.Error())), "HTML", nil)
 				}
 				continue
@@ -1004,6 +1049,7 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 				audio.Caption, audio.ParseMode = buildCaption(item.result, item.size, format, lang, item.index+1, len(results)), "HTML"
 				message, err := sendTelegram(a.bot, audio)
 				if err != nil {
+					failures.add(item.index+1, err.Error())
 					a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(err.Error())), "HTML", nil)
 					continue
 				}
@@ -1052,10 +1098,14 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 	}
 	defer a.downloader.clearSession(session)
 
+	failures := deliveryFailures{total: len(results)}
+	defer func() { a.reportDeliveryFailures("zip", chatID, format, failures) }()
 	valid := make([]downloadResult, 0, len(results))
-	for _, result := range results {
+	for i, result := range results {
 		if result.Error == "" && regularFileExists(result.FilePath) {
 			valid = append(valid, result)
+		} else if result.Error != "" {
+			failures.add(i+1, result.Error)
 		}
 	}
 	if len(valid) == 0 {
@@ -1073,20 +1123,24 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 	for part, chunk := range chunks {
 		zipID, err := randomID()
 		if err != nil {
+			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
 		zipPath := filepath.Join(filepath.Dir(valid[0].FilePath), fmt.Sprintf("playlist_%02d_of_%02d_%s.zip", part+1, len(chunks), zipID))
 		if err := createZIP(zipPath, chunk); err != nil {
+			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
 		info, err := os.Stat(zipPath)
 		if err != nil {
+			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
 		if info.Size() > a.fileLimit() {
+			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: "archive too large: " + humanSize(info.Size(), "en")})
 			a.sendText(chatID, tr("zip_too_big", lang, "size", humanSize(info.Size(), lang)), "", nil)
 			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
@@ -1098,6 +1152,7 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		document.Caption = tr("zip_caption", lang, "count", strconv.Itoa(len(chunk)), "size", humanSize(info.Size(), lang), "fmt", strings.ToUpper(format), "skipped", skippedLine+partLine)
 		document.ParseMode = "HTML"
 		if _, err := sendTelegram(a.bot, document); err != nil {
+			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered}
 		}
@@ -1144,7 +1199,10 @@ func (a *app) guideText(key, lang string) string {
 	}
 	text := tr(key, lang, "username", html.EscapeString(username))
 	if key == "help" {
-		text += "\n" + tr("id_help", lang)
+		if a.cfg.LastfmAPIKey != "" {
+			text += "\n" + tr("lastfm_help", lang)
+		}
+		text += "\n" + tr("notify_help", lang) + "\n" + tr("id_help", lang)
 	}
 	return text
 }

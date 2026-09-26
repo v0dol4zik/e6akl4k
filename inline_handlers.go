@@ -188,6 +188,7 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 		inlineFailure = err.Error()
 		inlineCancelled = errors.Is(err, context.Canceled)
 		if !errors.Is(err, context.Canceled) {
+			a.reportError(errorReport{Stage: "inline", UserID: chosen.From.ID, URL: candidate.URL, Format: "mp3 320", Error: err.Error()})
 			a.editInlineError(chosen.InlineMessageID, tr("inline_error", lang, "error", html.EscapeString(err.Error())))
 		}
 		return
@@ -203,6 +204,7 @@ func (a *app) handleChosenInlineResult(chosen *tgbotapi.ChosenInlineResult) {
 	if err := a.editInlineAudio(chosen.InlineMessageID, entry.FileID, candidate, lang); err != nil {
 		inlineFailure = err.Error()
 		log.Printf("Заменить inline placeholder на аудио: %v", err)
+		a.reportError(errorReport{Stage: "inline_send", UserID: chosen.From.ID, URL: candidate.URL, Format: "mp3 320", Error: err.Error()})
 		return
 	}
 	inlineOK = true

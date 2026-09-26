@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
-	keys := []string{"BOT_TOKEN", "CACHE_CHAT_ID", "INLINE_CACHE_CHAT_ID", "DOWNLOAD_WORKERS", "DOWNLOAD_QUEUE_SIZE", "YTDLP_SLEEP_REQUESTS", "YTDLP_CONCURRENT_FRAGMENTS", "RATE_WINDOW", "ADMIN_IDS", "MAX_FILE_SIZE", "XDG_DATA_HOME"}
+	keys := []string{"BOT_TOKEN", "CACHE_CHAT_ID", "INLINE_CACHE_CHAT_ID", "ERROR_CHAT_ID", "DOWNLOAD_WORKERS", "DOWNLOAD_QUEUE_SIZE", "YTDLP_SLEEP_REQUESTS", "YTDLP_CONCURRENT_FRAGMENTS", "RATE_WINDOW", "ADMIN_IDS", "MAX_FILE_SIZE", "XDG_DATA_HOME"}
 	for _, key := range keys {
 		key := key
 		old, ok := os.LookupEnv(key)
@@ -22,6 +22,7 @@ func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
 	}
 	_ = os.Setenv("BOT_TOKEN", "token")
 	_ = os.Setenv("CACHE_CHAT_ID", "-1001")
+	_ = os.Setenv("ERROR_CHAT_ID", "-1002")
 	_ = os.Setenv("DOWNLOAD_WORKERS", "4")
 	_ = os.Setenv("YTDLP_SLEEP_REQUESTS", "2")
 	_ = os.Setenv("YTDLP_CONCURRENT_FRAGMENTS", "6")
@@ -33,7 +34,7 @@ func TestLoadConfigParsesAndBoundsEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CacheChatID != -1001 || cfg.DownloadWorkers != 4 || cfg.YTDLPSleepRequests != 2 || cfg.YTDLPFragments != 6 || cfg.RateWindow != 2*time.Minute || !cfg.AdminIDs[10] || !cfg.AdminIDs[20] {
+	if cfg.CacheChatID != -1001 || cfg.ErrorChatID != -1002 || cfg.DownloadWorkers != 4 || cfg.YTDLPSleepRequests != 2 || cfg.YTDLPFragments != 6 || cfg.RateWindow != 2*time.Minute || !cfg.AdminIDs[10] || !cfg.AdminIDs[20] {
 		t.Fatalf("config=%#v", cfg)
 	}
 	if cfg.MaxFileSize != maxFileSize {

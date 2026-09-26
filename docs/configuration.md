@@ -14,8 +14,10 @@ chmod 600 .env
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BOT_TOKEN` | required | Token issued by `@BotFather`. |
-| `CACHE_CHAT_ID` | empty | Private cache channel ID used for inline audio. |
+| `CACHE_CHAT_ID` | empty | Private cache channel ID used for inline audio and, by default, for user-facing error reports. |
 | `INLINE_CACHE_CHAT_ID` | empty | Legacy alias for `CACHE_CHAT_ID`. |
+| `ERROR_CHAT_ID` | `CACHE_CHAT_ID` | Optional separate chat for user-facing error reports. Without both variables error reporting is disabled. |
+| `LASTFM_API_KEY` | empty | last.fm API key that enables `/lastfm`. Without it the command is hidden from the menu. Create one at https://www.last.fm/api/account/create. |
 | `INLINE_PLACEHOLDER_FILE_ID` | generated | Existing silent MP3 `file_id` for inline placeholders. |
 | `ADMIN_IDS` | empty | Comma-separated immutable owner IDs. Owners manage dynamic admins; all admins can use moderation, `/perf`, and redacted `/log`. |
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory. |
@@ -61,6 +63,18 @@ The zero request delay and four concurrent fragments favor download latency. Inc
 Completed tracks, user language, observed Telegram username-to-ID mappings, dismissed support notices, counters, pending Telegram updates, dynamic administrators, bans, audit records, bounded performance samples, and 90 days of download history are stored in SQLite. `/id @username` can resolve only users previously visible to the bot because the Bot API does not provide arbitrary username lookup. The post-download support notice is shown at most once per 24 hours until the user permanently hides it. IDs in `ADMIN_IDS` are immutable owners; only owners may use `/addadmin` and `/deladmin`. The old `inline-audio-cache.json` is imported automatically and renamed with a `.migrated` suffix.
 
 Structured `media_stage` log records split latency into source probing/downloading, cover loading, transcoding, Telegram upload or remote fetch, and cached `file_id` delivery. Byte-carrying stages also report `size_bytes` and `bytes_per_second`. Secret-free samples are retained for 30 days with a 50,000-row cap and are available through `/perf [1h|24h|7d]`; `/log [fresh] <url>` returns a redacted trace of one real MP3 320 workflow.
+
+## Error reports
+
+Every error a user sees (link preview, search, download, playlist or ZIP delivery, cached re-send, `/history`, and inline downloads) is also posted to `ERROR_CHAT_ID` or, by default, to the cache channel. A post contains the stage, the user ID and last known username, the link with only track-identifying query parameters (`v`, `list`, `t`, `track`), the search query, the format, and the error text with signed-URL and cookie fragments removed.
+
+Cancellations, a busy queue, rate limits, and the playlist size limit are not reported. Identical stage and error pairs are folded for ten minutes (per-video IDs in `yt-dlp` messages are ignored for this comparison), and the next post of the same error shows how many repeats were folded. Per-track failures of one playlist or batch are combined into a single post. Posts are sent by one background worker at most every three seconds from a queue of 64 distinct reports; overflow is dropped and counted as `error_reports_dropped`, delivered posts as `error_reports_sent`.
+
+## Notices
+
+Administrators post notices with `/msgall <text>` to every user the bot knows and `/msg <tg_id> <text>` to one user. Instead of text, either command can reply to any message (text, photo, video, or file), which is then copied as is. Formatting of the text is kept. `/msgall` first shows the notice exactly as users will get it and sends it only after the author confirms; confirmation expires after 15 minutes and is lost on restart, so a notice is never sent twice. Broadcasts run one at a time in the background at 20 messages a second, and the confirmation message shows progress and a final report of delivered, unreachable (blocked the bot or deleted the account), and failed recipients. The sender, banned users, and users who muted notices are skipped; `/msg` refuses a muted user and tells the administrator so. Both commands are recorded in the administrator audit.
+
+Every notice carries a button that mutes further notices; users can also switch them with `/notify`, `/notify on`, and `/notify off`. The setting is stored in SQLite.
 
 ## Inline mode
 

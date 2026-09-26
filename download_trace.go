@@ -73,7 +73,7 @@ func (a *app) handleAdminDownloadLog(message *tgbotapi.Message) {
 	}
 	rawURL := detectURL(arguments)
 	if rawURL == "" {
-		a.sendText(message.Chat.ID, tr("admin_usage", a.langOrDefault(message.From.ID), "usage", "/log [fresh] <ссылка>"), "HTML", nil)
+		a.sendText(message.Chat.ID, adminUsage(a.langOrDefault(message.From.ID), "/log [fresh] <ссылка>"), "HTML", nil)
 		return
 	}
 	a.runDownloadTrace(message.From.ID, message.Chat.ID, rawURL, fresh)

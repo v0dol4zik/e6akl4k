@@ -66,6 +66,7 @@ type mediaInfo struct {
 	URL            string       `json:"url"`
 	Thumbnail      string       `json:"thumbnail"`
 	PlaylistIndex  int          `json:"playlist_index"`
+	PlaylistCount  int          `json:"playlist_count"`
 	Extractor      string       `json:"extractor"`
 	ExtractorKey   string       `json:"extractor_key"`
 	Entries        []*mediaInfo `json:"entries"`
@@ -83,6 +84,8 @@ type mediaPreview struct {
 	Estimated320    int64
 	SourceID        string
 	Extractor       string
+	// Tracks holds the "Artist - Title" export lines, one per playlist position.
+	Tracks []exportTrack
 }
 
 func (d *downloader) inlineLookup(ctx context.Context, query string) ([]inlineCandidate, error) {
@@ -282,6 +285,7 @@ func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, err
 	} else {
 		preview.TrackCount = 1
 	}
+	preview.Tracks = exportTracksFromInfo(info, preview.IsPlaylist)
 	preview.Estimated128 = estimateAudioSize(preview.DurationSeconds, "mp3", "128")
 	preview.Estimated320 = estimateAudioSize(preview.DurationSeconds, "mp3", "320")
 	return preview, nil
@@ -463,9 +467,11 @@ func validatePlaylistSizeWithLimit(count, limit int) error {
 	return nil
 }
 
-func (d *downloader) probe(ctx context.Context, url string) (*mediaInfo, string, error) {
+// probe dumps the metadata of a link; extra arguments (such as --flat-playlist) go before it.
+func (d *downloader) probe(ctx context.Context, url string, extra ...string) (*mediaInfo, string, error) {
 	started := time.Now()
-	args := append(d.commonArgs(), "--dump-single-json", "--simulate", "--ignore-errors", "--", url)
+	args := append(d.commonArgs(), extra...)
+	args = append(args, "--dump-single-json", "--simulate", "--ignore-errors", "--", url)
 	stdout, stderr, err := d.run(ctx, args...)
 	defer func() { logMediaStage("source_probe", sourceHost(url), started, 0, err == nil) }()
 	if bytes.Equal(bytes.TrimSpace(stdout), []byte("null")) {

@@ -218,6 +218,8 @@ CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 		`ALTER TABLE download_history ADD COLUMN cache_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE download_history ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE download_history ADD COLUMN artist TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN lastfm_user TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN notifications_off INTEGER NOT NULL DEFAULT 0`,
 	} {
 		_, err = s.db.ExecContext(ctx, statement)
 		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
@@ -461,6 +463,66 @@ ON CONFLICT(user_id) DO UPDATE SET default_format=excluded.default_format, defau
 	return err
 }
 
+// lastfmUser returns the linked last.fm profile, or an empty string when none is linked.
+func (s *store) lastfmUser(ctx context.Context, userID int64) string {
+	var name string
+	_ = s.db.QueryRowContext(ctx, `SELECT lastfm_user FROM users WHERE user_id=?`, userID).Scan(&name)
+	return name
+}
+
+// setLastfmUser links a last.fm profile; an empty name unlinks it.
+func (s *store) setLastfmUser(ctx context.Context, userID int64, name string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO users(user_id, language, lastfm_user, updated_at) VALUES(?,?,?,unixepoch())
+ON CONFLICT(user_id) DO UPDATE SET lastfm_user=excluded.lastfm_user, updated_at=excluded.updated_at`, userID, defaultLang, name)
+	return err
+}
+
+// notificationsOff reports whether a user muted the notices sent by /msgall and /msg.
+func (s *store) notificationsOff(ctx context.Context, userID int64) bool {
+	var off int
+	_ = s.db.QueryRowContext(ctx, `SELECT notifications_off FROM users WHERE user_id=?`, userID).Scan(&off)
+	return off != 0
+}
+
+func (s *store) setNotificationsOff(ctx context.Context, userID int64, off bool) error {
+	value := 0
+	if off {
+		value = 1
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO users(user_id, language, notifications_off, updated_at) VALUES(?,?,?,unixepoch())
+ON CONFLICT(user_id) DO UPDATE SET notifications_off=excluded.notifications_off, updated_at=excluded.updated_at`, userID, defaultLang, value)
+	return err
+}
+
+type noticeRecipient struct {
+	UserID int64
+	Lang   string
+}
+
+// noticeRecipients lists the users a broadcast reaches: everyone who chose a language, except
+// the sender, banned users and those who muted notices. muted counts the latter.
+func (s *store) noticeRecipients(ctx context.Context, senderID int64) (recipients []noticeRecipient, muted int, err error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT user_id, language, notifications_off FROM users
+WHERE user_id>0 AND user_id<>? AND user_id NOT IN (SELECT user_id FROM bans) ORDER BY user_id`, senderID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var recipient noticeRecipient
+		var off int
+		if err := rows.Scan(&recipient.UserID, &recipient.Lang, &off); err != nil {
+			return nil, 0, err
+		}
+		if off != 0 {
+			muted++
+			continue
+		}
+		recipients = append(recipients, recipient)
+	}
+	return recipients, muted, rows.Err()
+}
+
 func normalizeTelegramUsername(value string) (string, bool) {
 	value = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "@"))
 	if len(value) < 5 || len(value) > 32 {
@@ -510,6 +572,15 @@ func (s *store) telegramUserIDByUsername(ctx context.Context, username string) (
 		return 0, false, nil
 	}
 	return userID, err == nil, err
+}
+
+// telegramUsername returns the last observed username for a user, or "" when none is known.
+func (s *store) telegramUsername(ctx context.Context, userID int64) string {
+	var username string
+	if err := s.db.QueryRowContext(ctx, `SELECT username FROM telegram_users WHERE user_id=?`, userID).Scan(&username); err != nil {
+		return ""
+	}
+	return username
 }
 
 func (s *store) claimUserNotice(ctx context.Context, userID int64, notice string, interval time.Duration) (bool, error) {

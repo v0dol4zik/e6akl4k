@@ -109,14 +109,14 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 func TestBotCommandsAreLocalized(t *testing.T) {
 	ru := botCommands("ru", false)
 	en := botCommands("en", false)
-	if len(ru) != 6 || len(en) != 6 || ru[1].Description == en[1].Description || ru[3].Command != "settings" || ru[4].Command != "history" || ru[5].Command != "id" {
+	if len(ru) != 9 || len(en) != 9 || ru[1].Description == en[1].Description || ru[3].Command != "settings" || ru[4].Command != "history" || ru[5].Command != "export" || ru[6].Command != "cover" || ru[7].Command != "notify" || ru[8].Command != "id" {
 		t.Fatalf("unexpected localized commands: ru=%#v en=%#v", ru, en)
 	}
-	admin := botCommands("en", true)
-	if !reflect.DeepEqual(admin, en) {
-		t.Fatalf("admin commands must stay hidden from the Telegram menu: public=%#v admin=%#v", en, admin)
+	lastfm := botCommands("en", true)
+	if len(lastfm) != 10 || lastfm[7].Command != "lastfm" || !reflect.DeepEqual(lastfm[:7], en[:7]) || !reflect.DeepEqual(lastfm[8:], en[7:]) {
+		t.Fatalf("/lastfm must be listed before /notify only when configured: %#v", lastfm)
 	}
-	for _, commands := range [][]tgbotapi.BotCommand{ru, en, admin} {
+	for _, commands := range [][]tgbotapi.BotCommand{ru, en, lastfm, botCommands("ru", true)} {
 		for _, command := range commands {
 			if command.Description == "" || len([]rune(command.Description)) > 256 {
 				t.Errorf("invalid command description: %#v", command)

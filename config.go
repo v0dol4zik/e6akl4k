@@ -14,6 +14,8 @@ type config struct {
 	DownloadDir        string
 	DatabasePath       string
 	CacheChatID        int64
+	ErrorChatID        int64
+	LastfmAPIKey       string
 	HTTPAddr           string
 	DownloadWorkers    int
 	DownloadQueueSize  int
@@ -120,6 +122,14 @@ func loadConfig() (config, error) {
 		}
 		cfg.CacheChatID = id
 	}
+	if errorChatText := strings.TrimSpace(os.Getenv("ERROR_CHAT_ID")); errorChatText != "" {
+		id, err := strconv.ParseInt(errorChatText, 10, 64)
+		if err != nil || id == 0 {
+			return config{}, fmt.Errorf("ERROR_CHAT_ID должен быть числовым ID чата: %q", errorChatText)
+		}
+		cfg.ErrorChatID = id
+	}
+	cfg.LastfmAPIKey = strings.TrimSpace(os.Getenv("LASTFM_API_KEY"))
 	databaseDefault := filepath.Join(envString("XDG_DATA_HOME", cfg.DownloadDir), "musicbot.db")
 	cfg.DatabasePath = envString("DATABASE_PATH", databaseDefault)
 	return cfg, nil

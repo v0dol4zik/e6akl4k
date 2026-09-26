@@ -26,12 +26,13 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 		if errors.Is(err, errQueueFull) && a.store != nil {
 			a.store.increment(a.ctx, "queue_rejected")
 		}
-		a.handleQueueError(message.Chat.ID, lang, err)
+		a.handleQueueError(message.Chat.ID, lang, err, errorReport{Stage: "preview", UserID: message.From.ID, URL: rawURL})
 		return
 	}
 	preview, err := a.inspectURL(ctx, rawURL)
 	release()
 	if err != nil {
+		a.reportError(errorReport{Stage: "preview", ChatID: message.Chat.ID, UserID: message.From.ID, URL: rawURL, Error: err.Error()})
 		a.sendText(message.Chat.ID, tr("preview_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return
 	}
@@ -87,7 +88,7 @@ func (a *app) presentSearchResults(chatID, userID int64, query, lang string, sta
 	defer cancel()
 	candidates, err := a.runRankedLookup(ctx, query, expectedDuration)
 	if err != nil {
-		a.handleQueueError(chatID, lang, err)
+		a.handleQueueError(chatID, lang, err, errorReport{Stage: "search", UserID: userID, Query: query})
 		return
 	}
 	if a.store != nil {
@@ -282,6 +283,7 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 				a.store.increment(a.ctx, "cache_hits")
 				return true, true
 			} else if !invalidCachedFileError(err) {
+				a.reportError(errorReport{Stage: "cache_send", ChatID: chatID, UserID: pending.UserID, URL: pending.URL, Format: format + " " + quality, Error: err.Error()})
 				a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 				return true, false
 			}
@@ -300,6 +302,7 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 			return true, false
 		}
 		a.reportDownloadFailure(err.Error(), sourceHost(pending.URL))
+		a.reportError(errorReport{Stage: "download", ChatID: chatID, UserID: pending.UserID, URL: pending.URL, Format: format + " " + quality, Error: err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return true, false
 	}
@@ -311,6 +314,7 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 			a.store.deleteCachedAudio(ctx, entry.Key)
 			return false, false
 		}
+		a.reportError(errorReport{Stage: "cache_send", ChatID: chatID, UserID: pending.UserID, URL: pending.URL, Format: format + " " + quality, Error: err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return true, false
 	}
@@ -467,12 +471,16 @@ func (a *app) deleteStatusMessage(message *tgbotapi.Message) {
 	}
 }
 
-func (a *app) handleQueueError(chatID int64, lang string, err error) {
+// handleQueueError tells the user why a queued job failed; real failures (not a full queue or a
+// cancellation) are also forwarded to the operator chat with the given report context.
+func (a *app) handleQueueError(chatID int64, lang string, err error, report errorReport) {
 	if errors.Is(err, errQueueFull) {
 		a.sendText(chatID, tr("queue_full", lang), "", nil)
 		return
 	}
 	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		report.ChatID, report.Error = chatID, err.Error()
+		a.reportError(report)
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 	}
 }
@@ -542,7 +550,7 @@ func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang
 		if errors.Is(err, errQueueFull) && a.store != nil {
 			a.store.increment(a.ctx, "queue_rejected")
 		}
-		a.handleQueueError(chatID, lang, err)
+		a.handleQueueError(chatID, lang, err, errorReport{Stage: "batch_preview", UserID: userID})
 		return
 	}
 	kept := make([]string, 0, len(urls))
@@ -562,6 +570,7 @@ func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang
 				a.sendText(chatID, tr("preview_error", lang, "error", html.EscapeString(ctx.Err().Error())), "HTML", nil)
 				return
 			}
+			a.reportError(errorReport{Stage: "batch_preview", ChatID: chatID, UserID: userID, URL: rawURL, Error: previewErr.Error()})
 			failed = append(failed, tr("batch_link_failed", lang, "url", html.EscapeString(rawURL), "error", html.EscapeString(previewErr.Error())))
 			continue
 		}
@@ -813,6 +822,7 @@ func (a *app) sendBatchCached(ctx context.Context, chatID int64, item pendingURL
 			a.store.deleteCachedAudio(ctx, key)
 			continue
 		}
+		a.reportError(errorReport{Stage: "cache_send", ChatID: chatID, UserID: item.UserID, URL: item.URL, Format: format + " " + quality, Error: err.Error()})
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return false, true
 	}
