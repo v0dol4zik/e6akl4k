@@ -17,7 +17,7 @@ RUN apt-get -o Acquire::Retries=5 \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && apt-get --print-uris --yes --no-install-recommends install ffmpeg passwd python3 unzip \
        | sed -n "s/^'\\([^']*\\)' \\([^ ]*\\).*/\\1 \\2/p" \
-       | xargs -r -n 2 -P 8 sh -c 'curl -fsSL --retry 3 --retry-delay 1 "$1" -o "/var/cache/apt/archives/$2"' sh \
+       | xargs -r -n 2 -P 8 sh -c 'curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 30 --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "/var/cache/apt/archives/$2"' sh \
     && apt-get install -y --no-install-recommends ffmpeg passwd python3 unzip \
     && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && case "$ARCH" in \
