@@ -345,16 +345,153 @@ func TestYouTube403RetriesWithoutCookies(t *testing.T) {
 		t.Fatalf("non-YouTube 403 must not retry, calls=%d", got)
 	}
 
-	// runWithProgress follows the same rule.
-	if err := os.Remove(calls); err != nil {
+}
+
+// TestYouTubeDownloadOrder covers runDownload: a YouTube download starts without cookies, retries
+// only the failed items, once without cookies after a 403 and then with cookies when YouTube asks
+// to sign in.
+func TestYouTubeDownloadOrder(t *testing.T) {
+	const (
+		forbidden = "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+		signIn    = "ERROR: [youtube] abc: Sign in to confirm your age. Use --cookies for the authentication."
+	)
+	cases := []struct {
+		name string
+		// rules lines are "<cookies|anonymous> <attempt|any> <item> <stderr>": the item fails with
+		// that stderr on the matching call; every other item downloads.
+		rules      []string
+		cookies    bool
+		target     string
+		selected   []int
+		wantCalls  []string // "<cookies|anonymous> <items>" per call
+		wantFailed bool
+	}{
+		{"anonymous works", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1"}, false},
+		{"sign in uses cookies", []string{"anonymous any 1 " + signIn}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1", "cookies 1"}, false},
+		{"sign in without cookies", []string{"anonymous any 1 " + signIn}, false, "https://youtu.be/abc", []int{1}, []string{"anonymous 1"}, true},
+		{"anonymous 403 retried", []string{"anonymous 1 1 " + forbidden}, true, "https://www.youtube.com/watch?v=abc", []int{1}, []string{"anonymous 1", "anonymous 1"}, false},
+		{"anonymous 403 twice", []string{"anonymous any 1 " + forbidden}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1", "anonymous 1"}, true},
+		{"other error", []string{"anonymous any 1 ERROR: [youtube] abc: Video unavailable"}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1"}, true},
+		{"other site keeps cookies", nil, true, "https://soundcloud.com/a/b", []int{1}, []string{"cookies 1"}, false},
+		{
+			"playlist retries only failed items",
+			[]string{"anonymous 1 3 " + forbidden, "anonymous any 5 " + signIn},
+			true, "https://www.youtube.com/playlist?list=x", []int{2, 3, 5},
+			[]string{"anonymous 2,3,5", "anonymous 3,5", "cookies 5"}, false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls.log")
+			rules := filepath.Join(dir, "rules")
+			if err := os.WriteFile(rules, []byte(strings.Join(tc.rules, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := `#!/bin/sh
+mode=anonymous; dir=''; manifest=''; progress=''; items=1
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --cookies) mode=cookies; shift 2 ;;
+    --paths) dir="$2"; shift 2 ;;
+    --playlist-items) items="$2"; shift 2 ;;
+    --print-to-file)
+      case "$2" in after_move:*) manifest="$3" ;; before_dl:*) progress="$3" ;; esac
+      shift 3 ;;
+    *) shift ;;
+  esac
+done
+echo "$mode $items" >> ` + calls + `
+n=$(grep -c "^$mode " ` + calls + `)
+status=0
+oldifs="$IFS"; IFS=,
+for item in $items; do
+  printf '%s\n' "$item" >> "$progress"
+  message=$(grep -E "^$mode ($n|any) $item " ` + rules + ` | cut -d' ' -f4-)
+  if [ -n "$message" ]; then echo "$message" >&2; status=1; continue; fi
+  path="$dir/$item.mp3"
+  printf 'audio' > "$path"
+  printf '{"id":"id%s","playlist_index":%s,"filepath":"%s"}\n' "$item" "$item" "$path" >> "$manifest"
+done
+IFS="$oldifs"
+exit $status
+`
+			fake := filepath.Join(dir, "yt-dlp")
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			d := &downloader{bin: fake, downloadDir: dir}
+			if tc.cookies {
+				d.cookiesFile = filepath.Join(dir, "cookies.txt")
+				if err := os.WriteFile(d.cookiesFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.refreshCookieSnapshot(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			session := filepath.Join(dir, "session")
+			if err := os.Mkdir(session, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			manifest := filepath.Join(session, "manifest.jsonl")
+			playlist := len(tc.selected) > 1
+			var reported []int
+			progress := func(completed, total int) { reported = append(reported, completed) }
+			_, err := d.runDownload(context.Background(), tc.target, "mp3", "best", session, manifest, tc.selected, playlist, progress, len(tc.selected))
+			if (err != nil) != tc.wantFailed {
+				t.Fatalf("err=%v, want failed=%v", err, tc.wantFailed)
+			}
+			data, _ := os.ReadFile(calls)
+			if got := strings.Split(strings.TrimSpace(string(data)), "\n"); !reflect.DeepEqual(got, tc.wantCalls) {
+				t.Fatalf("calls=%q, want %q", got, tc.wantCalls)
+			}
+			downloaded, err := readManifest(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantFailed && len(downloaded) != len(tc.selected) {
+				t.Fatalf("downloaded=%d, want %d", len(downloaded), len(tc.selected))
+			}
+			for _, completed := range reported {
+				if completed > len(tc.selected) {
+					t.Fatalf("progress=%v exceeds %d", reported, len(tc.selected))
+				}
+			}
+			if playlist && (len(reported) == 0 || reported[len(reported)-1] != len(tc.selected)) {
+				t.Fatalf("progress=%v, want it to end at %d", reported, len(tc.selected))
+			}
+		})
+	}
+}
+
+func TestMissingItems(t *testing.T) {
+	manifest := filepath.Join(t.TempDir(), "manifest.jsonl")
+	if got := missingItems(manifest, []int{1}, false); !reflect.DeepEqual(got, []int{1}) {
+		t.Fatalf("no manifest: missing=%v", got)
+	}
+	if err := os.WriteFile(manifest, []byte(`{"id":"a","playlist_index":4}`+"\n"+`{"id":"b","playlist_index":9}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manifest := filepath.Join(dir, "progress.log")
-	if _, _, err := d.runWithProgress(context.Background(), []string{"--", "https://youtu.be/abc"}, manifest, nil, 1); err != nil {
-		t.Fatalf("runWithProgress must succeed after retry: %v", err)
+	if got := missingItems(manifest, []int{1}, false); got != nil {
+		t.Fatalf("single video downloaded: missing=%v", got)
 	}
-	data, _ = os.ReadFile(calls)
-	if got := len(strings.Split(strings.TrimSpace(string(data)), "\n")); got != 2 {
-		t.Fatalf("runWithProgress retry calls=%d, want 2", got)
+	if got := missingItems(manifest, []int{4, 6, 9, 11}, true); !reflect.DeepEqual(got, []int{6, 11}) {
+		t.Fatalf("playlist: missing=%v", got)
+	}
+}
+
+func TestYouTubeSignInRequired(t *testing.T) {
+	for stderr, want := range map[string]bool{
+		"ERROR: [youtube] abc: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.": true,
+		"ERROR: [youtube] abc: This video may be inappropriate for some users.":                                                      true,
+		"ERROR: [youtube] abc: Join this channel to get access to members-only content like this video.":                             true,
+		"ERROR: [youtube] abc: Private video. Sign in if you've been granted access to this video":                                   true,
+		"ERROR: unable to download video data: HTTP Error 403: Forbidden":                                                            false,
+		"ERROR: [youtube] abc: Video unavailable":                                                                                    false,
+	} {
+		if got := youtubeSignInRequired(stderr); got != want {
+			t.Errorf("youtubeSignInRequired(%q)=%v, want %v", stderr, got, want)
+		}
 	}
 }

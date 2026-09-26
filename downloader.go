@@ -586,32 +586,41 @@ func (d *downloader) probe(ctx context.Context, url string, extra ...string) (*m
 func (d *downloader) runDownload(ctx context.Context, url, format, quality, sessionDir, manifest string, selected []int, playlist bool, progress downloadProgress, total int) (string, error) {
 	started := time.Now()
 	template := "after_move:%(.{id,title,track,artist,uploader,channel,duration,duration_string,filepath,ext,playlist_index,extractor,extractor_key,webpage_url})j"
-	progressFile := filepath.Join(sessionDir, "progress.log")
-	args := append(d.commonArgs(),
-		"--no-simulate",
-		"--no-abort-on-error",
-		"--sleep-interval", "0",
-		"--max-sleep-interval", "3",
-		"--paths", sessionDir,
-		"--output", "%(autonumber)06d_%(id)s.%(ext)s",
-		"--extract-audio",
-		"--embed-metadata",
-		"--embed-thumbnail",
-		"--convert-thumbnails", "jpg",
-		"--force-overwrites",
-		"--print-to-file", template, manifest,
-		"--print-to-file", "before_dl:%(playlist_index)s", progressFile,
-	)
-	args = append(args, audioFormatArgs(format, quality)...)
-	if playlist {
-		items := make([]string, len(selected))
-		for i, position := range selected {
-			items[i] = strconv.Itoa(position)
+	// argsFor downloads the given playlist items and logs each start to progressFile.
+	argsFor := func(items []int, progressFile string) []string {
+		args := append(d.commonArgs(),
+			"--no-simulate",
+			"--no-abort-on-error",
+			"--sleep-interval", "0",
+			"--max-sleep-interval", "3",
+			"--paths", sessionDir,
+			"--output", "%(autonumber)06d_%(id)s.%(ext)s",
+			"--extract-audio",
+			"--embed-metadata",
+			"--embed-thumbnail",
+			"--convert-thumbnails", "jpg",
+			"--force-overwrites",
+			"--print-to-file", template, manifest,
+			"--print-to-file", "before_dl:%(playlist_index)s", progressFile,
+		)
+		args = append(args, audioFormatArgs(format, quality)...)
+		if playlist {
+			positions := make([]string, len(items))
+			for i, position := range items {
+				positions[i] = strconv.Itoa(position)
+			}
+			args = append(args, "--playlist-items", strings.Join(positions, ","))
 		}
-		args = append(args, "--playlist-items", strings.Join(items, ","))
+		return append(args, "--", url)
 	}
-	args = append(args, "--", url)
-	_, stderr, err := d.runWithProgress(ctx, args, progressFile, progress, total)
+	var stderr string
+	var err error
+	if argsHaveYouTubeTarget([]string{"--", url}) {
+		stderr, err = d.downloadYouTube(ctx, argsFor, sessionDir, manifest, selected, playlist, progress, total)
+	} else {
+		progressFile := filepath.Join(sessionDir, "progress.log")
+		_, stderr, err = d.runWithProgress(ctx, argsFor(selected, progressFile), progressFile, progress, total)
+	}
 	logMediaStage("source_download", sourceHost(url), started, regularFilesSize(sessionDir), err == nil, "format", format, "quality", quality)
 	return stderr, err
 }
@@ -625,16 +634,96 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 	if cookies == "" {
 		return d.runWithProgressOnce(ctx, args, manifest, progress, total)
 	}
-	stdout, stderr, err := d.runWithProgressOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies), manifest, progress, total)
-	if !cookieForbiddenRetry(args, stderr, err, ctx) {
-		return stdout, stderr, err
+	return d.runWithProgressOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies), manifest, progress, total)
+}
+
+// downloadYouTube downloads without cookies first. Without a PO token provider, YouTube answers a
+// signed-in session's media requests with 403 whichever client yt-dlp picks, while an anonymous
+// download works. Only the items that failed are downloaded again, so a playlist never starts
+// over: once more without cookies after a 403, which an anonymous session gets now and then, and
+// then with cookies if YouTube asked to sign in (a bot check, an age gate, a members-only video).
+func (d *downloader) downloadYouTube(ctx context.Context, argsFor func(items []int, progressFile string) []string, sessionDir, manifest string, selected []int, playlist bool, progress downloadProgress, total int) (string, error) {
+	progressFile := filepath.Join(sessionDir, "progress.log")
+	_, stderr, err := d.runWithProgressOnce(ctx, argsFor(selected, progressFile), progressFile, progress, total)
+	for pass, withCookies := range []bool{false, true} {
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		retry := isForbiddenFailure(stderr)
+		if withCookies {
+			retry = d.cookiesFile != "" && youtubeSignInRequired(stderr)
+		}
+		if !retry {
+			continue
+		}
+		missing := missingItems(manifest, selected, playlist)
+		if len(missing) == 0 {
+			break
+		}
+		// A fresh progress log counts the retried items on top of the finished ones.
+		progressFile = filepath.Join(sessionDir, fmt.Sprintf("progress-retry%d.log", pass+1))
+		args := argsFor(missing, progressFile)
+		var retryProgress downloadProgress
+		if progress != nil {
+			finished := len(selected) - len(missing)
+			retryProgress = func(completed, _ int) { progress(finished+completed, total) }
+		}
+		if withCookies {
+			cookies, cleanup, cookieErr := d.isolatedCookieFile()
+			if cookieErr != nil {
+				cleanup()
+				break
+			}
+			log.Printf("YouTube просит вход, повторяю загрузку %d из %d с cookies", len(missing), len(selected))
+			logMediaStage("youtube_signin_retry", "youtube", time.Now(), 0, true, "items", strconv.Itoa(len(missing)))
+			_, stderr, err = d.runWithProgressOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies), progressFile, retryProgress, total)
+			cleanup()
+			continue
+		}
+		log.Printf("YouTube вернул 403 без cookies, повторяю загрузку %d из %d", len(missing), len(selected))
+		logMediaStage("youtube_forbidden_retry", "youtube", time.Now(), 0, true, "items", strconv.Itoa(len(missing)))
+		_, stderr, err = d.runWithProgressOnce(ctx, args, progressFile, retryProgress, total)
 	}
-	log.Printf("yt-dlp вернул 403 с cookies, повторяю загрузку без cookies")
-	logMediaStage("cookie_forbidden_retry", "youtube", time.Now(), 0, true)
-	if d.onCookieRetry != nil {
-		d.onCookieRetry()
+	return stderr, err
+}
+
+// missingItems returns the selected items that the manifest does not list as downloaded yet. An
+// unreadable manifest yields none: the caller fails on it anyway, and a retry must not overwrite
+// tracks that may already be downloaded.
+func missingItems(manifest string, selected []int, playlist bool) []int {
+	downloaded, err := readManifest(manifest)
+	if err != nil {
+		return nil
 	}
-	return d.runWithProgressOnce(ctx, args, manifest, progress, total)
+	if !playlist {
+		if len(downloaded) > 0 {
+			return nil
+		}
+		return selected
+	}
+	done := make(map[int]bool, len(downloaded))
+	for _, entry := range downloaded {
+		done[entry.PlaylistIndex] = true
+	}
+	var missing []int
+	for _, item := range selected {
+		if !done[item] {
+			missing = append(missing, item)
+		}
+	}
+	return missing
+}
+
+// youtubeSignInRequired reports whether yt-dlp failed because YouTube serves the video only to a
+// signed-in session; yt-dlp suggests --cookies in all of these errors.
+func youtubeSignInRequired(stderr string) bool {
+	low := strings.ToLower(stderr)
+	for _, marker := range []string{"sign in", "--cookies", "members-only", "join this channel", "private video", "age-restricted", "inappropriate for some users"} {
+		if strings.Contains(low, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *downloader) runWithProgressOnce(ctx context.Context, args []string, manifest string, progress downloadProgress, total int) ([]byte, string, error) {

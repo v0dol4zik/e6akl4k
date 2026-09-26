@@ -55,6 +55,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Pasted links in inline mode are read like in a private chat: a YouTube video is named through oEmbed without a slow `yt-dlp` probe, other supported links are probed, and Spotify, Apple Music, Deezer, Tidal, and Yandex Music track links are searched on YouTube by their title instead of being offered as the raw URL.
 - A search that finds nothing is retried without its last word, up to twice, so a trailing typo such as "subtronics — sploinky dub vshj" still finds the track. A search that still finds nothing answers "nothing found" in place of the "searching" status and is no longer posted to the error chat.
 - Spotify links without the `open.` prefix (`spotify.com/track/...`) are moved to `open.spotify.com` before reading their title. Music-service track links skip the `yt-dlp` probe, which has no extractor for these services and failed with TLS handshake timeouts while downloading their pages.
+- YouTube downloads start without cookies, because YouTube now answers a signed-in session's media requests with `HTTP Error 403: Forbidden` while anonymous downloads work. Only the tracks that failed are downloaded again, so a playlist never starts over: an anonymous `403` gets one fresh attempt, and the cookies are attached only when YouTube asks to sign in. A download no longer fails after both the cookie attempt and its single retry got a `403`.
 
 ## [v2026.08.14] - 2026-08-14
 

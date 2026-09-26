@@ -77,7 +77,7 @@ If the bot check returns, replace the mounted file explicitly and run the deploy
 
 ### `HTTP Error 403: Forbidden` with valid cookies
 
-YouTube sometimes binds a signed-in cookie session to SABR-only streaming. The metadata probe still succeeds, but every media URL returns `403`, while the same request without cookies downloads normally. The bot handles this automatically: a YouTube download or search that fails with `403` while cookies are attached is retried once without cookies. The retry is logged as `cookie_forbidden_retry` and counted in `youtube_cookie_retries`. Age-restricted and private videos are unavailable while the cookies do not work.
+Without a PO token provider, YouTube binds a signed-in cookie session to SABR-only streaming or to PO-token-bound media URLs. The metadata probe still succeeds, but every media request returns `403` whichever client `yt-dlp` picks, while the same download without cookies works. So YouTube downloads start without cookies, and only the tracks that failed are downloaded again, so a playlist never starts over. An anonymous `403` is occasional and gets one fresh attempt, logged as `youtube_forbidden_retry`. After that, the cookies are attached only when YouTube asks to sign in (a bot check, an age gate, or a members-only or private video), logged as `youtube_signin_retry`. Probes and searches still send the cookies first; one that fails with `403` is retried once without cookies, logged as `cookie_forbidden_retry` and counted in `youtube_cookie_retries`.
 
 YouTube also sends an occasional `403` to cookies that still work, so a suspicion alone never alerts. When three retries happen within ten minutes, or a download fails with a bot check or rotated cookies, the bot first opens the account's Watch Later playlist (`:ytwatchlater`) with an isolated copy of the cookies; YouTube serves it only to a signed-in session. Administrators get an alert with a check button only when this login check fails. A working login is trusted for 30 minutes, a network error or timeout is logged without an alert, and results are counted in `youtube_cookie_login_ok`, `youtube_cookie_login_failed`, and `youtube_cookie_login_unknown`. Alerts are sent at most once every six hours.
 
@@ -88,7 +88,7 @@ sudo docker exec e6akl4k-music_bot-1 sh -c 'cp /app/cookies.txt /tmp/c.txt && yt
 sudo docker exec e6akl4k-music_bot-1 sh -c 'yt-dlp --ignore-config -f bestaudio -o /tmp/t.%(ext)s <url>; rm -f /tmp/t.*'
 ```
 
-If only the first command fails with `403`, export fresh cookies from a browser session and install them as shown above.
+If only the first command fails with `403` while the Watch Later check passes, the cookies are fine and the bot already works around it; fresh cookies help only when the login check fails.
 
 ## Operations
 
