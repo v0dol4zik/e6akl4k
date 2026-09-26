@@ -99,7 +99,7 @@ Use an authenticated reverse proxy or a local-only port binding before exposing 
 
 ### Prometheus scrape
 
-`/metrics` exports persistent counters (`musicbot_counter_total{name}`), per-stage latency quantiles and success ratios for the last hour (`musicbot_stage_seconds{stage,source,quantile}`, `musicbot_stage_ok_ratio{stage,source}`), the Telegram cache hit ratio (`musicbot_cache_hit_ratio`), the Octave remote-URL fast-path share (`musicbot_octave_fast_path_ratio`), and the Octave circuit breaker state (`musicbot_octave_circuit_state`: 0 closed, 1 open, 2 half-open). SQLite aggregates are cached for 30 seconds, so a 15-30 second scrape interval adds no database load:
+`/metrics` exports persistent counters (`musicbot_counter_total{name}`), per-stage latency quantiles and success ratios for the last hour (`musicbot_stage_seconds{stage,source,quantile}`, `musicbot_stage_ok_ratio{stage,source}`), and the Telegram cache hit ratio (`musicbot_cache_hit_ratio`). SQLite aggregates are cached for 30 seconds, so a 15-30 second scrape interval adds no database load:
 
 ```yaml
 scrape_configs:

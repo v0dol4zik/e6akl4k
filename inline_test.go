@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -194,7 +192,7 @@ printf '%s' '{"entries":[{"id":"video-id","title":"Track","uploader":"Artist","d
 	}
 }
 
-func TestTextSearchUsesYouTubeWithoutCallingOctave(t *testing.T) {
+func TestSearchesUseYouTube(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "fake-yt-dlp")
 	script := `#!/bin/sh
 printf '%s' '{"entries":[{"id":"youtube-id","title":"Fallback","uploader":"Artist","duration":60,"url":"youtube-id"}]}'
@@ -202,14 +200,7 @@ printf '%s' '{"entries":[{"id":"youtube-id","title":"Fallback","uploader":"Artis
 	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	var octaveCalls atomic.Int32
-	d := downloader{
-		bin: bin,
-		octave: testOctaveClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			octaveCalls.Add(1)
-			w.WriteHeader(http.StatusServiceUnavailable)
-		})),
-	}
+	d := downloader{bin: bin}
 	searches := []struct {
 		name string
 		run  func() ([]inlineCandidate, error)
@@ -231,8 +222,5 @@ printf '%s' '{"entries":[{"id":"youtube-id","title":"Fallback","uploader":"Artis
 				t.Fatalf("unexpected YouTube candidates: %#v", candidates)
 			}
 		})
-	}
-	if octaveCalls.Load() != 0 {
-		t.Fatalf("Octave search calls = %d, want 0", octaveCalls.Load())
 	}
 }

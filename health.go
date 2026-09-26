@@ -103,8 +103,8 @@ func observabilityHandler(a *app) http.Handler {
 		aa, aw, _ := a.archives.snapshot()
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		stats := snapshot.stats
-		_, _ = fmt.Fprintf(w, "musicbot_downloads_total{result=\"ok\"} %d\nmusicbot_downloads_total{result=\"partial\"} %d\nmusicbot_downloads_total{result=\"failed\"} %d\nmusicbot_downloads_total{result=\"cancelled\"} %d\nmusicbot_youtube_cookie_errors_total %d\nmusicbot_cache_hits_total %d\nmusicbot_searches_total %d\nmusicbot_search_octave_total %d\nmusicbot_search_youtube_fallback_total %d\nmusicbot_rate_limited_total %d\nmusicbot_queue_rejected_total %d\nmusicbot_users %d\nmusicbot_cached_tracks %d\nmusicbot_downloads_active %d\nmusicbot_downloads_queued %d\nmusicbot_lookups_active %d\nmusicbot_lookups_queued %d\nmusicbot_archives_active %d\nmusicbot_archives_queued %d\n",
-			stats.DownloadsOK, stats.DownloadsPartial, stats.DownloadsFailed, stats.Cancelled, stats.CookieErrors, stats.CacheHits, stats.Searches, stats.SearchOctave, stats.SearchYouTubeFallback, stats.RateLimited, stats.QueueRejected, stats.UniqueUsers, stats.CachedTracks, da, dw, la, lw, aa, aw)
+		_, _ = fmt.Fprintf(w, "musicbot_downloads_total{result=\"ok\"} %d\nmusicbot_downloads_total{result=\"partial\"} %d\nmusicbot_downloads_total{result=\"failed\"} %d\nmusicbot_downloads_total{result=\"cancelled\"} %d\nmusicbot_youtube_cookie_errors_total %d\nmusicbot_cache_hits_total %d\nmusicbot_searches_total %d\nmusicbot_rate_limited_total %d\nmusicbot_queue_rejected_total %d\nmusicbot_users %d\nmusicbot_cached_tracks %d\nmusicbot_downloads_active %d\nmusicbot_downloads_queued %d\nmusicbot_lookups_active %d\nmusicbot_lookups_queued %d\nmusicbot_archives_active %d\nmusicbot_archives_queued %d\n",
+			stats.DownloadsOK, stats.DownloadsPartial, stats.DownloadsFailed, stats.Cancelled, stats.CookieErrors, stats.CacheHits, stats.Searches, stats.RateLimited, stats.QueueRejected, stats.UniqueUsers, stats.CachedTracks, da, dw, la, lw, aa, aw)
 		_, _ = fmt.Fprint(w, "# HELP musicbot_counter_total persistent counters from the SQLite counters table\n# TYPE musicbot_counter_total counter\n")
 		for _, name := range snapshot.counterNames {
 			_, _ = fmt.Fprintf(w, "musicbot_counter_total{name=\"%s\"} %d\n", prometheusLabel(name), snapshot.counters[name])
@@ -123,10 +123,6 @@ func observabilityHandler(a *app) http.Handler {
 			_, _ = fmt.Fprintf(w, "musicbot_stage_seconds{stage=\"%s\",source=\"%s\",quantile=\"0.5\"} %.6f\nmusicbot_stage_seconds{stage=\"%s\",source=\"%s\",quantile=\"0.95\"} %.6f\nmusicbot_stage_ok_ratio{stage=\"%s\",source=\"%s\"} %.4f\n",
 				stageLabel, sourceLabel, stage.P50.Seconds(), stageLabel, sourceLabel, stage.P95.Seconds(), stageLabel, sourceLabel, float64(stage.OK)/float64(max(stage.Count, 1)))
 		}
-		_, _ = fmt.Fprint(w, "# HELP musicbot_octave_fast_path_ratio share of Octave deliveries in the last hour that used the Telegram remote-URL fast path\n# TYPE musicbot_octave_fast_path_ratio gauge\n")
-		_, _ = fmt.Fprintf(w, "musicbot_octave_fast_path_ratio %.4f\nmusicbot_octave_fast_path_samples{path=\"remote\"} %d\nmusicbot_octave_fast_path_samples{path=\"local\"} %d\n", snapshot.fastPathRatio, snapshot.fastPathRemote, snapshot.fastPathLocal)
-		_, _ = fmt.Fprint(w, "# HELP musicbot_octave_circuit_state Octave remote-URL circuit breaker: 0=closed, 1=open, 2=half-open\n# TYPE musicbot_octave_circuit_state gauge\n")
-		_, _ = fmt.Fprintf(w, "musicbot_octave_circuit_state %d\n", circuitStateValue(a.octaveRemote.state()))
 	})
 	return mux
 }
@@ -139,31 +135,16 @@ func prometheusLabel(value string) string {
 	return strings.ReplaceAll(value, "\"", "\\\"")
 }
 
-// circuitStateValue maps the breaker state to the documented gauge encoding.
-func circuitStateValue(state circuitState) int {
-	switch state {
-	case circuitOpen:
-		return 1
-	case circuitHalfOpen:
-		return 2
-	default:
-		return 0
-	}
-}
-
 const metricsCacheTTL = 30 * time.Second
 
 // metricsSnapshot holds every SQLite-derived value exported on /metrics.
 type metricsSnapshot struct {
-	stats          statsSnapshot
-	counters       map[string]int64
-	counterNames   []string
-	stages         []stagePerformance
-	modeStages     []stagePerformance
-	cacheHitRatio  float64
-	fastPathRatio  float64
-	fastPathRemote int
-	fastPathLocal  int
+	stats         statsSnapshot
+	counters      map[string]int64
+	counterNames  []string
+	stages        []stagePerformance
+	modeStages    []stagePerformance
+	cacheHitRatio float64
 }
 
 // metricsCache memoises the SQLite aggregates for metricsCacheTTL so frequent
@@ -230,26 +211,7 @@ func computeMetricsSnapshot(ctx context.Context, state *store, since time.Time) 
 	if deliveries := stats.CacheHits + stats.DownloadsOK + stats.DownloadsPartial + stats.DownloadsFailed; deliveries > 0 {
 		snapshot.cacheHitRatio = float64(stats.CacheHits) / float64(deliveries)
 	}
-	snapshot.fastPathRemote, snapshot.fastPathLocal = octaveFastPathCounts(samples)
-	if total := snapshot.fastPathRemote + snapshot.fastPathLocal; total > 0 {
-		snapshot.fastPathRatio = float64(snapshot.fastPathRemote) / float64(total)
-	}
 	return snapshot, nil
-}
-
-// octaveFastPathCounts splits Octave track deliveries into the Telegram
-// remote-URL fast path (telegram_upload with mode=remote_url) and local
-// downloads through the bot (source_download from octave).
-func octaveFastPathCounts(samples []mediaStageSample) (remote, local int) {
-	for _, sample := range samples {
-		switch {
-		case sample.Stage == "telegram_upload" && sample.Mode == "remote_url":
-			remote++
-		case sample.Stage == "source_download" && sample.Source == "octave":
-			local++
-		}
-	}
-	return remote, local
 }
 
 func (a *app) startDiskMonitor(ctx context.Context) {

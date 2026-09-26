@@ -186,9 +186,6 @@ func searchKeyboard(keys []string, candidates []inlineCandidate, lang string) *t
 			marker = "⚠️"
 		}
 		source := "YT"
-		if candidates[i].Extractor == "octave" {
-			source = "Octave"
-		}
 		label := marker + " " + candidates[i].Title
 		if candidates[i].Artist != "" {
 			label = candidates[i].Artist + " — " + label
@@ -246,8 +243,7 @@ func detectURLs(text string, max int) []string {
 	return urls
 }
 
-// normalizeDetectedURL adds a scheme when missing and rejects links with user info,
-// unknown hosts, or plain-HTTP Octave hosts.
+// normalizeDetectedURL adds a scheme when missing and rejects links with user info or unknown hosts.
 func normalizeDetectedURL(rawURL string) string {
 	if !strings.HasPrefix(strings.ToLower(rawURL), "http://") && !strings.HasPrefix(strings.ToLower(rawURL), "https://") {
 		rawURL = "https://" + rawURL
@@ -256,18 +252,11 @@ func normalizeDetectedURL(rawURL string) string {
 	if err != nil || parsed.User != nil || !allowedHost(parsed.Hostname()) {
 		return ""
 	}
-	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	if (host == "music.octavestreaming.com" || host == "api.octavestreaming.com") && parsed.Scheme != "https" {
-		return ""
-	}
 	return rawURL
 }
 
 func allowedHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "music.octavestreaming.com" || host == "api.octavestreaming.com" {
-		return true
-	}
 	for _, domain := range []string{"youtube.com", "youtu.be", "spotify.com", "soundcloud.com", "music.apple.com", "deezer.com", "tidal.com", "bandcamp.com", "vk.com", "ok.ru", "mixcloud.com", "audiomack.com"} {
 		if host == domain || strings.HasSuffix(host, "."+domain) {
 			return true

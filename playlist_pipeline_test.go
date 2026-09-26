@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -14,30 +15,49 @@ import (
 )
 
 func TestPlaylistPipelineDownloadsNextBatchWhileUploading(t *testing.T) {
-	var audioCalls atomic.Int32
-	octaveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/album/3":
-			w.Header().Set("Content-Type", "application/json")
-			var tracks strings.Builder
-			for index := 1; index <= 20; index++ {
-				if index > 1 {
-					tracks.WriteByte(',')
-				}
-				fmt.Fprintf(&tracks, `{"id":"%d","title":"Track %d","duration":1}`, index, index)
-			}
-			fmt.Fprintf(w, `{"album":{"id":"3","title":"Album","artist":{"id":"2","name":"Artist"},"tracks":[%s]}}`, tracks.String())
-		case "/api/playback-token":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"token":"octk_test_token","expiresIn":7200}`)
-		case "/audio/320":
-			audioCalls.Add(1)
-			w.Header().Set("Content-Type", "audio/mpeg")
-			fmt.Fprint(w, "audio")
-		default:
-			http.NotFound(w, r)
+	directory := t.TempDir()
+	counter := filepath.Join(directory, "downloaded.log")
+	entries := make([]string, 20)
+	for i := range entries {
+		entries[i] = fmt.Sprintf(`{"id":"id%d","title":"Track %d","uploader":"Artist","duration":1,"playlist_index":%d,"extractor":"youtube"}`, i+1, i+1, i+1)
+	}
+	bin := filepath.Join(directory, "fake-yt-dlp")
+	script := `#!/bin/sh
+case " $* " in
+  *" --simulate "*) printf '%s' '{"_type":"playlist","id":"PL3","title":"Album","entries":[` + strings.Join(entries, ",") + `]}' ; exit 0 ;;
+esac
+dir=''; manifest=''; progress=''; items=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --paths) dir="$2"; shift 2 ;;
+    --playlist-items) items="$2"; shift 2 ;;
+    --print-to-file)
+      template="$2"; output="$3"
+      case "$template" in after_move:*) manifest="$output" ;; before_dl:*) progress="$output" ;; esac
+      shift 3 ;;
+    *) shift ;;
+  esac
+done
+oldifs="$IFS"; IFS=,
+for item in $items; do
+  path="$dir/$(printf '%06d' "$item")_id$item.mp3"
+  printf 'audio' > "$path"
+  printf '%s\n' "$item" >> "$progress"
+  printf '{"id":"id%s","title":"Track %s","uploader":"Artist","duration":1,"playlist_index":%s,"filepath":"%s","ext":"mp3","extractor":"youtube"}\n' "$item" "$item" "$item" "$path" >> "$manifest"
+  printf 'x' >> ` + counter + `
+done
+IFS="$oldifs"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	downloaded := func() int {
+		info, err := os.Stat(counter)
+		if err != nil {
+			return 0
 		}
-	})
+		return int(info.Size())
+	}
 
 	var groups atomic.Int32
 	var overlapped atomic.Bool
@@ -49,11 +69,11 @@ func TestPlaylistPipelineDownloadsNextBatchWhileUploading(t *testing.T) {
 		case "sendMediaGroup":
 			group := groups.Add(1)
 			if group == 1 {
-				deadline := time.Now().Add(time.Second)
-				for audioCalls.Load() < 20 && time.Now().Before(deadline) {
+				deadline := time.Now().Add(5 * time.Second)
+				for downloaded() < 20 && time.Now().Before(deadline) {
 					time.Sleep(time.Millisecond)
 				}
-				if audioCalls.Load() == 20 {
+				if downloaded() == 20 {
 					overlapped.Store(true)
 				}
 			}
@@ -74,10 +94,9 @@ func TestPlaylistPipelineDownloadsNextBatchWhileUploading(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	directory := t.TempDir()
-	dl := &downloader{downloadDir: directory, maxFileSize: maxFileSize, maxPlaylistTracks: 75, octave: testOctaveClient(octaveHandler)}
+	dl := &downloader{downloadDir: t.TempDir(), bin: bin, maxFileSize: maxFileSize, maxPlaylistTracks: 75}
 	application := newAppWithServices(context.Background(), bot, dl, nil, config{DownloadWorkers: 2, LookupWorkers: 1, ArchiveWorkers: 1, MaxFileSize: maxFileSize})
-	pending := pendingURL{URL: "https://music.octavestreaming.com/album/3", RangeStart: 1, RangeEnd: 20, Preview: mediaPreview{IsPlaylist: true, TrackCount: 20}}
+	pending := pendingURL{URL: "https://www.youtube.com/playlist?list=PL3", RangeStart: 1, RangeEnd: 20, Preview: mediaPreview{IsPlaylist: true, TrackCount: 20}}
 	report, err := application.downloadAndSendPlaylistBatches(context.Background(), 10, pending, "mp3", "320", "en", nil, nil)
 	if err != nil || report.Delivered != 20 || report.Failed != 0 || groups.Load() != 2 {
 		t.Fatalf("report=%#v groups=%d err=%v", report, groups.Load(), err)

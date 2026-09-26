@@ -40,20 +40,18 @@ type historyItem struct {
 }
 
 type statsSnapshot struct {
-	StartedAt             time.Time
-	DownloadsOK           int64
-	DownloadsPartial      int64
-	DownloadsFailed       int64
-	CacheHits             int64
-	Searches              int64
-	SearchOctave          int64
-	SearchYouTubeFallback int64
-	RateLimited           int64
-	QueueRejected         int64
-	CookieErrors          int64
-	Cancelled             int64
-	UniqueUsers           int64
-	CachedTracks          int64
+	StartedAt        time.Time
+	DownloadsOK      int64
+	DownloadsPartial int64
+	DownloadsFailed  int64
+	CacheHits        int64
+	Searches         int64
+	RateLimited      int64
+	QueueRejected    int64
+	CookieErrors     int64
+	Cancelled        int64
+	UniqueUsers      int64
+	CachedTracks     int64
 }
 
 type store struct {
@@ -651,10 +649,6 @@ func (s *store) stats(ctx context.Context) (statsSnapshot, error) {
 			snapshot.CacheHits = value
 		case "searches":
 			snapshot.Searches = value
-		case "search_octave":
-			snapshot.SearchOctave = value
-		case "search_youtube_fallback":
-			snapshot.SearchYouTubeFallback = value
 		case "rate_limited":
 			snapshot.RateLimited = value
 		case "queue_rejected":

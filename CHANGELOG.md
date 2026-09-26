@@ -8,27 +8,23 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ### Added
 
-- Added Octave Streaming as the primary title-search source, with direct track and album downloads in MP3 128/320 and lossless FLAC.
-- Added strict Octave URL parsing, bounded API/media requests, expiring in-memory playback-token caching, and stable Telegram cache keys.
 - Added persistent dynamic administrators, bans, owner-only role management, moderation audit, `/perf`, and redacted `/log [fresh] <url>` diagnostics.
-- Added Octave remote-URL circuit breaking, playback-token refresh, validated HTTP Range resume, session cover reuse, and multipart Telegram upload progress.
 - Added confidence-ranked search with alternate-version penalties and exact/similar/version labels.
 - Added one-time `bootstrap.sh`, lean versioned-image deployment, Registry publishing, and explicit `rollback.sh`.
 - Added `/id @username` lookup for Telegram users previously observed by the bot.
 - Added a throttled post-download support message with a persistent per-user hide option.
 - Added `/settings` with a per-user default format and quality that skips the format keyboard for tracks, search picks, and playlist ranges, with an "ask each time" option and a visible hint in the download status.
 - Added `/history` listing the last ten delivered tracks with one-tap re-delivery from the Telegram `file_id` cache, an expired-cache hint instead of a new download, and a clear-history button.
-- Added Octave-first private title search: text queries hit the Octave search API before YouTube, and the results header states explicitly when YouTube was used because Octave had no matches or was unavailable. New `search_octave` and `search_youtube_fallback` counters appear in `/stats` and `/metrics`.
 - Added search by forwarded audio in private chats: the performer and title tags (or the file name) become the query and the audio duration guides ranking.
-- Added Prometheus series for every persistent counter, per-stage P50/P95 latency and success ratios, the cache hit ratio, the Octave fast-path share, and the circuit breaker state, with SQLite aggregates cached for 30 seconds between scrapes.
+- Added Prometheus series for every persistent counter, per-stage P50/P95 latency and success ratios, and the cache hit ratio, with SQLite aggregates cached for 30 seconds between scrapes.
 - Added a stale YouTube cookies detector that treats three HTTP 403 failures within ten minutes as a cookie problem, persists a six-hour administrator alert cooldown, adds a "check" button that runs a fresh download trace, and exposes `yt_dlp_cookies` in `/healthz`.
 - Added batch downloads for several track links in one message (up to five): one shared format, sequential downloads inside a single slot, cached tracks re-sent by `file_id`, per-link failures reported without aborting the batch, and a ZIP-or-individual delivery choice for every batch of two or more links.
 
 ### Changed
 
+- Removed the Octave Streaming integration completely: private title search, inline search, and every download now go through YouTube via `yt-dlp`. The Octave API client, remote-URL fast path, circuit breaker, `search_octave` / `search_youtube_fallback` counters, and the `musicbot_octave_*` metrics are gone, and `music.octavestreaming.com` links are no longer recognized.
 - Replaced the generated project branding with the CC0 music gopher artwork.
-- Kept YouTube search as an automatic fallback when Octave has no matching tracks or its API is unavailable, and made the fallback visible to the user; inline search stays on YouTube.
-- Added an Octave MP3 remote-URL fast path with local fallback, skipped redundant MP3 remuxing, and made `yt-dlp` request delay and fragment concurrency configurable.
+- Made `yt-dlp` request delay and fragment concurrency configurable, and skipped redundant MP3 remuxing.
 - Added structured per-stage timing and throughput logs for source, conversion, Telegram upload, and cached delivery operations.
 - Pipelined large album delivery so the next bounded batch downloads while the current batch is sent.
 - Kept administrator commands out of Telegram's published command menu while preserving permission-checked manual access.

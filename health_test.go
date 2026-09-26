@@ -24,8 +24,6 @@ func TestHealthAndMetricsHandlers(t *testing.T) {
 	defer state.Close()
 	state.increment(context.Background(), "downloads_ok")
 	state.increment(context.Background(), "downloads_partial")
-	state.increment(context.Background(), "search_octave")
-	state.increment(context.Background(), "search_youtube_fallback")
 	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute}
 	app := newAppWithServices(context.Background(), nil, &downloader{bin: bin, downloadDir: dir}, state, cfg)
 	handler := observabilityHandler(app)
@@ -38,7 +36,7 @@ func TestHealthAndMetricsHandlers(t *testing.T) {
 
 	metrics := httptest.NewRecorder()
 	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="ok"} 1`) || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="partial"} 1`) || !strings.Contains(metrics.Body.String(), "musicbot_archives_active 0") || !strings.Contains(metrics.Body.String(), "musicbot_search_octave_total 1") || !strings.Contains(metrics.Body.String(), "musicbot_search_youtube_fallback_total 1") {
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="ok"} 1`) || !strings.Contains(metrics.Body.String(), `musicbot_downloads_total{result="partial"} 1`) || !strings.Contains(metrics.Body.String(), "musicbot_archives_active 0") {
 		t.Fatalf("metrics code=%d body=%s", metrics.Code, metrics.Body.String())
 	}
 }
@@ -69,7 +67,7 @@ func scrapeMetrics(t *testing.T, handler http.Handler) string {
 	return recorder.Body.String()
 }
 
-func TestMetricsExportsCacheStageAndFastPathSeries(t *testing.T) {
+func TestMetricsExportsCacheAndStageSeries(t *testing.T) {
 	app, state := newMetricsTestApp(t)
 	ctx := context.Background()
 	for range 3 {
@@ -79,14 +77,11 @@ func TestMetricsExportsCacheStageAndFastPathSeries(t *testing.T) {
 	state.increment(ctx, "custom_counter")
 	now := time.Now()
 	for _, elapsed := range []int64{10, 20, 30, 40, 100} {
-		state.recordMediaStage(ctx, mediaStageSample{Stage: "source_download", Source: "octave", ElapsedMS: elapsed, SizeBytes: 1000, OK: elapsed != 100, CreatedAt: now})
+		state.recordMediaStage(ctx, mediaStageSample{Stage: "source_download", Source: "youtube", ElapsedMS: elapsed, SizeBytes: 1000, OK: elapsed != 100, CreatedAt: now})
 	}
 	state.recordMediaStage(ctx, mediaStageSample{Stage: "telegram_upload", Source: "telegram", Mode: "remote_url", ElapsedMS: 5, OK: true, CreatedAt: now})
 	state.recordMediaStage(ctx, mediaStageSample{Stage: "telegram_upload", Source: "telegram", Mode: "multipart", ElapsedMS: 7, OK: true, CreatedAt: now})
-	state.recordMediaStage(ctx, mediaStageSample{Stage: "source_download", Source: "youtube", ElapsedMS: 500, OK: true, CreatedAt: now.Add(-2 * time.Hour)})
-	app.octaveRemote.failure()
-	app.octaveRemote.failure()
-	app.octaveRemote.failure()
+	state.recordMediaStage(ctx, mediaStageSample{Stage: "source_download", Source: "soundcloud", ElapsedMS: 500, OK: true, CreatedAt: now.Add(-2 * time.Hour)})
 
 	body := scrapeMetrics(t, observabilityHandler(app))
 	tests := []struct {
@@ -96,14 +91,10 @@ func TestMetricsExportsCacheStageAndFastPathSeries(t *testing.T) {
 		{name: "counter row", line: `musicbot_counter_total{name="cache_hits"} 3`},
 		{name: "custom counter row", line: `musicbot_counter_total{name="custom_counter"} 1`},
 		{name: "cache hit ratio", line: "musicbot_cache_hit_ratio 0.7500"},
-		{name: "p50", line: `musicbot_stage_seconds{stage="source_download",source="octave",quantile="0.5"} 0.030000`},
-		{name: "p95", line: `musicbot_stage_seconds{stage="source_download",source="octave",quantile="0.95"} 0.040000`},
-		{name: "ok ratio", line: `musicbot_stage_ok_ratio{stage="source_download",source="octave"} 0.8000`},
+		{name: "p50", line: `musicbot_stage_seconds{stage="source_download",source="youtube",quantile="0.5"} 0.030000`},
+		{name: "p95", line: `musicbot_stage_seconds{stage="source_download",source="youtube",quantile="0.95"} 0.040000`},
+		{name: "ok ratio", line: `musicbot_stage_ok_ratio{stage="source_download",source="youtube"} 0.8000`},
 		{name: "mode-less upload aggregate", line: `musicbot_stage_ok_ratio{stage="telegram_upload",source="telegram"} 1.0000`},
-		{name: "fast path ratio", line: "musicbot_octave_fast_path_ratio 0.1667"},
-		{name: "fast path remote", line: `musicbot_octave_fast_path_samples{path="remote"} 1`},
-		{name: "fast path local", line: `musicbot_octave_fast_path_samples{path="local"} 5`},
-		{name: "circuit open", line: "musicbot_octave_circuit_state 1"},
 		{name: "legacy per-mode series", line: `musicbot_media_stage_samples{stage="telegram_upload",source="telegram",mode="remote_url"} 1`},
 	}
 	for _, tc := range tests {
@@ -113,7 +104,7 @@ func TestMetricsExportsCacheStageAndFastPathSeries(t *testing.T) {
 			}
 		})
 	}
-	if strings.Contains(body, `source="youtube"`) {
+	if strings.Contains(body, `source="soundcloud"`) {
 		t.Fatalf("samples older than one hour must be ignored:\n%s", body)
 	}
 }
@@ -121,7 +112,7 @@ func TestMetricsExportsCacheStageAndFastPathSeries(t *testing.T) {
 func TestMetricsCacheHitRatioZeroWithoutDeliveries(t *testing.T) {
 	app, _ := newMetricsTestApp(t)
 	body := scrapeMetrics(t, observabilityHandler(app))
-	for _, line := range []string{"musicbot_cache_hit_ratio 0.0000", "musicbot_octave_fast_path_ratio 0.0000", "musicbot_octave_circuit_state 0"} {
+	for _, line := range []string{"musicbot_cache_hit_ratio 0.0000"} {
 		if !strings.Contains(body, line+"\n") {
 			t.Fatalf("missing %q in:\n%s", line, body)
 		}
@@ -141,7 +132,7 @@ func TestMetricsAggregatesAreCachedForThirtySeconds(t *testing.T) {
 		t.Fatalf("first scrape:\n%s", first)
 	}
 	state.increment(ctx, "cache_hits")
-	state.recordMediaStage(ctx, mediaStageSample{Stage: "transcode", Source: "octave", ElapsedMS: 50, OK: true, CreatedAt: clock})
+	state.recordMediaStage(ctx, mediaStageSample{Stage: "transcode", Source: "youtube", ElapsedMS: 50, OK: true, CreatedAt: clock})
 	clock = clock.Add(29 * time.Second)
 	second := scrapeMetrics(t, handler)
 	if !strings.Contains(second, `musicbot_counter_total{name="cache_hits"} 1`+"\n") || strings.Contains(second, `stage="transcode"`) {
@@ -152,7 +143,7 @@ func TestMetricsAggregatesAreCachedForThirtySeconds(t *testing.T) {
 	}
 	clock = clock.Add(2 * time.Second)
 	third := scrapeMetrics(t, handler)
-	if !strings.Contains(third, `musicbot_counter_total{name="cache_hits"} 2`+"\n") || !strings.Contains(third, `musicbot_stage_ok_ratio{stage="transcode",source="octave"} 1.0000`+"\n") {
+	if !strings.Contains(third, `musicbot_counter_total{name="cache_hits"} 2`+"\n") || !strings.Contains(third, `musicbot_stage_ok_ratio{stage="transcode",source="youtube"} 1.0000`+"\n") {
 		t.Fatalf("scrape after TTL must recompute:\n%s", third)
 	}
 	if app.metrics.computations != 2 {
@@ -180,7 +171,7 @@ func TestPrometheusLabelEscaping(t *testing.T) {
 	tests := []struct {
 		name, in, want string
 	}{
-		{name: "plain", in: "octave", want: "octave"},
+		{name: "plain", in: "youtube", want: "youtube"},
 		{name: "backslash", in: `a\b`, want: `a\\b`},
 		{name: "quote", in: `a"b`, want: `a\"b`},
 		{name: "newline", in: "a\nb", want: `a\nb`},
@@ -192,17 +183,5 @@ func TestPrometheusLabelEscaping(t *testing.T) {
 				t.Fatalf("prometheusLabel(%q)=%q want %q", tc.in, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestCircuitStateValue(t *testing.T) {
-	tests := []struct {
-		state circuitState
-		want  int
-	}{{circuitClosed, 0}, {circuitOpen, 1}, {circuitHalfOpen, 2}, {circuitState("unknown"), 0}}
-	for _, tc := range tests {
-		if got := circuitStateValue(tc.state); got != tc.want {
-			t.Fatalf("circuitStateValue(%q)=%d want %d", tc.state, got, tc.want)
-		}
 	}
 }

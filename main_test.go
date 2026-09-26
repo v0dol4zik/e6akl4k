@@ -79,12 +79,10 @@ func TestPlaylistTrackLimit(t *testing.T) {
 
 func TestDetectURL(t *testing.T) {
 	tests := map[string]string{
-		"смотри youtu.be/dQw4w9WgXcQ":                    "https://youtu.be/dQw4w9WgXcQ",
-		"https://www.youtube.com/watch?v=abc&list=xyz":   "https://www.youtube.com/watch?v=abc&list=xyz",
-		"https://music.octavestreaming.com/album/3?t=11": "https://music.octavestreaming.com/album/3?t=11",
-		"http://music.octavestreaming.com/album/3?t=11":  "",
-		"http://youtube.com@127.0.0.1/private":           "",
-		"не ссылка":                                      "",
+		"смотри youtu.be/dQw4w9WgXcQ":                  "https://youtu.be/dQw4w9WgXcQ",
+		"https://www.youtube.com/watch?v=abc&list=xyz": "https://www.youtube.com/watch?v=abc&list=xyz",
+		"http://youtube.com@127.0.0.1/private":         "",
+		"не ссылка":                                    "",
 	}
 	for input, want := range tests {
 		if got := detectURL(input); got != want {
@@ -327,14 +325,21 @@ func TestIncomingURLWithDefaultPreferenceSkipsFormatKeyboard(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer state.Close()
-	dl := &downloader{downloadDir: t.TempDir(), maxFileSize: maxFileSize, maxPlaylistTracks: 75, octave: testOctaveClient(http.NotFoundHandler())}
+	bin := filepath.Join(t.TempDir(), "fake-yt-dlp")
+	script := `#!/bin/sh
+printf '%s' '{"id":"11","title":"Track","uploader":"Artist","duration":180,"extractor":"youtube"}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dl := &downloader{downloadDir: t.TempDir(), bin: bin, maxFileSize: maxFileSize, maxPlaylistTracks: 75}
 	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour, MaxPlaylistTracks: 75, MaxFileSize: maxFileSize}
 	app := newAppWithServices(context.Background(), bot, dl, state, cfg)
 	app.setLang(10, "en")
-	if err := state.putCachedAudio(context.Background(), cachedAudio{Key: sourceCacheKey("octave", "11", "mp3", "320"), FileID: "cached-file", Title: "Track", Format: "mp3"}); err != nil {
+	if err := state.putCachedAudio(context.Background(), cachedAudio{Key: sourceCacheKey("youtube", "11", "mp3", "320"), FileID: "cached-file", Title: "Track", Format: "mp3"}); err != nil {
 		t.Fatal(err)
 	}
-	message := &tgbotapi.Message{Text: "https://music.octavestreaming.com/track/11", From: &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}
+	message := &tgbotapi.Message{Text: "https://youtu.be/11", From: &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}
 
 	app.handleMessage(message)
 	if sendAudioCalls.Load() != 0 || keyboardCalls.Load() != 1 {
@@ -427,8 +432,8 @@ func TestHistoryCommandAndCachedRedelivery(t *testing.T) {
 	}
 
 	state.recordDownload(ctx, 10, "youtube.com", "mp3:320", "delivered", time.Second, "", "youtube:gone:mp3:320", "Gone", "Nobody")
-	state.recordDownload(ctx, 10, "youtube.com", "mp3:320", "delivered", time.Second, "", "octave:11:mp3:320", "Track", "Artist")
-	if err := state.putCachedAudio(ctx, cachedAudio{Key: "octave:11:mp3:320", FileID: "cached-file", Title: "Track", Artist: "Artist", Format: "mp3", Quality: "320"}); err != nil {
+	state.recordDownload(ctx, 10, "youtube.com", "mp3:320", "delivered", time.Second, "", "youtube:11:mp3:320", "Track", "Artist")
+	if err := state.putCachedAudio(ctx, cachedAudio{Key: "youtube:11:mp3:320", FileID: "cached-file", Title: "Track", Artist: "Artist", Format: "mp3", Quality: "320"}); err != nil {
 		t.Fatal(err)
 	}
 	items, err := state.recentDownloads(ctx, 10, historyLimit)
@@ -569,7 +574,7 @@ func TestForwardedAudioTriggersSearch(t *testing.T) {
 			}
 			defer state.Close()
 			// os.Args[0] is the test binary: yt-dlp lookups exit without producing JSON, so the search ends without network access.
-			dl := &downloader{downloadDir: t.TempDir(), bin: os.Args[0], maxFileSize: maxFileSize, maxPlaylistTracks: 75, octave: testOctaveClient(http.NotFoundHandler())}
+			dl := &downloader{downloadDir: t.TempDir(), bin: os.Args[0], maxFileSize: maxFileSize, maxPlaylistTracks: 75}
 			cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour, MaxPlaylistTracks: 75, MaxFileSize: maxFileSize}
 			app := newAppWithServices(context.Background(), bot, dl, state, cfg)
 			app.setLang(10, "en")

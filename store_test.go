@@ -178,7 +178,7 @@ func TestStoreAggregatesMediaPerformance(t *testing.T) {
 	defer state.Close()
 	now := time.Now()
 	for _, elapsed := range []int64{10, 20, 30, 40, 100} {
-		state.recordMediaStage(context.Background(), mediaStageSample{Stage: "source_download", Source: "octave", ElapsedMS: elapsed, SizeBytes: 1000, OK: elapsed != 100, CreatedAt: now})
+		state.recordMediaStage(context.Background(), mediaStageSample{Stage: "source_download", Source: "youtube", ElapsedMS: elapsed, SizeBytes: 1000, OK: elapsed != 100, CreatedAt: now})
 	}
 	rows, err := state.mediaPerformance(context.Background(), now.Add(-time.Minute))
 	if err != nil || len(rows) != 1 {

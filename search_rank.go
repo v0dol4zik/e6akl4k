@@ -75,9 +75,6 @@ func rankCandidates(query string, expectedDuration int, candidates []inlineCandi
 				score -= 25
 			}
 		}
-		if candidate.Extractor == "octave" {
-			score += 3
-		}
 		if score < 0 {
 			score = 0
 		}
@@ -97,9 +94,6 @@ func rankCandidates(query string, expectedDuration int, candidates []inlineCandi
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].Confidence != candidates[j].Confidence {
 			return candidates[i].Confidence > candidates[j].Confidence
-		}
-		if candidates[i].Extractor != candidates[j].Extractor {
-			return candidates[i].Extractor == "octave"
 		}
 		return candidates[i].Title < candidates[j].Title
 	})

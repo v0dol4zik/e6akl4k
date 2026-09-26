@@ -12,9 +12,9 @@ func TestDetectURLs(t *testing.T) {
 		want []string
 	}{
 		"two links in order": {
-			text: "first https://youtu.be/one then https://music.octavestreaming.com/track/11",
+			text: "first https://youtu.be/one then https://soundcloud.com/artist/track",
 			max:  5,
-			want: []string{"https://youtu.be/one", "https://music.octavestreaming.com/track/11"},
+			want: []string{"https://youtu.be/one", "https://soundcloud.com/artist/track"},
 		},
 		"duplicates are removed": {
 			text: "https://youtu.be/one https://youtu.be/one youtu.be/one https://youtu.be/two",
@@ -35,11 +35,6 @@ func TestDetectURLs(t *testing.T) {
 			text: "http://youtube.com@127.0.0.1/private https://youtu.be/ok",
 			max:  5,
 			want: []string{"https://youtu.be/ok"},
-		},
-		"plain http octave dropped": {
-			text: "http://music.octavestreaming.com/track/11 https://music.octavestreaming.com/track/12",
-			max:  5,
-			want: []string{"https://music.octavestreaming.com/track/12"},
 		},
 		"no links": {
 			text: "просто текст",

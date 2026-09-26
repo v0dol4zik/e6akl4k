@@ -61,151 +61,6 @@ func TestCachedDownloadUsesTelegramFileID(t *testing.T) {
 	}
 }
 
-func TestOctaveRemoteMP3IsCachedWithoutLocalMediaDownload(t *testing.T) {
-	var sendAudioCalls atomic.Int32
-	var mediaDownloadCalls atomic.Int32
-	octaveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/album/3":
-			fmt.Fprint(w, `{"album":{"id":"3","title":"Album","artist":{"id":"2","name":"Artist"},"tracks":[{"id":"11","title":"Track","artist":{"id":"2","name":"Artist"},"duration":180}]}}`)
-		case "/api/playback-token":
-			fmt.Fprint(w, `{"token":"octk_test_token","expiresIn":7200}`)
-		case "/audio/320":
-			mediaDownloadCalls.Add(1)
-			http.Error(w, "must not download through the bot", http.StatusInternalServerError)
-		default:
-			http.NotFound(w, r)
-		}
-	})
-	telegramHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch filepath.Base(r.URL.Path) {
-		case "getMe":
-			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
-		case "sendAudio":
-			call := sendAudioCalls.Add(1)
-			if err := r.ParseForm(); err != nil {
-				t.Errorf("parse form: %v", err)
-			}
-			audio := r.FormValue("audio")
-			if call == 1 {
-				if !strings.Contains(audio, "/audio/320?track=11") || !strings.Contains(audio, "k=octk_test_token") {
-					t.Errorf("remote audio=%q", audio)
-				}
-			} else if audio != "remote-file" {
-				t.Errorf("cached audio=%q", audio)
-			}
-			fmt.Fprint(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"audio":{"file_id":"remote-file","file_unique_id":"u","duration":180,"file_size":7549747}}}`)
-		default:
-			fmt.Fprint(w, `{"ok":true,"result":true}`)
-		}
-	})
-	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: telegramHandler})
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer state.Close()
-	dl := &downloader{
-		downloadDir: t.TempDir(), maxFileSize: maxFileSize, maxPlaylistTracks: 75,
-		octave: testOctaveClient(octaveHandler),
-	}
-	cfg := config{
-		CacheChatID: -1001, DownloadWorkers: 1, DownloadQueueSize: 1,
-		LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute,
-		CacheTTL: time.Hour, MaxFileSize: maxFileSize, MaxPlaylistTracks: 75,
-	}
-	app := newAppWithServices(context.Background(), bot, dl, state, cfg)
-	pending := pendingURL{
-		URL:     "https://music.octavestreaming.com/album/3?t=11",
-		Preview: mediaPreview{SourceID: "11", Extractor: "octave", Title: "Track", Artist: "Artist", DurationSeconds: 180},
-	}
-	handled, succeeded := app.tryCachedDownload(context.Background(), 10, pending, "mp3", "320", "en", nil)
-	if !handled || !succeeded || sendAudioCalls.Load() != 2 || mediaDownloadCalls.Load() != 0 {
-		t.Fatalf("handled=%v succeeded=%v sends=%d media_downloads=%d", handled, succeeded, sendAudioCalls.Load(), mediaDownloadCalls.Load())
-	}
-	if entry, ok := state.cachedAudio(context.Background(), "octave:11:mp3:320", time.Hour); !ok || entry.FileID != "remote-file" || entry.Size != 7549747 {
-		t.Fatalf("cached entry=%#v ok=%v", entry, ok)
-	}
-}
-
-func TestOctaveRemoteMP3FallsBackToLocalUpload(t *testing.T) {
-	var sendAudioCalls atomic.Int32
-	var mediaDownloadCalls atomic.Int32
-	octaveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/album/3":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"album":{"id":"3","title":"Album","artist":{"id":"2","name":"Artist"},"tracks":[{"id":"11","title":"Track","artist":{"id":"2","name":"Artist"},"duration":180}]}}`)
-		case "/api/playback-token":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"token":"octk_test_token","expiresIn":7200}`)
-		case "/audio/320":
-			mediaDownloadCalls.Add(1)
-			w.Header().Set("Content-Type", "audio/mpeg")
-			fmt.Fprint(w, "audio-data")
-		default:
-			http.NotFound(w, r)
-		}
-	})
-	telegramHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch filepath.Base(r.URL.Path) {
-		case "getMe":
-			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"testbot"}}`)
-		case "sendAudio":
-			call := sendAudioCalls.Add(1)
-			if call == 1 {
-				fmt.Fprint(w, `{"ok":false,"error_code":400,"description":"failed to get HTTP URL content"}`)
-				return
-			}
-			fileID := "local-file"
-			if call == 3 {
-				if err := r.ParseForm(); err != nil {
-					t.Errorf("parse cached form: %v", err)
-				}
-				if got := r.FormValue("audio"); got != fileID {
-					t.Errorf("cached audio=%q", got)
-				}
-			}
-			fmt.Fprintf(w, `{"ok":true,"result":{"message_id":2,"date":1,"chat":{"id":10,"type":"private"},"audio":{"file_id":%q,"file_unique_id":"u","duration":180,"file_size":10}}}`, fileID)
-		default:
-			fmt.Fprint(w, `{"ok":true,"result":true}`)
-		}
-	})
-	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: telegramHandler})
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := openStore(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer state.Close()
-	dl := &downloader{
-		downloadDir: t.TempDir(), maxFileSize: maxFileSize, maxPlaylistTracks: 75,
-		octave: testOctaveClient(octaveHandler),
-	}
-	cfg := config{
-		CacheChatID: -1001, DownloadWorkers: 1, DownloadQueueSize: 1,
-		LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute,
-		CacheTTL: time.Hour, MaxFileSize: maxFileSize, MaxPlaylistTracks: 75,
-	}
-	app := newAppWithServices(context.Background(), bot, dl, state, cfg)
-	pending := pendingURL{
-		URL:     "https://music.octavestreaming.com/album/3?t=11",
-		Preview: mediaPreview{SourceID: "11", Extractor: "octave", Title: "Track", Artist: "Artist", DurationSeconds: 180},
-	}
-	handled, succeeded := app.tryCachedDownload(context.Background(), 10, pending, "mp3", "320", "en", nil)
-	if !handled || !succeeded || sendAudioCalls.Load() != 3 || mediaDownloadCalls.Load() != 1 {
-		t.Fatalf("handled=%v succeeded=%v sends=%d media_downloads=%d", handled, succeeded, sendAudioCalls.Load(), mediaDownloadCalls.Load())
-	}
-}
-
 func TestCachedFLACUsesTelegramDocument(t *testing.T) {
 	var documentCalls atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -342,7 +197,7 @@ func TestCookieFailureClassification(t *testing.T) {
 	}
 }
 
-func TestPresentSearchResultsAnnouncesYouTubeFallback(t *testing.T) {
+func TestPresentSearchResultsShowsYouTubeCandidates(t *testing.T) {
 	youtubeBin := filepath.Join(t.TempDir(), "fake-yt-dlp")
 	script := `#!/bin/sh
 printf '%s' '{"entries":[{"id":"youtube-id","title":"Track","uploader":"Artist","duration":185,"url":"youtube-id"}]}'
@@ -350,48 +205,13 @@ printf '%s' '{"entries":[{"id":"youtube-id","title":"Track","uploader":"Artist",
 	if err := os.WriteFile(youtubeBin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	octaveJSON := func(body string) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, body)
-		})
-	}
 	tests := []struct {
-		name         string
-		octave       http.Handler
-		resolved     bool
-		wantPrefix   string
-		wantNotice   string
-		wantOctave   int64
-		wantFallback int64
+		name       string
+		resolved   bool
+		wantPrefix string
 	}{
-		{
-			name:       "octave results",
-			octave:     octaveJSON(`{"results":[{"id":"11","title":"Track","artist":{"id":"2","name":"Artist"},"album":{"id":"3"},"duration":185}]}`),
-			wantPrefix: tr("search_results", "en"), wantOctave: 1,
-		},
-		{
-			name:       "octave empty",
-			octave:     octaveJSON(`{"results":[]}`),
-			wantPrefix: tr("search_results", "en"), wantNotice: tr("search_fallback_no_results", "en"), wantFallback: 1,
-		},
-		{
-			name: "octave unavailable",
-			octave: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				http.Error(w, "boom", http.StatusBadGateway)
-			}),
-			wantPrefix: tr("search_results", "en"), wantNotice: tr("search_fallback_unavailable", "en"), wantFallback: 1,
-		},
-		{
-			name:       "resolved link keeps its prefix",
-			octave:     octaveJSON(`{"results":[]}`),
-			resolved:   true,
-			wantPrefix: tr("resolved_results", "en"), wantNotice: tr("search_fallback_no_results", "en"), wantFallback: 1,
-		},
-		{
-			name:       "octave disabled",
-			wantPrefix: tr("search_results", "en"),
-		},
+		{name: "search", wantPrefix: tr("search_results", "en")},
+		{name: "resolved link keeps its prefix", resolved: true, wantPrefix: tr("resolved_results", "en")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,9 +242,6 @@ printf '%s' '{"entries":[{"id":"youtube-id","title":"Track","uploader":"Artist",
 			}
 			defer state.Close()
 			dl := &downloader{downloadDir: t.TempDir(), bin: youtubeBin}
-			if tc.octave != nil {
-				dl.octave = testOctaveClient(tc.octave)
-			}
 			cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 5, RateWindow: time.Minute, CacheTTL: time.Hour}
 			app := newAppWithServices(context.Background(), bot, dl, state, cfg)
 			status := &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}
@@ -436,19 +253,15 @@ printf '%s' '{"entries":[{"id":"youtube-id","title":"Track","uploader":"Artist",
 			if len(got) != 1 {
 				t.Fatalf("messages=%#v", got)
 			}
-			want := tc.wantPrefix
-			if tc.wantNotice != "" {
-				want += "\n\n" + tc.wantNotice
-			}
-			if got[0] != want {
-				t.Fatalf("header=%q, want %q", got[0], want)
+			if got[0] != tc.wantPrefix {
+				t.Fatalf("header=%q, want %q", got[0], tc.wantPrefix)
 			}
 			stats, err := state.stats(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if stats.Searches != 1 || stats.SearchOctave != tc.wantOctave || stats.SearchYouTubeFallback != tc.wantFallback {
-				t.Fatalf("stats=%+v, want octave=%d fallback=%d", stats, tc.wantOctave, tc.wantFallback)
+			if stats.Searches != 1 {
+				t.Fatalf("stats=%+v, want 1 search", stats)
 			}
 		})
 	}
@@ -510,8 +323,8 @@ func (h *batchHarness) pendingKey(t *testing.T) string {
 	return ""
 }
 
-// newBatchHarness wires a fake Telegram and a fake Octave API where album 3 holds tracks 11 and 12
-// (downloadable as MP3 320 without conversion) and every other album or track is a 404.
+// newBatchHarness wires a fake Telegram and a fake yt-dlp where videos 11 and 12 download
+// successfully, 13 fails while downloading, 99 fails to probe, and playlist PL3 holds 11 and 12.
 func newBatchHarness(t *testing.T) *batchHarness {
 	t.Helper()
 	h := &batchHarness{}
@@ -539,25 +352,52 @@ func newBatchHarness(t *testing.T) *batchHarness {
 		}
 		fmt.Fprint(w, `{"ok":true,"result":true}`)
 	})
-	octaveHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/album/3":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"album":{"id":"3","title":"Album","artist":{"id":"2","name":"Artist"},"tracks":[{"id":"11","title":"First","artist":{"id":"2","name":"Artist"},"duration":180},{"id":"12","title":"Second","artist":{"id":"2","name":"Artist"},"duration":200}]}}`)
-		case "/api/playback-token":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"token":"octk_test_token","expiresIn":7200}`)
-		case "/audio/320":
-			if track := r.URL.Query().Get("track"); track != "11" && track != "12" {
-				http.NotFound(w, r)
-				return
-			}
-			w.Header().Set("Content-Type", "audio/mpeg")
-			fmt.Fprint(w, "audio")
-		default:
-			http.NotFound(w, r)
-		}
-	})
+	ytdlp := filepath.Join(t.TempDir(), "fake-yt-dlp")
+	script := `#!/bin/sh
+url=''
+for a in "$@"; do url="$a"; done
+title=''; duration=0; id=''
+case "$url" in
+  *youtu.be/11) id=11; title=First; duration=180 ;;
+  *youtu.be/12) id=12; title=Second; duration=200 ;;
+  *youtu.be/13) id=13; title=Third; duration=210 ;;
+  *youtu.be/99) printf 'ERROR: [youtube] %s: Video unavailable\n' "$url" >&2; exit 1 ;;
+  *list=PL3) id=PL3 ;;
+  *youtu.be/*) id=${url##*/}; title="Track $id"; duration=120 ;;
+  *) printf 'ERROR: [youtube] %s: Video unavailable\n' "$url" >&2; exit 1 ;;
+esac
+case " $* " in
+  *" --simulate "*)
+    if [ "$id" = PL3 ]; then
+      printf '%s' '{"_type":"playlist","id":"PL3","title":"Album","entries":[{"id":"11","title":"First","uploader":"Artist","duration":180,"extractor":"youtube"},{"id":"12","title":"Second","uploader":"Artist","duration":200,"extractor":"youtube"}]}'
+    else
+      printf '{"id":"%s","title":"%s","uploader":"Artist","duration":%s,"extractor":"youtube"}' "$id" "$title" "$duration"
+    fi
+    exit 0 ;;
+esac
+if [ "$id" = 13 ]; then
+  printf 'ERROR: unable to download video data: HTTP 404 Not Found\n' >&2
+  exit 1
+fi
+dir=''; manifest=''; progress=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --paths) dir="$2"; shift 2 ;;
+    --print-to-file)
+      template="$2"; output="$3"
+      case "$template" in after_move:*) manifest="$output" ;; before_dl:*) progress="$output" ;; esac
+      shift 3 ;;
+    *) shift ;;
+  esac
+done
+path="$dir/000001_$id.mp3"
+printf 'audio' > "$path"
+printf '1\n' >> "$progress"
+printf '{"id":"%s","title":"%s","uploader":"Artist","duration":%s,"filepath":"%s","ext":"mp3","extractor":"youtube"}\n' "$id" "$title" "$duration" "$path" >> "$manifest"
+`
+	if err := os.WriteFile(ytdlp, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	bot, err := tgbotapi.NewBotAPIWithClient("token", "https://telegram.test/bot%s/%s", handlerClient{handler: telegramHandler})
 	if err != nil {
 		t.Fatal(err)
@@ -567,10 +407,7 @@ func newBatchHarness(t *testing.T) *batchHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { state.Close() })
-	previousSleep := octaveRetrySleep
-	octaveRetrySleep = func(context.Context, int) error { return nil }
-	t.Cleanup(func() { octaveRetrySleep = previousSleep })
-	dl := &downloader{downloadDir: t.TempDir(), maxFileSize: maxFileSize, maxPlaylistTracks: 75, octave: testOctaveClient(octaveHandler)}
+	dl := &downloader{downloadDir: t.TempDir(), bin: ytdlp, maxFileSize: maxFileSize, maxPlaylistTracks: 75}
 	cfg := config{DownloadWorkers: 1, DownloadQueueSize: 1, LookupWorkers: 1, LookupQueueSize: 1, RateLimit: 20, RateWindow: time.Minute, CacheTTL: time.Hour, MaxPlaylistTracks: 75, MaxFileSize: maxFileSize}
 	h.app = newAppWithServices(context.Background(), bot, dl, state, cfg)
 	h.state = state
@@ -586,19 +423,19 @@ func batchCallback(data string) *tgbotapi.CallbackQuery {
 	return &tgbotapi.CallbackQuery{ID: "cb", From: &tgbotapi.User{ID: 10}, Message: &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: 10, Type: "private"}}, Data: data}
 }
 
-func cacheOctaveTrack(t *testing.T, state *store, trackID, title string) {
+func cacheTrack(t *testing.T, state *store, trackID, title string) {
 	t.Helper()
-	if err := state.putCachedAudio(context.Background(), cachedAudio{Key: sourceCacheKey("octave", trackID, "mp3", "320"), FileID: "cached-file", Title: title, Format: "mp3", Quality: "320"}); err != nil {
+	if err := state.putCachedAudio(context.Background(), cachedAudio{Key: sourceCacheKey("youtube", trackID, "mp3", "320"), FileID: "cached-file", Title: title, Format: "mp3", Quality: "320"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestBatchOfTwoLinksShowsPreviewAndDeliversBoth(t *testing.T) {
 	h := newBatchHarness(t)
-	cacheOctaveTrack(t, h.state, "11", "First")
-	cacheOctaveTrack(t, h.state, "12", "Second")
+	cacheTrack(t, h.state, "11", "First")
+	cacheTrack(t, h.state, "12", "Second")
 
-	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 and https://music.octavestreaming.com/album/3?t=12"))
+	h.app.handleMessage(batchMessage("https://youtu.be/11 and https://youtu.be/12"))
 	calls := h.snapshot()
 	var preview telegramCall
 	for _, call := range calls {
@@ -649,9 +486,9 @@ func TestBatchOfTwoLinksShowsPreviewAndDeliversBoth(t *testing.T) {
 
 func TestBatchSkipsLinkWithFailedPreview(t *testing.T) {
 	h := newBatchHarness(t)
-	cacheOctaveTrack(t, h.state, "11", "First")
+	cacheTrack(t, h.state, "11", "First")
 
-	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/99?t=5"))
+	h.app.handleMessage(batchMessage("https://youtu.be/11 https://youtu.be/99"))
 	calls := h.snapshot()
 	var preview telegramCall
 	for _, call := range calls {
@@ -662,7 +499,7 @@ func TestBatchSkipsLinkWithFailedPreview(t *testing.T) {
 	if preview.method == "" {
 		t.Fatalf("preview was not shown: %#v", calls)
 	}
-	if !strings.Contains(preview.text, "links in the message: 1") || !strings.Contains(preview.text, "album/99?t=5</code> — skipped: Octave API") {
+	if !strings.Contains(preview.text, "links in the message: 1") || !strings.Contains(preview.text, "youtu.be/99</code> — skipped: ") {
 		t.Fatalf("failed link must be listed with its error: %q", preview.text)
 	}
 	h.app.handleCallback(batchCallback("dl:mp3:320:" + h.pendingKey(t)))
@@ -693,12 +530,12 @@ func (h *batchHarness) deliveryPrompt(t *testing.T, calls []telegramCall) telegr
 // skips the preview keyboard, so the skipped links must still be reported before downloading.
 func TestBatchWithDefaultFormatReportsSkippedLinks(t *testing.T) {
 	h := newBatchHarness(t)
-	cacheOctaveTrack(t, h.state, "11", "First")
+	cacheTrack(t, h.state, "11", "First")
 	if err := h.app.setPreference(10, "mp3", "320"); err != nil {
 		t.Fatal(err)
 	}
 
-	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/99?t=5"))
+	h.app.handleMessage(batchMessage("https://youtu.be/11 https://youtu.be/99"))
 	calls := h.snapshot()
 	for _, call := range calls {
 		if strings.Contains(call.markup, `"dl:mp3:320:`) {
@@ -707,7 +544,7 @@ func TestBatchWithDefaultFormatReportsSkippedLinks(t *testing.T) {
 	}
 	skipped := false
 	for _, call := range calls {
-		if (call.method == "sendMessage" || call.method == "editMessageText") && strings.Contains(call.text, "album/99?t=5</code> — skipped: Octave API") {
+		if (call.method == "sendMessage" || call.method == "editMessageText") && strings.Contains(call.text, "youtu.be/99</code> — skipped: ") {
 			skipped = true
 		}
 	}
@@ -726,9 +563,9 @@ func TestBatchWithDefaultFormatReportsSkippedLinks(t *testing.T) {
 // the file_id cache must be bypassed because cached tracks cannot be archived.
 func TestBatchZIPDeliverySendsOneArchive(t *testing.T) {
 	h := newBatchHarness(t)
-	cacheOctaveTrack(t, h.state, "11", "First")
+	cacheTrack(t, h.state, "11", "First")
 
-	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/3?t=12"))
+	h.app.handleMessage(batchMessage("https://youtu.be/11 https://youtu.be/12"))
 	h.snapshot()
 	key := h.pendingKey(t)
 	h.app.handleCallback(batchCallback("dl:mp3:320:" + key))
@@ -780,10 +617,10 @@ func TestNeedsDeliveryChoice(t *testing.T) {
 
 func TestBatchWithOneFailedDownloadIsPartial(t *testing.T) {
 	h := newBatchHarness(t)
-	cacheOctaveTrack(t, h.state, "11", "First")
-	cacheOctaveTrack(t, h.state, "12", "Second")
+	cacheTrack(t, h.state, "11", "First")
+	cacheTrack(t, h.state, "12", "Second")
 
-	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11\nhttps://music.octavestreaming.com/album/3?t=12\nhttps://music.octavestreaming.com/track/13"))
+	h.app.handleMessage(batchMessage("https://youtu.be/11\nhttps://youtu.be/12\nhttps://youtu.be/13"))
 	h.snapshot()
 	h.app.handleCallback(batchCallback("dl:mp3:320:" + h.pendingKey(t)))
 	h.snapshot()
@@ -816,7 +653,7 @@ func TestBatchWithOneFailedDownloadIsPartial(t *testing.T) {
 
 func TestBatchRejectsPlaylists(t *testing.T) {
 	h := newBatchHarness(t)
-	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 https://music.octavestreaming.com/album/3"))
+	h.app.handleMessage(batchMessage("https://youtu.be/11 https://www.youtube.com/playlist?list=PL3"))
 	calls := h.snapshot()
 	last := calls[len(calls)-1]
 	if last.method != "sendMessage" || last.text != tr("batch_no_playlists", "en") {
@@ -833,7 +670,7 @@ func TestBatchLimitKeepsFirstFiveLinks(t *testing.T) {
 	h := newBatchHarness(t)
 	var links []string
 	for i := 20; i < 27; i++ {
-		links = append(links, "https://music.octavestreaming.com/track/"+strconv.Itoa(i))
+		links = append(links, "https://youtu.be/"+strconv.Itoa(i))
 	}
 	h.app.handleMessage(batchMessage(strings.Join(links, " ")))
 	calls := h.snapshot()
@@ -848,15 +685,15 @@ func TestBatchLimitKeepsFirstFiveLinks(t *testing.T) {
 
 func TestBatchReleasesDownloadSlotBeforeDelivery(t *testing.T) {
 	h := newBatchHarness(t)
-	cacheOctaveTrack(t, h.state, "11", "First")
+	cacheTrack(t, h.state, "11", "First")
 	var activeDuringSend []int
 	h.onSendAudio = func() {
 		active, _, _ := h.app.downloads.snapshot()
 		activeDuringSend = append(activeDuringSend, active)
 	}
 
-	// One cached link and one that must really be downloaded through the fake Octave server.
-	h.app.handleMessage(batchMessage("https://music.octavestreaming.com/album/3?t=11 and https://music.octavestreaming.com/album/3?t=12"))
+	// One cached link and one that must really be downloaded through the fake yt-dlp.
+	h.app.handleMessage(batchMessage("https://youtu.be/11 and https://youtu.be/12"))
 	key := h.pendingKey(t)
 	h.app.handleCallback(batchCallback("dl:mp3:320:" + key))
 	h.snapshot()

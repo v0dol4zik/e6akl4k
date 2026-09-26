@@ -132,9 +132,6 @@ func (a *app) runDownloadTrace(userID, chatID int64, rawURL string, fresh bool) 
 			_, hit := a.store.cachedAudio(ctx, cacheKey, a.cfg.CacheTTL)
 			trace.add("persistent_cache_hit=%t key=%s", hit, cacheKey)
 		}
-		if preview.Extractor == "octave" {
-			trace.add("octave_remote_circuit=%s estimated_size=%d", a.octaveRemote.state(), estimateAudioSize(preview.DurationSeconds, "mp3", "320"))
-		}
 		trace.add("production fast/cache path started")
 		a.updateDownloadTraceStatus(status, trace, "cache / fast path")
 		handled, succeeded := a.tryCachedDownload(ctx, chatID, pending, "mp3", "320", lang, func(position int) {

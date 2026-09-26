@@ -438,7 +438,6 @@ func (a *app) handleAdminPerf(message *tgbotapi.Message) {
 	}
 	lang := a.langOrDefault(message.From.ID)
 	lines := []string{tr("admin_perf_title", lang, "window", label)}
-	lines = append(lines, tr("admin_circuit", lang, "state", string(a.octaveRemote.state())))
 	stats, _ := a.store.stats(a.ctx)
 	totalDeliveries := stats.DownloadsOK + stats.DownloadsPartial + stats.DownloadsFailed + stats.CacheHits
 	cacheRatio := int64(0)

@@ -85,19 +85,13 @@ func (a *app) handlePrivateSearch(message *tgbotapi.Message, query, lang string)
 func (a *app) presentSearchResults(chatID, userID int64, query, lang string, status *tgbotapi.Message, resolved bool, expectedDuration int) {
 	ctx, cancel := context.WithTimeout(a.ctx, 20*time.Second)
 	defer cancel()
-	candidates, outcome, err := a.runRankedLookup(ctx, query, expectedDuration)
+	candidates, err := a.runRankedLookup(ctx, query, expectedDuration)
 	if err != nil {
 		a.handleQueueError(chatID, lang, err)
 		return
 	}
 	if a.store != nil {
 		a.store.increment(a.ctx, "searches")
-		switch {
-		case outcome.Source == "octave":
-			a.store.increment(a.ctx, "search_octave")
-		case outcome.FallbackReason != "":
-			a.store.increment(a.ctx, "search_youtube_fallback")
-		}
 	}
 	keys := make([]string, 0, len(candidates))
 	for _, item := range candidates {
@@ -119,7 +113,7 @@ func (a *app) presentSearchResults(chatID, userID int64, query, lang string, sta
 		a.sendText(chatID, tr("nothing_found", lang), "", nil)
 		return
 	}
-	prefix := searchResultsHeader(outcome, resolved, lang)
+	prefix := searchResultsHeader(resolved, lang)
 	keyboard := searchKeyboard(keys, candidates, lang)
 	if status != nil {
 		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, prefix, *keyboard)
@@ -131,22 +125,12 @@ func (a *app) presentSearchResults(chatID, userID int64, query, lang string, sta
 	a.sendText(chatID, prefix, "HTML", keyboard)
 }
 
-// searchResultsHeader picks the results caption and appends an explicit notice when YouTube replaced Octave.
-func searchResultsHeader(outcome searchOutcome, resolved bool, lang string) string {
-	prefix := tr("search_results", lang)
+// searchResultsHeader picks the results caption for a fresh search or a resolved metadata link.
+func searchResultsHeader(resolved bool, lang string) string {
 	if resolved {
-		prefix = tr("resolved_results", lang)
+		return tr("resolved_results", lang)
 	}
-	if outcome.Source != "youtube" {
-		return prefix
-	}
-	switch outcome.FallbackReason {
-	case "no_results":
-		return prefix + "\n\n" + tr("search_fallback_no_results", lang)
-	case "api_error":
-		return prefix + "\n\n" + tr("search_fallback_unavailable", lang)
-	}
-	return prefix
+	return tr("search_results", lang)
 }
 
 func (a *app) handleSearchPick(callback *tgbotapi.CallbackQuery) {
@@ -350,24 +334,6 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 		if cached, ok := a.store.cachedAudio(ctx, urlKey, a.cfg.CacheTTL); ok {
 			return cached, nil
 		}
-		if strings.EqualFold(format, "mp3") {
-			if _, octaveURL := parseOctaveURL(pending.URL); octaveURL {
-				reporter.stage(tr("stage_telegram_remote", a.langOrDefault(pending.UserID)))
-			}
-			if remote, ok, remoteErr := a.cacheOctaveRemoteMP3(ctx, pending, quality, urlKey, queued); remoteErr != nil {
-				if errors.Is(remoteErr, context.Canceled) || errors.Is(remoteErr, context.DeadlineExceeded) {
-					return cachedAudio{}, remoteErr
-				}
-				if errors.Is(remoteErr, errQueueFull) {
-					if a.store != nil {
-						a.store.increment(a.ctx, "queue_rejected")
-					}
-					return cachedAudio{}, remoteErr
-				}
-			} else if ok {
-				return remote, nil
-			}
-		}
 		results, downloadErr := a.runDownloadRangeQueued(ctx, pending.URL, format, quality, pending.RangeStart, pending.RangeEnd, queued, nil)
 		if downloadErr != nil {
 			return cachedAudio{}, downloadErr
@@ -419,77 +385,6 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 		}
 		return entry, nil
 	})
-}
-
-func (a *app) cacheOctaveRemoteMP3(ctx context.Context, pending pendingURL, quality, urlKey string, queued func(int)) (cachedAudio, bool, error) {
-	if _, ok := parseOctaveURL(pending.URL); !ok || a.downloader == nil || a.downloader.octave == nil {
-		return cachedAudio{}, false, nil
-	}
-	if !a.octaveRemote.allow() {
-		logMediaStage("remote_audio_prepare", "octave", time.Now(), 0, false, "eligible", false, "reason", "circuit_open", "quality", quality)
-		return cachedAudio{}, false, nil
-	}
-	prepareStarted := time.Now()
-	remote, ok, err := a.downloader.octaveRemoteMP3(ctx, pending.URL, pending.Preview, quality)
-	logMediaStage("remote_audio_prepare", "octave", prepareStarted, remote.EstimatedSize, err == nil, "eligible", ok, "quality", quality)
-	if err != nil {
-		if countOctaveRemoteFailure(err) {
-			a.octaveRemote.failure()
-		} else {
-			a.octaveRemote.cancelProbe()
-		}
-		return cachedAudio{}, false, err
-	}
-	if !ok {
-		a.octaveRemote.cancelProbe()
-		return cachedAudio{}, false, err
-	}
-	_, release, acquireErr := a.downloads.acquireNotify(ctx, queued)
-	if acquireErr != nil {
-		a.octaveRemote.cancelProbe()
-		return cachedAudio{}, false, acquireErr
-	}
-	defer release()
-	audio := tgbotapi.NewAudio(a.cfg.CacheChatID, tgbotapi.FileURL(remote.URL))
-	audio.Title, audio.Performer, audio.Duration = remote.Title, remote.Artist, remote.Duration
-	uploadStarted := time.Now()
-	sent, sendErr := sendTelegram(a.bot, audio)
-	size := remote.EstimatedSize
-	if sent.Audio != nil && sent.Audio.FileSize > 0 {
-		size = int64(sent.Audio.FileSize)
-	}
-	logMediaStage("telegram_upload", "telegram", uploadStarted, size, sendErr == nil && sent.Audio != nil, "mode", "remote_url", "format", "mp3")
-	if sendErr != nil || sent.Audio == nil || sent.Audio.FileID == "" {
-		failure := sendErr
-		if failure == nil {
-			failure = errors.New("Telegram не вернул file_id для Octave remote URL")
-		}
-		if countOctaveRemoteFailure(failure) {
-			a.octaveRemote.failure()
-		} else {
-			a.octaveRemote.cancelProbe()
-		}
-		return cachedAudio{}, false, nil
-	}
-	a.octaveRemote.success()
-	entry := cachedAudio{
-		Key: urlKey, FileID: sent.Audio.FileID, Title: remote.Title, Artist: remote.Artist,
-		Duration: secondsToHMS(remote.Duration), Format: "mp3", Quality: quality, Size: size, MediaType: "audio",
-	}
-	if err := a.storeCachedAudioAliases(ctx, entry, remote.CacheKey); err != nil {
-		return cachedAudio{}, false, err
-	}
-	return entry, true, nil
-}
-
-func countOctaveRemoteFailure(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errQueueFull) {
-		return false
-	}
-	if apiErr, ok := telegramAPIError(err); ok && apiErr.Code == 429 {
-		return false
-	}
-	return true
 }
 
 func (a *app) storeCachedAudioAliases(ctx context.Context, entry cachedAudio, aliasKey string) error {
@@ -602,8 +497,6 @@ func (a *app) handleAdminStats(message *tgbotapi.Message) {
 		"cookies", strconv.FormatInt(stats.CookieErrors, 10),
 		"hits", strconv.FormatInt(stats.CacheHits, 10),
 		"searches", strconv.FormatInt(stats.Searches, 10),
-		"search_octave", strconv.FormatInt(stats.SearchOctave, 10),
-		"search_fallback", strconv.FormatInt(stats.SearchYouTubeFallback, 10),
 		"limited", strconv.FormatInt(stats.RateLimited, 10),
 		"rejected", strconv.FormatInt(stats.QueueRejected, 10))
 	a.sendText(message.Chat.ID, text, "HTML", nil)
@@ -769,7 +662,7 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 		}
 		return deliveryReport{}, err
 	}
-	// The download slot only covers yt-dlp/Octave work. Telegram delivery below runs after
+	// The download slot only covers yt-dlp work. Telegram delivery below runs after
 	// releaseDownloads so cached re-sends, archive waits and uploads never block other users.
 	released := false
 	releaseDownloads := func() {

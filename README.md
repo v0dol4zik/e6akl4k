@@ -17,7 +17,7 @@
 
 `e6akl4k` is a self-hosted Telegram bot for finding and downloading music. Send it a song name or a link, choose the format, and receive the finished audio directly in Telegram.
 
-The bot searches Octave Streaming first and uses YouTube as a fallback. It also supports albums, playlists, inline search, MP3, FLAC, M4A, OGG, download history, and Telegram file caching. Spotify, Apple Music, Deezer, Tidal, and Yandex Music links are used as search hints rather than direct audio sources.
+The bot searches and downloads through YouTube. It also supports albums, playlists, inline search, MP3, FLAC, M4A, OGG, download history, and Telegram file caching. Spotify, Apple Music, Deezer, Tidal, and Yandex Music links are used as search hints rather than direct audio sources.
 
 Try the public bot: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 
@@ -49,7 +49,7 @@ git pull --ff-only origin main
 
 `e6akl4k` — self-hosted Telegram-бот для поиска и скачивания музыки. Отправь ему название песни или ссылку, выбери формат и получи готовый аудиофайл прямо в Telegram.
 
-Бот сначала ищет музыку в Octave Streaming, а затем использует YouTube как резервный источник. Он также поддерживает альбомы, плейлисты, inline-поиск, MP3, FLAC, M4A, OGG, историю загрузок и Telegram-кэш. Ссылки Spotify, Apple Music, Deezer, Tidal и Яндекс Музыки используются как подсказки для поиска, а не как прямые источники аудио.
+Бот ищет и скачивает музыку через YouTube. Он также поддерживает альбомы, плейлисты, inline-поиск, MP3, FLAC, M4A, OGG, историю загрузок и Telegram-кэш. Ссылки Spotify, Apple Music, Deezer, Tidal и Яндекс Музыки используются как подсказки для поиска, а не как прямые источники аудио.
 
 Попробовать публичного бота: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 

@@ -26,7 +26,7 @@ func TestTranslationsCoverEveryLanguage(t *testing.T) {
 func TestTranslationsUseLowercaseStyle(t *testing.T) {
 	protected := []string{
 		"AAC", "Apple", "Audiomack", "Bandcamp", "Daft", "Deezer", "FLAC", "M4A",
-		"Mixcloud", "MP3", "Octave", "OGG", "SoundCloud", "Spotify", "Tidal", "VK", "Yandex",
+		"Mixcloud", "MP3", "OGG", "SoundCloud", "Spotify", "Tidal", "VK", "Yandex",
 		"Telegram", "YouTube", "ZIP",
 	}
 	check := func(key, lang, value string) {
@@ -92,7 +92,7 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 		if !strings.Contains(welcome, "@music_test_bot") || !strings.Contains(help, "@music_test_bot") {
 			t.Errorf("%s guide does not contain the actual bot username", lang)
 		}
-		for _, feature := range []string{"Daft Punk", "Octave", "Spotify", "ZIP", "MP3", "/settings"} {
+		for _, feature := range []string{"Daft Punk", "YouTube", "Spotify", "ZIP", "MP3", "/settings"} {
 			if !strings.Contains(help, feature) {
 				t.Errorf("%s help does not explain %q", lang, feature)
 			}

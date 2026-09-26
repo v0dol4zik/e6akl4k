@@ -31,7 +31,7 @@ const (
 )
 
 var (
-	urlPattern = regexp.MustCompile(`(?i)(https?://)?(www\.)?(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com|music\.octavestreaming\.com|api\.octavestreaming\.com)[\w/\-?=&%.#+@!~]*`)
+	urlPattern = regexp.MustCompile(`(?i)(https?://)?(www\.)?(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com)[\w/\-?=&%.#+@!~]*`)
 	unsafeName = regexp.MustCompile(`[<>:"/\\|?*]`)
 )
 
@@ -73,7 +73,6 @@ type app struct {
 	limiter       *rateLimiter
 	inlineLimiter *rateLimiter
 	flights       flightGroup
-	octaveRemote  *circuitBreaker
 	metrics       metricsCache
 
 	mu           sync.Mutex
@@ -118,7 +117,6 @@ func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *d
 		archives:      newJobGate(cfg.ArchiveWorkers, cfg.ArchiveQueueSize),
 		limiter:       newRateLimiter(cfg.RateLimit, cfg.RateWindow),
 		inlineLimiter: newRateLimiter(cfg.InlineRateLimit, cfg.RateWindow),
-		octaveRemote:  newCircuitBreaker(3, 5*time.Minute, 10*time.Minute),
 		userLang:      make(map[int64]string),
 		userPref:      make(map[int64]userPreference),
 		urls:          make(map[string]pendingURL),
@@ -839,17 +837,17 @@ func (a *app) runInlineLookup(ctx context.Context, query string) ([]inlineCandid
 	return a.downloader.searchLookup(ctx, query, 0)
 }
 
-// runRankedLookup performs an Octave-first text search and reports which source answered.
-func (a *app) runRankedLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, searchOutcome, error) {
+// runRankedLookup performs a YouTube text search and ranks the candidates.
+func (a *app) runRankedLookup(ctx context.Context, query string, expectedDuration int) ([]inlineCandidate, error) {
 	_, release, err := a.lookups.acquire(ctx)
 	if err != nil {
 		if errors.Is(err, errQueueFull) && a.store != nil {
 			a.store.increment(a.ctx, "queue_rejected")
 		}
-		return nil, searchOutcome{}, err
+		return nil, err
 	}
 	defer release()
-	return a.downloader.textSearch(ctx, query, expectedDuration)
+	return a.downloader.searchLookup(ctx, query, expectedDuration)
 }
 
 func (a *app) runDownloadRange(ctx context.Context, url, format, quality string, start, end int, progress downloadProgress) ([]downloadResult, error) {
