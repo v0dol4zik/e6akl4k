@@ -1,0 +1,72 @@
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "none"
+  },
+  "inbounds": [
+    {
+      "tag": "socks",
+      "listen": "0.0.0.0",
+      "port": 1080,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    },
+    {
+      "tag": "relay",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "RELAY_HOST",
+            "port": 443,
+            "users": [
+              {
+                "id": "RELAY_UUID",
+                "encryption": "none",
+                "flow": "xtls-rprx-vision"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "RELAY_SNI",
+          "fingerprint": "chrome",
+          "publicKey": "RELAY_PUBLIC_KEY",
+          "shortId": "RELAY_SHORT_ID"
+        }
+      }
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["socks"],
+        "domain": [
+          "full:api.music.yandex.net",
+          "full:api.music.yandex.ru",
+          "full:music.yandex.ru",
+          "full:music.yandex.by",
+          "full:music.yandex.kz",
+          "full:music.yandex.uz",
+          "full:music.yandex.com"
+        ],
+        "outboundTag": "relay"
+      }
+    ]
+  }
+}

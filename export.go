@@ -383,6 +383,9 @@ func (a *app) exportFailed(chatID, userID int64, rawURL, stage, lang string, sta
 		text = tr("cover_not_found", lang)
 	case errors.Is(err, context.DeadlineExceeded):
 		text = tr("export_timeout", lang)
+	case errors.Is(err, errMusicServiceBlocked):
+		a.reportError(errorReport{Stage: stage, ChatID: chatID, UserID: userID, URL: rawURL, Error: err.Error()})
+		text = tr("music_service_blocked", lang, "service", musicServiceName(rawURL, lang))
 	default:
 		a.reportError(errorReport{Stage: stage, ChatID: chatID, UserID: userID, URL: rawURL, Error: err.Error()})
 		text = tr(stage+"_error", lang, "error", html.EscapeString(err.Error()))

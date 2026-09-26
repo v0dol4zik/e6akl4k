@@ -18,6 +18,7 @@ chmod 600 .env
 | `INLINE_CACHE_CHAT_ID` | empty | Legacy alias for `CACHE_CHAT_ID`. |
 | `ERROR_CHAT_ID` | `CACHE_CHAT_ID` | Optional separate chat for user-facing error reports. Without both variables error reporting is disabled. |
 | `LASTFM_API_KEY` | empty | last.fm API key that enables `/lastfm`. Without it the command is hidden from the menu. Create one at https://www.last.fm/api/account/create. |
+| `YANDEX_PROXY` | empty | `socks5h://`, `socks5://`, `http://`, or `https://` proxy for Yandex Music site and API requests only. See [Yandex Music outside the CIS](#yandex-music-outside-the-cis). |
 | `INLINE_PLACEHOLDER_FILE_ID` | generated | Existing silent MP3 `file_id` for inline placeholders. |
 | `ADMIN_IDS` | empty | Comma-separated immutable owner IDs. Owners manage dynamic admins; all admins can use moderation, `/perf`, and redacted `/log`. |
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory. |
@@ -69,6 +70,18 @@ Structured `media_stage` log records split latency into source probing/downloadi
 Every error a user sees (link preview, search, download, playlist or ZIP delivery, cached re-send, `/history`, and inline downloads) is also posted to `ERROR_CHAT_ID` or, by default, to the cache channel. A post contains the stage, the user ID and last known username, the link with only track-identifying query parameters (`v`, `list`, `t`, `track`), the search query, the format, and the error text with signed-URL and cookie fragments removed.
 
 Cancellations, a busy queue, rate limits, and the playlist size limit are not reported. Identical stage and error pairs are folded for ten minutes (per-video IDs in `yt-dlp` messages are ignored for this comparison), and the next post of the same error shows how many repeats were folded. Per-track failures of one playlist or batch are combined into a single post. Posts are sent by one background worker at most every three seconds from a queue of 64 distinct reports; overflow is dropped and counted as `error_reports_dropped`, delivered posts as `error_reports_sent`.
+
+## Yandex Music outside the CIS
+
+Yandex Music answers HTTP 451 to servers outside the CIS: its links then get a "service refuses the server's country" message instead of a tracklist or a search. `YANDEX_PROXY` sends requests to `music.yandex.*` and `api.music.yandex.*` through a proxy with a CIS exit; other services and the Yandex artwork CDN are reached directly. The resolver timeout, redirect allowlist, and response limits stay the same.
+
+`docker-compose.yml` has an optional `yandex-relay` service, an Xray client that exposes SOCKS on port 1080 of the project network only and forwards to a VLESS server in the CIS:
+
+1. Copy `yandex-relay.example.json` to `yandex-relay.json` and fill in the `RELAY_*` placeholders, or replace the `relay` outbound with the one from your VLESS client config (keep the `relay` tag). The file is ignored by git.
+2. `chown 10001:10001 yandex-relay.json && chmod 0600 yandex-relay.json`.
+3. Append `COMPOSE_PROFILES=yandex-relay` and `YANDEX_PROXY=socks5h://yandex-relay:1080` to `.env`, then redeploy.
+
+The relay routes only Yandex Music host names and drops every other destination, so it cannot be used as a general exit. Use `socks5h` so that the host name, not a local DNS answer, reaches the relay.
 
 ## Notices
 

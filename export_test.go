@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -131,6 +132,8 @@ func TestPickCoverPrefersSquareArtAndCropsTopic(t *testing.T) {
 type exportAPIClient struct {
 	mu        sync.Mutex
 	responses map[string]string
+	// statuses answers a URL with a bare HTTP status, such as the 451 of a geo-blocked service.
+	statuses  map[string]int
 	requested []string
 }
 
@@ -145,6 +148,10 @@ func (c *exportAPIClient) install(t *testing.T) {
 			key := r.URL.Host + r.URL.Path
 			if r.URL.RawQuery != "" {
 				key += "?" + r.URL.RawQuery
+			}
+			if status, ok := c.statuses[key]; ok {
+				w.WriteHeader(status)
+				return
 			}
 			body, ok := c.responses[key]
 			if !ok {
@@ -658,5 +665,265 @@ func TestExportFailureIsReported(t *testing.T) {
 	entry := <-reports.queue
 	if entry.report.Stage != "export" || entry.report.URL != "https://www.youtube.com/playlist?list=PL1" || entry.report.UserID != 10 {
 		t.Fatalf("report=%#v", entry.report)
+	}
+}
+
+func TestMusicCollectionKindSeparatesCollectionsFromTracks(t *testing.T) {
+	for link, want := range map[string]string{
+		"https://music.yandex.ru/playlists/lk.00000000-0000-0000-0000-000000000000?utm_source=web": "playlist",
+		"https://music.yandex.com/users/someone/playlists/3":                                       "playlist",
+		"https://music.yandex.ru/album/302127":                                                     "album",
+		"https://music.yandex.ru/album/302127/track/2":                                             "",
+		"https://music.yandex.ru/track/2":                                                          "",
+		"https://music.yandex.kz/artist/41":                                                        "artist",
+		"https://music.yandex.ru/":                                                                 "",
+		"https://www.deezer.com/en/playlist/123":                                                   "playlist",
+		"https://www.deezer.com/fr/album/302127":                                                   "album",
+		"https://www.deezer.com/en/track/3135556":                                                  "",
+		"https://open.spotify.com/playlist/37i9dQZF1DX":                                            "playlist",
+		"https://open.spotify.com/intl-de/album/2noRn2Aes5aoNVsU6iWThc":                            "album",
+		"https://open.spotify.com/artist/4tZwfgrHOc3mvqYlEYSvVi":                                   "artist",
+		"https://open.spotify.com/track/abc":                                                       "",
+		"https://music.apple.com/us/album/discovery/697194953":                                     "album",
+		"https://music.apple.com/us/album/discovery/697194953?i=697195462":                         "",
+		"https://tidal.com/browse/mix/0123":                                                        "playlist",
+		"https://www.youtube.com/playlist?list=PL1":                                                "",
+	} {
+		if got := musicCollectionKind(link); got != want {
+			t.Errorf("%s: kind=%q, want %q", link, got, want)
+		}
+	}
+}
+
+func TestGenericLandingTitleOnlyMatchesTheLinkService(t *testing.T) {
+	for _, tc := range []struct {
+		link, title string
+		want        bool
+	}{
+		{"https://music.yandex.ru/album/1/track/2", "Яндекс Музыка — собираем музыку для вас", true},
+		{"https://music.yandex.com/playlists/lk.x", "Yandex Music: listen online", true},
+		{"https://open.spotify.com/track/abc", "Spotify – Web Player: Music for everyone", true},
+		{"https://open.spotify.com/track/abc", "Spotify", true},
+		{"https://music.yandex.ru/album/1/track/2", "Get Lucky — Daft Punk. Слушать онлайн на Яндекс Музыке", false},
+		{"https://open.spotify.com/track/abc", "Spotify Money", false},
+		{"https://www.deezer.com/en/track/1", "Spotify – Web Player", false},
+	} {
+		if got := genericLandingTitle(tc.link, tc.title); got != tc.want {
+			t.Errorf("%s %q: generic=%v", tc.link, tc.title, got)
+		}
+	}
+}
+
+func musicLinkMessage(text string) *tgbotapi.Message {
+	return &tgbotapi.Message{Text: text, From: &tgbotapi.User{ID: 10}, Chat: &tgbotapi.Chat{ID: 10}}
+}
+
+func TestGeoBlockedYandexPlaylistIsExplainedNotSearched(t *testing.T) {
+	client := &exportAPIClient{statuses: map[string]int{"api.music.yandex.net/playlist/lk.00000000-0000-0000-0000-000000000000": http.StatusUnavailableForLegalReasons}}
+	client.install(t)
+	telegram := &exportTelegram{}
+	application := newExportTestApp(t, telegram)
+	reports := newErrorReporter(-1001)
+	application.errorReports = reports
+	link := "https://music.yandex.ru/playlists/lk.00000000-0000-0000-0000-000000000000?utm_medium=copy_link"
+	application.handleIncomingURL(musicLinkMessage(link), link, "ru")
+	calls := telegram.snapshot()
+	want := tr("music_service_blocked", "ru", "service", "Яндекс Музыки")
+	if len(calls) != 2 || calls[1].method != "editMessageText" || calls[1].text != want {
+		t.Fatalf("calls=%#v", calls)
+	}
+	if len(client.requested) != 1 {
+		t.Fatalf("a blocked playlist must not fall back to the page or a search: %q", client.requested)
+	}
+	if len(reports.queue) != 1 {
+		t.Fatalf("a geo-block must reach the operator chat, queued=%d", len(reports.queue))
+	}
+
+	application.runExportJob(10, 10, link, "en", false)
+	if calls := telegram.snapshot(); len(calls) != 2 || calls[1].text != tr("music_service_blocked", "en", "service", "Yandex Music") {
+		t.Fatalf("export=%#v", calls)
+	}
+	application.runExportJob(10, 10, link, "en", true)
+	if calls := telegram.snapshot(); len(calls) != 2 || calls[1].text != tr("music_service_blocked", "en", "service", "Yandex Music") {
+		t.Fatalf("cover=%#v", calls)
+	}
+}
+
+func TestGeoBlockedYandexTrackIsExplained(t *testing.T) {
+	client := &exportAPIClient{
+		statuses: map[string]int{"api.music.yandex.net/tracks/2": http.StatusUnavailableForLegalReasons},
+		// The page a blocked visitor gets is the home page; it must never be searched.
+		responses: map[string]string{"music.yandex.ru/album/1/track/2": `<title>Яндекс Музыка — собираем музыку для вас</title>`},
+	}
+	client.install(t)
+	telegram := &exportTelegram{}
+	application := newExportTestApp(t, telegram)
+	link := "https://music.yandex.ru/album/1/track/2"
+	application.handleIncomingURL(musicLinkMessage(link), link, "en")
+	calls := telegram.snapshot()
+	if len(calls) != 2 || calls[1].text != tr("music_service_blocked", "en", "service", "Yandex Music") {
+		t.Fatalf("calls=%#v", calls)
+	}
+}
+
+func TestLandingPageTitleIsNotSearched(t *testing.T) {
+	client := &exportAPIClient{responses: map[string]string{"open.spotify.com/track/abc": `<html><head><title>Spotify – Web Player</title></head></html>`}}
+	client.install(t)
+	telegram := &exportTelegram{}
+	application := newExportTestApp(t, telegram)
+	link := "https://open.spotify.com/track/abc"
+	application.handleIncomingURL(musicLinkMessage(link), link, "en")
+	calls := telegram.snapshot()
+	if len(calls) != 2 || calls[1].text != tr("link_generic_page", "en", "service", "Spotify") {
+		t.Fatalf("calls=%#v", calls)
+	}
+}
+
+func TestDeezerPlaylistOffersTracklistInsteadOfSearch(t *testing.T) {
+	client := &exportAPIClient{responses: map[string]string{
+		"api.deezer.com/playlist/123":                          `{"title":"Road <Mix>","nb_tracks":2,"picture_xl":"https://cdn-images.dzcdn.net/images/playlist/x/1000x1000-000000-80-0-0.jpg"}`,
+		"api.deezer.com/playlist/123/tracks?index=0&limit=100": `{"data":[{"title":"Song 1","artist":{"name":"Artist 1"}},{"title":"Song 2","artist":{"name":"Artist 2"}}],"total":2,"next":""}`,
+	}}
+	client.install(t)
+	telegram := &exportTelegram{}
+	application := newExportTestApp(t, telegram)
+	reports := newErrorReporter(-1001)
+	application.errorReports = reports
+	link := "https://www.deezer.com/en/playlist/123"
+	application.handleIncomingURL(musicLinkMessage(link), link, "en")
+	calls := telegram.snapshot()
+	if len(calls) != 2 || calls[1].method != "editMessageText" {
+		t.Fatalf("calls=%#v", calls)
+	}
+	text, markup := calls[1].text, calls[1].markup
+	notice := tr("music_collection", "en", "kind", tr("collection_kind_playlist", "en"), "service", "Deezer")
+	if !strings.Contains(text, "📀 <b>Road &lt;Mix&gt;</b>") || !strings.Contains(text, tr("preview_tracks", "en", "count", "2")) || !strings.Contains(text, notice) {
+		t.Fatalf("text=%q", text)
+	}
+	if strings.Contains(markup, `"dl:`) || !strings.Contains(markup, `"cover:`) || !strings.Contains(markup, `"cancel:`) {
+		t.Fatalf("a collection offers only the tracklist, the cover and cancel: %s", markup)
+	}
+	key := strings.SplitN(strings.SplitN(markup, `"export:`, 2)[1], `"`, 2)[0]
+	requested := len(client.requested)
+	application.handleExportCallback(&tgbotapi.CallbackQuery{From: &tgbotapi.User{ID: 10}, Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 10}}, Data: "export:" + key})
+	calls = telegram.snapshot()
+	if len(calls) != 1 || calls[0].method != "sendDocument" || calls[0].file != "Artist 1 - Song 1\nArtist 2 - Song 2\n" {
+		t.Fatalf("export=%#v", calls)
+	}
+	if len(client.requested) != requested {
+		t.Fatalf("the shown tracklist is exported without new requests: %q", client.requested[requested:])
+	}
+	if len(reports.queue) != 0 {
+		t.Fatalf("a readable playlist is not an error, queued=%d", len(reports.queue))
+	}
+}
+
+func TestStreamingOnlyCollectionGetsAHint(t *testing.T) {
+	client := &exportAPIClient{responses: map[string]string{}}
+	client.install(t)
+	telegram := &exportTelegram{}
+	application := newExportTestApp(t, telegram)
+	reports := newErrorReporter(-1001)
+	application.errorReports = reports
+	for _, tc := range []struct{ link, kind, service string }{
+		{"https://open.spotify.com/playlist/37i9dQZF1DX", "playlist", "Spotify"},
+		{"https://music.yandex.ru/artist/41", "artist", "Яндекс Музыки"},
+	} {
+		application.handleIncomingURL(musicLinkMessage(tc.link), tc.link, "ru")
+		calls := telegram.snapshot()
+		want := tr("music_collection", "ru", "kind", tr("collection_kind_"+tc.kind, "ru"), "service", tc.service) + "\n" + tr("music_collection_hint", "ru")
+		if len(calls) != 2 || calls[1].text != want {
+			t.Fatalf("%s: calls=%#v", tc.link, calls)
+		}
+	}
+	if len(client.requested) != 0 || len(reports.queue) != 0 {
+		t.Fatalf("requested=%q queued=%d", client.requested, len(reports.queue))
+	}
+}
+
+type redirectDoer struct{ final string }
+
+func (d redirectDoer) Do(request *http.Request) (*http.Response, error) {
+	final, err := http.NewRequestWithContext(request.Context(), http.MethodGet, d.final, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Request: final}, nil
+}
+
+func TestDeezerShortLinkIsExpandedBeforeClassifying(t *testing.T) {
+	old := makeResolverClient
+	makeResolverClient = func() httpDoer {
+		return redirectDoer{final: "https://www.deezer.com/en/playlist/123?utm_campaign=share"}
+	}
+	t.Cleanup(func() { makeResolverClient = old })
+	expanded := expandMusicShortLink(context.Background(), "https://link.deezer.com/s/31abc")
+	if musicCollectionKind(expanded) != "playlist" {
+		t.Fatalf("expanded=%q", expanded)
+	}
+	if got := expandMusicShortLink(context.Background(), "https://www.deezer.com/en/track/1"); got != "https://www.deezer.com/en/track/1" {
+		t.Fatalf("a full link is kept: %q", got)
+	}
+}
+
+func TestYandexMusicHostSelectsOnlyGeoBlockedHosts(t *testing.T) {
+	for host, want := range map[string]bool{
+		"api.music.yandex.net": true,
+		"api.music.yandex.ru":  true,
+		"music.yandex.ru":      true,
+		"MUSIC.YANDEX.KZ.":     true,
+		"music.yandex.com":     true,
+		"avatars.yandex.net":   false,
+		"yandex.ru":            false,
+		"music.yandex.ru.evil": false,
+		"api.deezer.com":       false,
+		"www.music.yandex.ru":  false,
+	} {
+		if got := yandexMusicHost(host); got != want {
+			t.Errorf("yandexMusicHost(%q)=%v, want %v", host, got, want)
+		}
+	}
+}
+
+func TestYandexProxyCarriesOnlyYandexMusicRequests(t *testing.T) {
+	var mu sync.Mutex
+	var proxied []string
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		proxied = append(proxied, r.URL.String())
+		mu.Unlock()
+		fmt.Fprint(w, `{"result":[{"title":"Song","artists":[{"name":"Artist"}]}]}`)
+	}))
+	defer proxy.Close()
+	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "direct")
+	}))
+	defer direct.Close()
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yandexProxy.Store(proxyURL)
+	t.Cleanup(func() { yandexProxy.Store(nil) })
+
+	var payload struct {
+		Result []yandexTrack `json:"result"`
+	}
+	if err := fetchExportJSON(context.Background(), "http://api.music.yandex.net/tracks/2", &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Result) != 1 || payload.Result[0].export().line() != "Artist - Song" {
+		t.Fatalf("payload=%#v", payload)
+	}
+	response, err := resolverClient().Get(direct.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	mu.Lock()
+	defer mu.Unlock()
+	if string(body) != "direct" || !reflect.DeepEqual(proxied, []string{"http://api.music.yandex.net/tracks/2"}) {
+		t.Fatalf("body=%q proxied=%q", body, proxied)
 	}
 }

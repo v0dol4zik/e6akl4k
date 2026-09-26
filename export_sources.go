@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,9 @@ var (
 	// exportSlug is a Yandex login or playlist UUID; a leading dot is refused so that "." and
 	// ".." cannot climb the API path.
 	exportSlug = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$`)
+	// errMusicServiceBlocked marks HTTP 451: the service refuses requests from the server's
+	// country (Yandex Music does so outside the CIS) and returns no metadata at all.
+	errMusicServiceBlocked = errors.New("сервис недоступен из страны сервера")
 )
 
 // musicServiceTracklist exports Deezer and Yandex Music links through their public APIs and
@@ -41,7 +45,7 @@ func musicServiceTracklist(ctx context.Context, rawURL string, withTracks bool) 
 	segments := strings.FieldsFunc(parsed.Path, func(r rune) bool { return r == '/' })
 	switch {
 	case host == "link.deezer.com":
-		if final := resolveShortLink(ctx, rawURL); final != "" && !strings.Contains(final, "link.deezer.com") {
+		if final := expandMusicShortLink(ctx, rawURL); final != rawURL {
 			return musicServiceTracklist(ctx, final, withTracks)
 		}
 	case hostWithin(host, "deezer.com"):
@@ -95,6 +99,82 @@ func streamingTrackLink(host string, parsed *url.URL, segments []string) bool {
 	return hostWithin(host, "music.apple.com") && parsed.Query().Get("i") != ""
 }
 
+// musicCollectionKind names the playlist, album or artist page behind a music-service link
+// ("playlist", "album", "artist"). It is empty for tracks and unrecognised paths, which are
+// searched on YouTube as one track.
+func musicCollectionKind(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || !requiresMusicResolution(rawURL) {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	segments := strings.FieldsFunc(parsed.Path, func(r rune) bool { return r == '/' })
+	if strings.HasPrefix(host, "music.yandex.") {
+		switch {
+		case len(segments) == 0:
+		case segments[0] == "album" && (len(segments) < 3 || segments[2] != "track"):
+			return "album"
+		case segments[0] == "playlists" || (len(segments) >= 3 && segments[0] == "users" && segments[2] == "playlists"):
+			return "playlist"
+		case segments[0] == "artist":
+			return "artist"
+		}
+		return ""
+	}
+	if streamingTrackLink(host, parsed, segments) {
+		return ""
+	}
+	for _, segment := range segments {
+		switch segment {
+		case "playlist", "mix":
+			return "playlist"
+		case "album":
+			return "album"
+		case "artist":
+			return "artist"
+		}
+	}
+	return ""
+}
+
+// musicServiceName names the service of a metadata link as it follows a noun, so Yandex Music
+// is genitive in Russian: "плейлист Яндекс Музыки".
+func musicServiceName(rawURL, lang string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	switch {
+	case hostWithin(host, "spotify.com"):
+		return "Spotify"
+	case hostWithin(host, "music.apple.com"):
+		return "Apple Music"
+	case hostWithin(host, "deezer.com"):
+		return "Deezer"
+	case hostWithin(host, "tidal.com"):
+		return "Tidal"
+	case strings.HasPrefix(host, "music.yandex.") && lang == "ru":
+		return "Яндекс Музыки"
+	case strings.HasPrefix(host, "music.yandex."):
+		return "Yandex Music"
+	}
+	return host
+}
+
+// expandMusicShortLink follows a Deezer share link (link.deezer.com/s/...) to the release it
+// names, so that playlists and albums are recognised; other links are returned unchanged.
+func expandMusicShortLink(ctx context.Context, rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || !strings.EqualFold(strings.TrimSuffix(parsed.Hostname(), "."), "link.deezer.com") {
+		return rawURL
+	}
+	if final := resolveShortLink(ctx, rawURL); final != "" && !strings.Contains(final, "link.deezer.com") {
+		return final
+	}
+	return rawURL
+}
+
 // resolveShortLink follows the redirects of a short share link through the resolver client,
 // whose redirect policy keeps them on supported hosts.
 func resolveShortLink(ctx context.Context, rawURL string) string {
@@ -125,6 +205,9 @@ func fetchExportJSON(ctx context.Context, endpoint string, target any) error {
 		return err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnavailableForLegalReasons {
+		return fmt.Errorf("%w (HTTP 451)", errMusicServiceBlocked)
+	}
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("сервис ответил HTTP %d", response.StatusCode)
 	}

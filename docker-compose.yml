@@ -42,3 +42,34 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+  # Optional SOCKS proxy with a CIS exit for Yandex Music, which answers HTTP 451 elsewhere.
+  # Enabled by COMPOSE_PROFILES=yandex-relay and YANDEX_PROXY=socks5h://yandex-relay:1080
+  # in .env; see docs/configuration.md. It is reachable only on the project network.
+  yandex-relay:
+    image: ghcr.io/xtls/xray-core:26.3.27
+    profiles:
+      - yandex-relay
+    restart: unless-stopped
+    user: "10001:10001"
+    command: ["run", "-c", "/etc/xray/config.json"]
+    volumes:
+      - type: bind
+        source: ./yandex-relay.json
+        target: /etc/xray/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

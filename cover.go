@@ -57,7 +57,11 @@ func (a *app) coverFor(ctx context.Context, rawURL string) (coverImage, error) {
 	if streamingOnlyLink(rawURL) {
 		return coverImage{}, errExportUnsupported
 	}
-	if result, handled, err := musicServiceTracklist(ctx, rawURL, false); handled && err == nil && result.CoverURL != "" {
+	result, handled, err := musicServiceTracklist(ctx, rawURL, false)
+	if handled && errors.Is(err, errMusicServiceBlocked) {
+		return coverImage{}, err
+	}
+	if handled && err == nil && result.CoverURL != "" {
 		for _, candidate := range coverCandidates(result.CoverURL) {
 			cover, coverErr := downloadCoverImage(ctx, candidate, result.Name)
 			if coverErr == nil {

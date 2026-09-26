@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +78,21 @@ func TestLoadConfigRequiresToken(t *testing.T) {
 	}()
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("missing token accepted")
+	}
+}
+
+func TestLoadConfigYandexProxy(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "token")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("YANDEX_PROXY", " socks5h://yandex-relay:1080 ")
+	cfg, err := loadConfig()
+	if err != nil || cfg.YandexProxy == nil || cfg.YandexProxy.String() != "socks5h://yandex-relay:1080" {
+		t.Fatalf("proxy=%v err=%v", cfg.YandexProxy, err)
+	}
+	for _, value := range []string{"yandex-relay:1080", "ftp://relay:21", "socks5://", "http://relay:8080/path", "socks5://user:secret@relay:1080?x=1"} {
+		t.Setenv("YANDEX_PROXY", value)
+		if _, err := loadConfig(); err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("YANDEX_PROXY=%q err=%v", value, err)
+		}
 	}
 }

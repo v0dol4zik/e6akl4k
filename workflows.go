@@ -29,11 +29,20 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 		a.handleQueueError(message.Chat.ID, lang, err, errorReport{Stage: "preview", UserID: message.From.ID, URL: rawURL})
 		return
 	}
+	if requiresMusicResolution(rawURL) {
+		rawURL = expandMusicShortLink(ctx, rawURL)
+		if kind := musicCollectionKind(rawURL); kind != "" {
+			result, handled, err := musicServiceTracklist(ctx, rawURL, true)
+			release()
+			a.presentMusicCollection(message, rawURL, kind, result, handled, err, status, lang)
+			return
+		}
+	}
 	preview, err := a.inspectURL(ctx, rawURL)
 	release()
 	if err != nil {
 		a.reportError(errorReport{Stage: "preview", ChatID: message.Chat.ID, UserID: message.From.ID, URL: rawURL, Error: err.Error()})
-		a.sendText(message.Chat.ID, tr("preview_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+		a.replaceStatusText(message.Chat.ID, status, previewErrorText(rawURL, err, lang))
 		return
 	}
 	if requiresMusicResolution(rawURL) {
@@ -71,6 +80,60 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 		}
 	}
 	a.sendText(message.Chat.ID, text, "HTML", keyboard)
+}
+
+// previewErrorText explains a failed link preview; a geo-blocked service and a link that led to
+// the service home page get their own hints instead of the raw error.
+func previewErrorText(rawURL string, err error, lang string) string {
+	switch {
+	case errors.Is(err, errMusicServiceBlocked):
+		return tr("music_service_blocked", lang, "service", musicServiceName(rawURL, lang))
+	case errors.Is(err, errGenericLinkPage):
+		return tr("link_generic_page", lang, "service", musicServiceName(rawURL, lang))
+	}
+	return tr("preview_error", lang, "error", html.EscapeString(err.Error()))
+}
+
+// presentMusicCollection answers a playlist, album or artist link of a metadata-only service.
+// Such links are search hints for single tracks, so the whole collection is never searched or
+// downloaded: a readable tracklist is offered as text and a cover, anything else gets a hint.
+func (a *app) presentMusicCollection(message *tgbotapi.Message, rawURL, kind string, result exportResult, handled bool, err error, status *tgbotapi.Message, lang string) {
+	chatID, userID := message.Chat.ID, message.From.ID
+	service := musicServiceName(rawURL, lang)
+	notice := tr("music_collection", lang, "kind", tr("collection_kind_"+kind, lang), "service", service)
+	switch {
+	case errors.Is(err, errMusicServiceBlocked):
+		a.reportError(errorReport{Stage: "preview", ChatID: chatID, UserID: userID, URL: rawURL, Error: err.Error()})
+		a.replaceStatusText(chatID, status, tr("music_service_blocked", lang, "service", service))
+		return
+	case err != nil && !errors.Is(err, errExportUnsupported) && !errors.Is(err, errExportEmpty):
+		a.reportError(errorReport{Stage: "preview", ChatID: chatID, UserID: userID, URL: rawURL, Error: err.Error()})
+		a.replaceStatusText(chatID, status, notice+"\n"+tr("music_collection_read_error", lang, "error", html.EscapeString(err.Error()))+"\n"+tr("music_collection_hint", lang))
+		return
+	case err != nil || !handled || len(result.lines()) == 0:
+		// Spotify, Apple Music and Tidal collections and artist pages have no readable tracklist.
+		a.replaceStatusText(chatID, status, notice+"\n"+tr("music_collection_hint", lang))
+		return
+	}
+	preview := mediaPreview{URL: rawURL, Title: result.Name, TrackCount: max(len(result.Tracks), result.Total), IsPlaylist: true, Tracks: result.Tracks}
+	key, keyErr := a.storeURL(pendingURL{URL: rawURL, ChatID: chatID, UserID: userID, Preview: preview})
+	if keyErr != nil {
+		log.Printf("save pending URL: %v", keyErr)
+		a.replaceStatusText(chatID, status, notice+"\n"+tr("music_collection_hint", lang))
+		return
+	}
+	lines := []string{"📀 <b>" + html.EscapeString(shortenRunes(firstNonEmpty(result.Name, tr("export_untitled", lang)), maxTitleLength)) + "</b>"}
+	lines = append(lines, tr("preview_tracks", lang, "count", strconv.Itoa(preview.TrackCount)), "", notice, tr("music_collection_hint_export", lang))
+	markup := tgbotapi.NewInlineKeyboardMarkup(exportRow(key, lang), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)))
+	text := strings.Join(lines, "\n")
+	if status != nil {
+		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, text, markup)
+		edit.ParseMode = "HTML"
+		if _, err := sendTelegram(a.bot, edit); err == nil {
+			return
+		}
+	}
+	a.sendText(chatID, text, "HTML", &markup)
 }
 
 func (a *app) handlePrivateSearch(message *tgbotapi.Message, query, lang string) {

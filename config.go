@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,7 @@ type config struct {
 	CacheChatID        int64
 	ErrorChatID        int64
 	LastfmAPIKey       string
+	YandexProxy        *url.URL
 	HTTPAddr           string
 	DownloadWorkers    int
 	DownloadQueueSize  int
@@ -130,9 +132,29 @@ func loadConfig() (config, error) {
 		cfg.ErrorChatID = id
 	}
 	cfg.LastfmAPIKey = strings.TrimSpace(os.Getenv("LASTFM_API_KEY"))
+	if cfg.YandexProxy, err = envProxyURL("YANDEX_PROXY"); err != nil {
+		return config{}, err
+	}
 	databaseDefault := filepath.Join(envString("XDG_DATA_HOME", cfg.DownloadDir), "musicbot.db")
 	cfg.DatabasePath = envString("DATABASE_PATH", databaseDefault)
 	return cfg, nil
+}
+
+// envProxyURL reads an optional HTTP or SOCKS5 proxy address. The value is never echoed in the
+// error because it may carry a password.
+func envProxyURL(key string) (*url.URL, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := url.Parse(value)
+	if err == nil && parsed.Hostname() != "" && strings.Trim(parsed.Path, "/") == "" && parsed.RawQuery == "" {
+		switch parsed.Scheme {
+		case "http", "https", "socks5", "socks5h":
+			return parsed, nil
+		}
+	}
+	return nil, fmt.Errorf("%s должен быть адресом прокси вида socks5h://host:port или http://host:port", key)
 }
 
 func strictEnvInt(key string, fallback, min, max int) (int, error) {

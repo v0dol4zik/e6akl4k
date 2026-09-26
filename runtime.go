@@ -64,6 +64,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if cfg.YandexProxy != nil {
+		yandexProxy.Store(cfg.YandexProxy)
+		log.Printf("Яндекс Музыка читается через прокси %s://%s", cfg.YandexProxy.Scheme, cfg.YandexProxy.Host)
+	}
 
 	dl, err := newDownloader(cfg.DownloadDir, cfg.MaxFileSize)
 	if err != nil {

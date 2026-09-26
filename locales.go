@@ -175,7 +175,31 @@ var texts = map[string]map[string]string{
 		"ru": "⚠️ обложки Spotify, Apple Music и Tidal боту недоступны. пришли ссылку YouTube Music, Deezer или Яндекс Музыки на тот же релиз.",
 		"en": "⚠️ covers from Spotify, Apple Music, and Tidal aren't available to the bot. send a YouTube Music, Deezer, or Yandex Music link to the same release.",
 	},
-	"export_empty":           {"ru": "⚠️ по этой ссылке не нашлось треков.", "en": "⚠️ no tracks were found at this link."},
+	"export_empty":             {"ru": "⚠️ по этой ссылке не нашлось треков.", "en": "⚠️ no tracks were found at this link."},
+	"collection_kind_playlist": {"ru": "плейлист", "en": "a playlist"},
+	"collection_kind_album":    {"ru": "альбом", "en": "an album"},
+	"collection_kind_artist":   {"ru": "страница исполнителя", "en": "an artist page"},
+	"music_collection": {
+		"ru": "⚠️ это {kind} {service}, а не отдельный трек. целиком такие ссылки не скачиваются: бот ищет треки музыкальных сервисов на YouTube по одному.",
+		"en": "⚠️ this is {kind} from {service}, not a single track. such links aren't downloaded as a whole: the bot finds music-service tracks on YouTube one at a time.",
+	},
+	"music_collection_hint_export": {
+		"ru": "📝 кнопка «треклист текстом» пришлёт весь список, из него можно присылать нужные песни по одному.",
+		"en": "📝 the \"tracklist as text\" button sends the whole list, so you can send the songs you need one by one.",
+	},
+	"music_collection_hint": {
+		"ru": "пришли ссылку на отдельный трек или название песни. плейлист целиком можно скачать по ссылке YouTube Music.",
+		"en": "send a link to a single track or a song title. a whole playlist can be downloaded from a YouTube Music link.",
+	},
+	"music_collection_read_error": {"ru": "❌ не удалось прочитать состав: <code>{error}</code>", "en": "❌ couldn't read the contents: <code>{error}</code>"},
+	"music_service_blocked": {
+		"ru": "⚠️ ссылки {service} сейчас не открываются: сервис не пускает запросы из страны, где работает бот. пришли название песни или ссылку YouTube.",
+		"en": "⚠️ {service} links can't be opened right now: the service blocks requests from the country where the bot runs. send the song title or a YouTube link instead.",
+	},
+	"link_generic_page": {
+		"ru": "⚠️ по ссылке открылась общая страница {service}, а не трек. скопируй ссылку на сам трек через «поделиться» или пришли его название.",
+		"en": "⚠️ the link opened the {service} home page, not a track. copy the link of the track itself with \"share\" or send its title.",
+	},
 	"cover_not_found":        {"ru": "⚠️ у этой ссылки нет обложки.", "en": "⚠️ this link has no cover."},
 	"export_timeout":         {"ru": "⌛ сервис отвечает слишком долго. попробуй ещё раз позже.", "en": "⌛ the service is taking too long to respond. please try again later."},
 	"export_error":           {"ru": "❌ не удалось собрать треклист: <code>{error}</code>", "en": "❌ couldn't collect the tracklist: <code>{error}</code>"},
