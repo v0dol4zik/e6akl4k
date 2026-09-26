@@ -327,6 +327,10 @@ func (a *app) reportError(report errorReport) {
 	if who == 0 {
 		who = report.ChatID
 	}
+	if a.isAdmin(who) {
+		// An administrator repeating a reported request is not another affected user.
+		who = 0
+	}
 	repeats, admitted := reporter.admit(report)
 	users, spiked := reporter.spike(fingerprint, who, report.Stage, id)
 	if !admitted && !spiked {

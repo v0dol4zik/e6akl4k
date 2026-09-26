@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -230,6 +231,13 @@ type downloader struct {
 	maxPlaylistTracks  int
 	ytdlpSleepRequests int
 	ytdlpFragments     int
+	// youtubeClients and youtubeCookieClients pin the player clients of the anonymous and the
+	// signed-in YouTube download; empty keeps yt-dlp's defaults.
+	youtubeClients       string
+	youtubeCookieClients string
+	// youtubeDefaultFirst remembers that yt-dlp's default clients, not youtubeClients, got the
+	// last anonymous YouTube download through, so the next one starts with them.
+	youtubeDefaultFirst atomic.Bool
 	// onCookieRetry, when set, is called every time a YouTube 403 with cookies is retried without them.
 	onCookieRetry func()
 }
@@ -637,19 +645,28 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 	return d.runWithProgressOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies), manifest, progress, total)
 }
 
-// downloadYouTube downloads without cookies first. Without a PO token provider, YouTube answers a
-// signed-in session's media requests with 403 whichever client yt-dlp picks, while an anonymous
-// download works. Only the items that failed are downloaded again, so a playlist never starts
-// over: once more without cookies after a 403, which an anonymous session gets now and then, and
-// then with cookies if YouTube asked to sign in (a bot check, an age gate, a members-only video).
+// downloadYouTube downloads without cookies first. Without a PO token provider, YouTube answers
+// media requests with 403 for most player clients of a signed-in session, and a server IP it has
+// flagged gets 429 and bot checks on the web clients. Which clients still work changes from hour
+// to hour, so the anonymous passes alternate between youtubeClients and yt-dlp's default clients,
+// starting with the set that worked last, and the signed-in pass pins youtubeCookieClients. Only
+// the items that failed are downloaded again, so a playlist never starts over: once more without
+// cookies and with the other clients after a 403, a bot check, or no audio from the first ones,
+// and then with cookies if YouTube asked to sign in (a bot check, an age gate, a members-only
+// video).
 func (d *downloader) downloadYouTube(ctx context.Context, argsFor func(items []int, progressFile string) []string, sessionDir, manifest string, selected []int, playlist bool, progress downloadProgress, total int) (string, error) {
 	progressFile := filepath.Join(sessionDir, "progress.log")
-	_, stderr, err := d.runWithProgressOnce(ctx, argsFor(selected, progressFile), progressFile, progress, total)
+	clients := [2]string{firstNonEmpty(d.youtubeClients, "default"), "default"}
+	defaultFirst := d.youtubeDefaultFirst.Load()
+	if defaultFirst {
+		clients[0], clients[1] = clients[1], clients[0]
+	}
+	_, stderr, err := d.runWithProgressOnce(ctx, argsBeforeSeparator(argsFor(selected, progressFile), youtubeClientArgs(clients[0])...), progressFile, progress, total)
 	for pass, withCookies := range []bool{false, true} {
 		if err == nil || ctx.Err() != nil {
 			break
 		}
-		retry := isForbiddenFailure(stderr)
+		retry := youtubeClientFailure(stderr)
 		if withCookies {
 			retry = d.cookiesFile != "" && youtubeSignInRequired(stderr)
 		}
@@ -676,15 +693,39 @@ func (d *downloader) downloadYouTube(ctx context.Context, argsFor func(items []i
 			}
 			log.Printf("YouTube просит вход, повторяю загрузку %d из %d с cookies", len(missing), len(selected))
 			logMediaStage("youtube_signin_retry", "youtube", time.Now(), 0, true, "items", strconv.Itoa(len(missing)))
-			_, stderr, err = d.runWithProgressOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies), progressFile, retryProgress, total)
+			_, stderr, err = d.runWithProgressOnce(ctx, argsBeforeSeparator(args, append([]string{"--cookies", cookies}, youtubeClientArgs(d.youtubeCookieClients)...)...), progressFile, retryProgress, total)
 			cleanup()
 			continue
 		}
-		log.Printf("YouTube вернул 403 без cookies, повторяю загрузку %d из %d", len(missing), len(selected))
-		logMediaStage("youtube_forbidden_retry", "youtube", time.Now(), 0, true, "items", strconv.Itoa(len(missing)))
-		_, stderr, err = d.runWithProgressOnce(ctx, args, progressFile, retryProgress, total)
+		log.Printf("YouTube не отдал аудио без cookies, повторяю загрузку %d из %d с клиентами %s", len(missing), len(selected), clients[1])
+		logMediaStage("youtube_forbidden_retry", "youtube", time.Now(), 0, true, "items", strconv.Itoa(len(missing)), "clients", clients[1])
+		_, stderr, err = d.runWithProgressOnce(ctx, argsBeforeSeparator(args, youtubeClientArgs(clients[1])...), progressFile, retryProgress, total)
+		if err == nil && clients[0] != clients[1] {
+			d.youtubeDefaultFirst.Store(!defaultFirst)
+		}
 	}
 	return stderr, err
+}
+
+// youtubeClientArgs pins the YouTube player clients of one yt-dlp run.
+func youtubeClientArgs(clients string) []string {
+	if clients == "" || clients == "default" {
+		return nil
+	}
+	return []string{"--extractor-args", "youtube:player_client=" + clients}
+}
+
+// youtubeClientFailure reports whether a YouTube download failed in a way other player clients
+// may avoid: a 403 on the media URL, no audio format from the chosen clients, a client whose
+// player page YouTube refuses to serve, or a bot check that only some clients get.
+func youtubeClientFailure(stderr string) bool {
+	low := strings.ToLower(stderr)
+	for _, marker := range []string{"requested format is not available", "page needs to be reloaded", "not a bot"} {
+		if strings.Contains(low, marker) {
+			return true
+		}
+	}
+	return isForbiddenFailure(low)
 }
 
 // missingItems returns the selected items that the manifest does not list as downloaded yet. An

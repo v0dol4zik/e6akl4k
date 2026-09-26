@@ -76,6 +76,8 @@ func main() {
 	dl.maxPlaylistTracks = cfg.MaxPlaylistTracks
 	dl.ytdlpSleepRequests = cfg.YTDLPSleepRequests
 	dl.ytdlpFragments = cfg.YTDLPFragments
+	dl.youtubeClients = cfg.YTDLPYouTubeClients
+	dl.youtubeCookieClients = cfg.YTDLPYouTubeCookieClients
 	state, err := openStore(cfg.DatabasePath)
 	if err != nil {
 		log.Fatalf("Не удалось открыть SQLite: %v", err)

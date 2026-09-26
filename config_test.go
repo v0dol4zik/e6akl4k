@@ -81,6 +81,28 @@ func TestLoadConfigRequiresToken(t *testing.T) {
 	}
 }
 
+func TestLoadConfigYouTubeClients(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "token")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("YTDLP_YOUTUBE_CLIENTS", "")
+	t.Setenv("YTDLP_YOUTUBE_COOKIE_CLIENTS", "")
+	cfg, err := loadConfig()
+	if err != nil || cfg.YTDLPYouTubeClients != "tv_simply" || cfg.YTDLPYouTubeCookieClients != "mweb" {
+		t.Fatalf("defaults: %q %q %v", cfg.YTDLPYouTubeClients, cfg.YTDLPYouTubeCookieClients, err)
+	}
+	t.Setenv("YTDLP_YOUTUBE_CLIENTS", " TV_Simply, web ")
+	t.Setenv("YTDLP_YOUTUBE_COOKIE_CLIENTS", "default,-web_safari")
+	if cfg, err = loadConfig(); err != nil || cfg.YTDLPYouTubeClients != "tv_simply,web" || cfg.YTDLPYouTubeCookieClients != "default,-web_safari" {
+		t.Fatalf("custom: %q %q %v", cfg.YTDLPYouTubeClients, cfg.YTDLPYouTubeCookieClients, err)
+	}
+	for _, value := range []string{"web;youtube:skip=dash", "web,,tv", "-", "web=1"} {
+		t.Setenv("YTDLP_YOUTUBE_CLIENTS", value)
+		if _, err := loadConfig(); err == nil {
+			t.Errorf("YTDLP_YOUTUBE_CLIENTS=%q must be rejected", value)
+		}
+	}
+}
+
 func TestLoadConfigYandexProxy(t *testing.T) {
 	t.Setenv("BOT_TOKEN", "token")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

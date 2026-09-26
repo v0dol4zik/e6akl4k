@@ -101,10 +101,12 @@ func TestReportErrorStoresExpectedAndAlertsOnSpike(t *testing.T) {
 		}
 	}
 
+	forbidden.UserID = 10
+	application.reportError(forbidden)
 	forbidden.UserID = 12
 	application.reportError(forbidden)
 	if calls := collect(0); len(calls) != 0 {
-		t.Fatalf("a repeat inside the dedup window must be folded: %#v", calls)
+		t.Fatalf("a repeat inside the dedup window must be folded, and an admin is not an affected user: %#v", calls)
 	}
 	forbidden.UserID = 13
 	application.reportError(forbidden)
@@ -113,7 +115,7 @@ func TestReportErrorStoresExpectedAndAlertsOnSpike(t *testing.T) {
 		t.Fatalf("the third user must trigger a loud spike alert: %#v", calls)
 	}
 	real, expected, err := state.errorReportCounts(context.Background(), time.Now().Add(-time.Hour))
-	if err != nil || real != 3 || expected != 1 {
+	if err != nil || real != 4 || expected != 1 {
 		t.Fatalf("real=%d expected=%d err=%v", real, expected, err)
 	}
 }

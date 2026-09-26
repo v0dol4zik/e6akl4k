@@ -354,6 +354,9 @@ func TestYouTubeDownloadOrder(t *testing.T) {
 	const (
 		forbidden = "ERROR: unable to download video data: HTTP Error 403: Forbidden"
 		signIn    = "ERROR: [youtube] abc: Sign in to confirm your age. Use --cookies for the authentication."
+		noFormats = "ERROR: [youtube] abc: Requested format is not available. Use --list-formats for a list of available formats"
+		reload    = "ERROR: [youtube] abc: The page needs to be reloaded."
+		botCheck  = "ERROR: [youtube] abc: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication."
 	)
 	cases := []struct {
 		name string
@@ -363,21 +366,33 @@ func TestYouTubeDownloadOrder(t *testing.T) {
 		cookies    bool
 		target     string
 		selected   []int
-		wantCalls  []string // "<cookies|anonymous> <items>" per call
+		wantCalls  []string // "<cookies|anonymous> <items> <player clients>" per call
 		wantFailed bool
+		// defaultFirst is the remembered anonymous client order before the download, and
+		// wantDefaultFirst the order it must leave for the next one.
+		defaultFirst, wantDefaultFirst bool
 	}{
-		{"anonymous works", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1"}, false},
-		{"sign in uses cookies", []string{"anonymous any 1 " + signIn}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1", "cookies 1"}, false},
-		{"sign in without cookies", []string{"anonymous any 1 " + signIn}, false, "https://youtu.be/abc", []int{1}, []string{"anonymous 1"}, true},
-		{"anonymous 403 retried", []string{"anonymous 1 1 " + forbidden}, true, "https://www.youtube.com/watch?v=abc", []int{1}, []string{"anonymous 1", "anonymous 1"}, false},
-		{"anonymous 403 twice", []string{"anonymous any 1 " + forbidden}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1", "anonymous 1"}, true},
-		{"other error", []string{"anonymous any 1 ERROR: [youtube] abc: Video unavailable"}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1"}, true},
-		{"other site keeps cookies", nil, true, "https://soundcloud.com/a/b", []int{1}, []string{"cookies 1"}, false},
+		{"anonymous works", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, false, false, false},
+		{"sign in uses cookies", []string{"anonymous any 1 " + signIn}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "cookies 1 mweb"}, false, false, false},
+		{"sign in without cookies", []string{"anonymous any 1 " + signIn}, false, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, true, false, false},
+		{"anonymous 403 retried", []string{"anonymous 1 1 " + forbidden}, true, "https://www.youtube.com/watch?v=abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, false, false, true},
+		{"anonymous 403 twice", []string{"anonymous any 1 " + forbidden}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, true, false, false},
+		{"no formats falls back to defaults", []string{"anonymous 1 1 " + noFormats}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, false, false, true},
+		{"remembered defaults go first", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default"}, false, true, true},
+		{"bot check on defaults tries pinned clients", []string{"anonymous 1 1 " + botCheck}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default", "anonymous 1 tv_simply"}, false, true, false},
+		{
+			"bot check after fallback uses cookies",
+			[]string{"anonymous 1 1 " + reload, "anonymous 2 1 " + botCheck},
+			true, "https://youtu.be/abc", []int{1},
+			[]string{"anonymous 1 tv_simply", "anonymous 1 default", "cookies 1 mweb"}, false, false, false,
+		},
+		{"other error", []string{"anonymous any 1 ERROR: [youtube] abc: Video unavailable"}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, true, false, false},
+		{"other site keeps cookies", nil, true, "https://soundcloud.com/a/b", []int{1}, []string{"cookies 1 default"}, false, false, false},
 		{
 			"playlist retries only failed items",
 			[]string{"anonymous 1 3 " + forbidden, "anonymous any 5 " + signIn},
 			true, "https://www.youtube.com/playlist?list=x", []int{2, 3, 5},
-			[]string{"anonymous 2,3,5", "anonymous 3,5", "cookies 5"}, false,
+			[]string{"anonymous 2,3,5 tv_simply", "anonymous 3,5 default", "cookies 5 mweb"}, false, false, false,
 		},
 	}
 	for _, tc := range cases {
@@ -389,10 +404,13 @@ func TestYouTubeDownloadOrder(t *testing.T) {
 				t.Fatal(err)
 			}
 			script := `#!/bin/sh
-mode=anonymous; dir=''; manifest=''; progress=''; items=1
+mode=anonymous; dir=''; manifest=''; progress=''; items=1; clients=default
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --cookies) mode=cookies; shift 2 ;;
+    --extractor-args)
+      case "$2" in youtube:player_client=*) clients="${2#youtube:player_client=}" ;; esac
+      shift 2 ;;
     --paths) dir="$2"; shift 2 ;;
     --playlist-items) items="$2"; shift 2 ;;
     --print-to-file)
@@ -401,7 +419,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-echo "$mode $items" >> ` + calls + `
+echo "$mode $items $clients" >> ` + calls + `
 n=$(grep -c "^$mode " ` + calls + `)
 status=0
 oldifs="$IFS"; IFS=,
@@ -420,7 +438,8 @@ exit $status
 			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			d := &downloader{bin: fake, downloadDir: dir}
+			d := &downloader{bin: fake, downloadDir: dir, youtubeClients: "tv_simply", youtubeCookieClients: "mweb"}
+			d.youtubeDefaultFirst.Store(tc.defaultFirst)
 			if tc.cookies {
 				d.cookiesFile = filepath.Join(dir, "cookies.txt")
 				if err := os.WriteFile(d.cookiesFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
@@ -446,6 +465,9 @@ exit $status
 			if got := strings.Split(strings.TrimSpace(string(data)), "\n"); !reflect.DeepEqual(got, tc.wantCalls) {
 				t.Fatalf("calls=%q, want %q", got, tc.wantCalls)
 			}
+			if got := d.youtubeDefaultFirst.Load(); got != tc.wantDefaultFirst {
+				t.Fatalf("default clients first=%v, want %v", got, tc.wantDefaultFirst)
+			}
 			downloaded, err := readManifest(manifest)
 			if err != nil {
 				t.Fatal(err)
@@ -462,6 +484,19 @@ exit $status
 				t.Fatalf("progress=%v, want it to end at %d", reported, len(tc.selected))
 			}
 		})
+	}
+}
+
+func TestYouTubeClientArgs(t *testing.T) {
+	for clients, want := range map[string][]string{
+		"":             nil,
+		"default":      nil,
+		"tv_simply":    {"--extractor-args", "youtube:player_client=tv_simply"},
+		"default,-web": {"--extractor-args", "youtube:player_client=default,-web"},
+	} {
+		if got := youtubeClientArgs(clients); !reflect.DeepEqual(got, want) {
+			t.Errorf("youtubeClientArgs(%q)=%q, want %q", clients, got, want)
+		}
 	}
 }
 

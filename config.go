@@ -41,6 +41,10 @@ type config struct {
 	DropPendingUpdates bool
 	YTDLPSleepRequests int
 	YTDLPFragments     int
+	// YTDLPYouTubeClients and YTDLPYouTubeCookieClients pin the YouTube player clients of the
+	// anonymous and the signed-in download; "default" keeps yt-dlp's choice.
+	YTDLPYouTubeClients       string
+	YTDLPYouTubeCookieClients string
 
 	// StatusMessage keeps a pinned bot status message in the error chat.
 	StatusMessage       bool
@@ -66,6 +70,12 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	if cfg.YTDLPFragments, err = strictEnvInt("YTDLP_CONCURRENT_FRAGMENTS", 4, 1, 16); err != nil {
+		return config{}, err
+	}
+	if cfg.YTDLPYouTubeClients, err = strictEnvClients("YTDLP_YOUTUBE_CLIENTS", "tv_simply"); err != nil {
+		return config{}, err
+	}
+	if cfg.YTDLPYouTubeCookieClients, err = strictEnvClients("YTDLP_YOUTUBE_COOKIE_CLIENTS", "mweb"); err != nil {
 		return config{}, err
 	}
 	if cfg.LookupWorkers, err = strictEnvInt("LOOKUP_WORKERS", 2, 1, 32); err != nil {
@@ -240,6 +250,19 @@ func strictEnvBool(key string, fallback bool) (bool, error) {
 		return false, fmt.Errorf("%s должен быть true или false: %q", key, value)
 	}
 	return parsed, nil
+}
+
+// strictEnvClients reads a comma-separated list of yt-dlp YouTube player clients such as
+// "tv_simply,web" or "default,-web", so that the value cannot inject other extractor arguments.
+func strictEnvClients(key, fallback string) (string, error) {
+	value := strings.ToLower(strings.ReplaceAll(envString(key, fallback), " ", ""))
+	for _, client := range strings.Split(value, ",") {
+		name := strings.TrimPrefix(client, "-")
+		if name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+			return "", fmt.Errorf("%s должен быть списком клиентов YouTube через запятую: %q", key, value)
+		}
+	}
+	return value, nil
 }
 
 func envString(key, fallback string) string {

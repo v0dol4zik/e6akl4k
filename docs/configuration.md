@@ -26,6 +26,8 @@ chmod 600 .env
 | `YTDLP_COOKIES_FILE` | `cookies.txt` | Netscape-format cookies file used through isolated temporary copies. |
 | `YTDLP_SLEEP_REQUESTS` | `0` | Delay in seconds between `yt-dlp` HTTP requests, from 0 to 60. |
 | `YTDLP_CONCURRENT_FRAGMENTS` | `4` | Concurrent HLS/DASH fragments per `yt-dlp` process, from 1 to 16. |
+| `YTDLP_YOUTUBE_CLIENTS` | `tv_simply` | Comma-separated YouTube player clients that the download without cookies alternates with the `yt-dlp` default clients, for example `tv_simply,web` or `default,-web`; `default` keeps only the `yt-dlp` choice. See [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies). |
+| `YTDLP_YOUTUBE_COOKIE_CLIENTS` | `mweb` | Player clients for the download with cookies after YouTube asks to sign in. |
 
 ## Scheduling and limits
 
@@ -76,7 +78,7 @@ Cancellations, a busy queue, rate limits, and the playlist size limit are not re
 
 Every report has a short ID such as `r1a2b3c4`, which is also written to the `error_report id=…` log line, and shows the bot commit and `yt-dlp` version. Reports are kept in SQLite for 14 days.
 
-Errors caused by the content itself (a deleted, private, members-only, or geo-blocked video, an unsupported link, nothing found, HTTP 404) are expected: they are not posted one by one but summarised in a silent digest once per `ERROR_DIGEST_INTERVAL`, grouped by stage and error with the number of distinct users. An error that mentions a 403, a bot check, a rate limit, or "try again later" is always real, as is any error with a line that matches no expected pattern. Real errors are posted silently; when the same error reaches three different users within 15 minutes, a loud 🚨 spike post goes out even inside the folding window, at most once an hour per error.
+Errors caused by the content itself (a deleted, private, members-only, or geo-blocked video, an unsupported link, nothing found, HTTP 404) are expected: they are not posted one by one but summarised in a silent digest once per `ERROR_DIGEST_INTERVAL`, grouped by stage and error with the number of distinct users. An error that mentions a 403, a bot check, a rate limit, or "try again later" is always real, as is any error with a line that matches no expected pattern. Real errors are posted silently; when the same error reaches three different users within 15 minutes, a loud 🚨 spike post goes out even inside the folding window, at most once an hour per error. Administrators, for example one repeating a reported request, do not count as affected users.
 
 Buttons under a report work for administrators only, and their answers go to the administrator's private chat:
 
