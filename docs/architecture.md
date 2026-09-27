@@ -58,7 +58,8 @@ Heavy downloads, quick lookups, archive creation, and Telegram update handling h
 | `inline.go` | Inline state, result text, and YouTube link parsing. |
 | `inline_handlers.go` | Inline answers, downloads, and editing the sent message into audio. |
 | `downloader.go` | `yt-dlp`, metadata, playlist ranges, and output files. |
-| `archive.go` | ZIP creation and splitting. |
+| `archive.go` | ZIP creation and splitting; each track is deleted as soon as it is packed. |
+| `disk_budget.go` | Disk reservations for playlist batches and the byte-based ZIP batch size. |
 | `health.go` | `/healthz`, `/metrics`, and disk monitoring. |
 | `locales.go` | Russian and English interface copy. |
 | `bootstrap.sh` | One-time Docker, secret-directory, and safe SSH setup. |
@@ -81,5 +82,5 @@ Every `yt-dlp` process receives an isolated temporary copy of `cookies.txt`. The
 - The official Telegram Bot API accepts bot uploads up to 50 MiB; an optional local Bot API server raises the limit to 2000 MiB. A track over the limit gets buttons with lighter formats that fit instead of an error.
 - Telegram's music player supports MP3 and M4A; FLAC and OGG are sent as documents.
 - ZIP archives are split automatically, but every individual file must still fit within Telegram's limit.
-- Large playlists use a two-stage producer/consumer pipeline: the next batch (10 tracks for individual files, 50 for ZIP archives) downloads while the current batch uploads, with at most two batches on disk. Every batch waits for a download slot of its own, so a long playlist does not hold a worker for hours.
+- Large playlists use a two-stage producer/consumer pipeline: the next batch (10 tracks for individual files, about 700 MiB of audio for ZIP archives: 50 MP3 or 24 FLAC tracks) downloads while the current batch uploads, with at most two batches on disk. Every batch waits for a download slot of its own, so a long playlist does not hold a worker for hours, and first reserves twice its estimated size on disk (`disk_budget.go`): while other downloads leave less than `DISK_WARNING_BYTES` free, it waits for them to finish instead of filling the shared disk.
 - Telegram `file_id` values belong to one bot and cannot be transferred to a different bot token.

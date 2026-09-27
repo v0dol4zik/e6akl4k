@@ -54,7 +54,7 @@ func TestPastedTracklistOffersRangesWithoutExport(t *testing.T) {
 	}
 	key := strings.SplitN(strings.SplitN(markup, `"range:all:`, 2)[1], `"`, 2)[0]
 	pending, ok := application.getURL(key, 10, 10)
-	if !ok || !searchedTracklist(pending.Preview) || pending.URL != "" || !batchedPlaylistDelivery(pending) {
+	if !ok || !searchedTracklist(pending.Preview) || pending.URL != "" || !batchedPlaylistDelivery(pending, "flac", "best") {
 		t.Fatalf("pending=%#v ok=%v", pending, ok)
 	}
 }

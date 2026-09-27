@@ -45,7 +45,7 @@ chmod 600 .env
 | `RATE_LIMIT` | `12` | Private-chat requests allowed per `RATE_WINDOW`. |
 | `INLINE_RATE_LIMIT` | `60` | Inline requests allowed per `RATE_WINDOW`. |
 | `RATE_WINDOW` | `1m` | Go duration used for rate limiting. |
-| `MAX_PLAYLIST_TRACKS` | `200` | Maximum tracks one playlist request may select, from 1 to 1000. The range buttons still cover a longer playlist, and every selection downloads in batches of 10 tracks (individual files) or 50 tracks (ZIP). The limit also applies to Deezer and Yandex Music collections and pasted tracklists, whose tracks are searched on YouTube one by one. |
+| `MAX_PLAYLIST_TRACKS` | `200` | Maximum tracks one playlist request may select, from 1 to 1000. The range buttons still cover a longer playlist, and every selection downloads in batches of 10 tracks (individual files) or ZIP batches of about 700 MiB: 50 tracks in MP3 or M4A, 24 in FLAC. The limit also applies to Deezer and Yandex Music collections and pasted tracklists, whose tracks are searched on YouTube one by one. |
 | `MAX_FILE_SIZE` | `52428800` | Maximum individual file size in bytes: up to 50 MiB on the cloud Bot API and up to 2000 MiB with `TELEGRAM_API_URL`. |
 
 By default, seven downloads start immediately and there is no waiting download queue. An eighth simultaneous request receives a busy response. Lookup and archive jobs retain their own FIFO queues.
@@ -61,7 +61,7 @@ The zero request delay and four concurrent fragments favor download latency. Inc
 | `SHUTDOWN_TIMEOUT` | `30s` | Graceful shutdown deadline. |
 | `HTTP_ADDR` | `127.0.0.1:8080` | Health and metrics listen address. Docker overrides it to `0.0.0.0:8080`. |
 | `LOG_FORMAT` | text | Set to `json` for structured logs. |
-| `DISK_WARNING_BYTES` | `536870912` | Free-space threshold that triggers an administrator warning. |
+| `DISK_WARNING_BYTES` | `536870912` | Free-space threshold that triggers an administrator warning and the reserve every playlist batch keeps: a batch starts only while the free space, less the batches still downloading, stays above it after the batch's estimated size, and otherwise waits up to 15 minutes. `/healthz` fails below a quarter of it. |
 | `DISK_CHECK_INTERVAL` | `10m` | Disk monitoring interval. |
 | `STATUS_MESSAGE` | `true` | Keep a pinned status message in the error chat and announce failures and recoveries there. See [Status message](#status-message). |
 | `COOKIE_CHECK_INTERVAL` | `3h` | How often the status monitor checks the YouTube login with the configured cookies. `0` disables the scheduled check. |

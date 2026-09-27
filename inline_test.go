@@ -51,6 +51,7 @@ func TestYouTubeLinkTarget(t *testing.T) {
 		{url: "https://music.youtube.com/watch?v=dQw4w9WgXcQ", id: "dQw4w9WgXcQ"},
 		{url: "https://m.youtube.com/shorts/dQw4w9WgXcQ", id: "dQw4w9WgXcQ"},
 		{url: "https://youtube.com/live/dQw4w9WgXcQ", id: "dQw4w9WgXcQ"},
+		{url: "https://youtube.com/samples/dQw4w9WgXcQ", id: "dQw4w9WgXcQ"},
 		{url: "https://www.youtube.com/playlist?list=PL123", playlist: true},
 		{url: "https://www.youtube.com/@channel"},
 		{url: "https://www.youtube.com/watch?v=short"},

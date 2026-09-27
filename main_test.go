@@ -132,7 +132,7 @@ func TestCreateZIPKeepsDuplicateTracks(t *testing.T) {
 		{FilePath: first, Title: "same", Artist: "artist"},
 		{FilePath: second, Title: "same", Artist: "artist"},
 	}
-	if err := createZIP(archive, results); err != nil {
+	if err := createZIP(archive, results, false); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := zip.OpenReader(archive)

@@ -361,6 +361,26 @@ var texts = map[string]map[string]string{
 		"ru": "⏳ <b>скачиваю и сразу отправляю плейлист…</b>\nтреки: <b>{start}–{end}</b> из {total}",
 		"en": "⏳ <b>downloading and sending the playlist in batches…</b>\ntracks: <b>{start}–{end}</b> of {total}",
 	},
+	"disk_wait": {
+		"ru": "💾 <b>жду свободного места на сервере…</b>\nтреки: <b>{start}–{end}</b> из {total}\nзагрузка продолжится сама, как только другие загрузки освободят место.",
+		"en": "💾 <b>waiting for free disk space on the server…</b>\ntracks: <b>{start}–{end}</b> of {total}\nthe download continues by itself once other downloads free up space.",
+	},
+	"disk_busy": {
+		"ru": "💾 на сервере сейчас мало свободного места, поэтому загрузка не началась. попробуй ещё раз через 10–15 минут.",
+		"en": "💾 the server is short of free disk space right now, so the download did not start. try again in 10–15 minutes.",
+	},
+	"disk_busy_partial": {
+		"ru": "💾 на сервере закончилось свободное место, поэтому загрузка остановлена. отправлено треков: {sent}. остальные можно скачать через 10–15 минут, выбрав диапазон заново.",
+		"en": "💾 the server ran short of free disk space, so the download stopped. tracks sent: {sent}. the rest can be downloaded in 10–15 minutes by choosing the range again.",
+	},
+	"selection_estimate": {
+		"ru": "≈ {size} в {format} за {count} треков.",
+		"en": "≈ {size} in {format} for {count} tracks.",
+	},
+	"selection_estimate_lossless": {
+		"ru": "большие списки лучше качать в MP3 320: ≈ {size}, файлы втрое легче.",
+		"en": "large lists are better downloaded as MP3 320: ≈ {size}, with files three times lighter.",
+	},
 	"eta_calculating":           {"ru": "рассчитываю…", "en": "calculating…"},
 	"eta_less_minute":           {"ru": "меньше минуты", "en": "less than a minute"},
 	"eta_minutes":               {"ru": "около {count} мин.", "en": "about {count} min."},

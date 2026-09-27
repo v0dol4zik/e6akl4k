@@ -44,7 +44,9 @@ func (a *app) health(ctx context.Context) (healthReport, bool) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(filepath.Clean(a.downloader.downloadDir), &stat); err == nil {
 		report.DiskFreeBytes = stat.Bavail * uint64(stat.Bsize)
-		threshold := a.cfg.DiskWarningBytes
+		// DiskWarningBytes is the warning level and the floor playlist batches wait for; the
+		// service is unhealthy only below a quarter of it, as on the status page.
+		threshold := a.cfg.DiskWarningBytes / 4
 		if threshold <= 0 {
 			threshold = 100 * 1024 * 1024
 		}

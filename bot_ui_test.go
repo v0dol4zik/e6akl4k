@@ -32,6 +32,11 @@ func TestDetectURLs(t *testing.T) {
 			max:  0,
 			want: []string{"https://youtu.be/a", "https://youtu.be/b", "https://youtu.be/c"},
 		},
+		"samples link becomes a video": {
+			text: "https://youtube.com/samples/dQw4w9WgXcQ?si=x www.youtube.com/samples/dQw4w9WgXcQ https://youtube.com/samples",
+			max:  5,
+			want: []string{"https://www.youtube.com/watch?v=dQw4w9WgXcQ", "https://youtube.com/samples"},
+		},
 		"invalid host dropped": {
 			text: "http://youtube.com@127.0.0.1/private https://youtu.be/ok",
 			max:  5,

@@ -294,7 +294,24 @@ func normalizeDetectedURL(rawURL string) string {
 	if err != nil || parsed.User != nil || !allowedHost(parsed.Hostname()) {
 		return ""
 	}
+	if id := youtubeSampleID(parsed); id != "" {
+		return "https://www.youtube.com/watch?v=" + id
+	}
 	return rawURL
+}
+
+// youtubeSampleID reads the video of a YouTube Samples share link (youtube.com/samples/<id>),
+// which yt-dlp takes for a channel named "samples".
+func youtubeSampleID(parsed *url.URL) string {
+	host := strings.TrimPrefix(strings.ToLower(strings.TrimSuffix(parsed.Hostname(), ".")), "www.")
+	if host != "youtube.com" && !strings.HasSuffix(host, ".youtube.com") {
+		return ""
+	}
+	segments := strings.FieldsFunc(parsed.Path, func(r rune) bool { return r == '/' })
+	if len(segments) != 2 || segments[0] != "samples" || !youtubeIDPattern.MatchString(segments[1]) {
+		return ""
+	}
+	return segments[1]
 }
 
 func allowedHost(host string) bool {

@@ -148,7 +148,7 @@ func TestPlaylistZIPDeliveryGoesInBatches(t *testing.T) {
 	dl := &downloader{downloadDir: downloadDir, bin: bin, maxFileSize: maxFileSize, maxPlaylistTracks: maxPlaylistTracks}
 	application := newAppWithServices(context.Background(), bot, dl, nil, config{DownloadWorkers: 2, LookupWorkers: 1, ArchiveWorkers: 1, MaxFileSize: maxFileSize, MaxPlaylistTracks: maxPlaylistTracks})
 	pending := pendingURL{URL: "https://www.youtube.com/playlist?list=PL3", RangeStart: 1, RangeEnd: 120, Delivery: "zip", Preview: mediaPreview{IsPlaylist: true, TrackCount: 120}}
-	if !batchedPlaylistDelivery(pending) {
+	if !batchedPlaylistDelivery(pending, "mp3", "320") {
 		t.Fatal("a 120-track ZIP selection is not delivered in batches")
 	}
 	report, err := application.downloadAndSendPlaylistZIPs(context.Background(), 10, pending, "mp3", "320", "en", nil)

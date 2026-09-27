@@ -10,7 +10,9 @@ import (
 	"unicode"
 )
 
-func createZIP(path string, results []downloadResult) (returnErr error) {
+// createZIP stores the results' files in a new archive at path. With consume, each file is
+// removed once it is in the archive, so packing a batch never takes twice its size on disk.
+func createZIP(path string, results []downloadResult, consume bool) (returnErr error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -60,6 +62,9 @@ func createZIP(path string, results []downloadResult) (returnErr error) {
 		}
 		if closeErr != nil {
 			return closeErr
+		}
+		if consume {
+			_ = os.Remove(result.FilePath)
 		}
 	}
 	return nil

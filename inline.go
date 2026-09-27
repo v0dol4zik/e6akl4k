@@ -262,7 +262,7 @@ func youtubeLinkTarget(rawURL string) (id string, playlist bool) {
 		switch {
 		case len(segments) == 1 && segments[0] == "watch":
 			id = parsed.Query().Get("v")
-		case len(segments) >= 2 && (segments[0] == "shorts" || segments[0] == "live" || segments[0] == "embed"):
+		case len(segments) >= 2 && (segments[0] == "shorts" || segments[0] == "live" || segments[0] == "embed" || segments[0] == "samples"):
 			id = segments[1]
 		}
 		if id == "" && parsed.Query().Get("list") != "" {
