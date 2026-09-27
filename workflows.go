@@ -100,8 +100,8 @@ func previewErrorText(rawURL string, err error, lang string) string {
 }
 
 // presentMusicCollection answers a playlist, album or artist link of a metadata-only service.
-// Such links are search hints for single tracks, so the whole collection is never searched or
-// downloaded: a readable tracklist is offered as text and a cover, anything else gets a hint.
+// A readable tracklist (Deezer, Yandex Music) is offered in ranges, and every selected track is
+// then searched on YouTube and downloaded; a collection without one gets a hint.
 func (a *app) presentMusicCollection(message *tgbotapi.Message, rawURL, kind string, result exportResult, handled bool, err error, status *tgbotapi.Message, lang string) {
 	chatID, userID := message.Chat.ID, message.From.ID
 	service := musicServiceName(rawURL, lang)
@@ -120,7 +120,8 @@ func (a *app) presentMusicCollection(message *tgbotapi.Message, rawURL, kind str
 		a.replaceStatusText(chatID, status, notice+"\n"+tr("music_collection_hint", lang))
 		return
 	}
-	preview := mediaPreview{URL: rawURL, Title: result.Name, TrackCount: max(len(result.Tracks), result.Total), IsPlaylist: true, Tracks: result.Tracks}
+	// Only the tracks read from the service can be searched, so a capped list counts those.
+	preview := mediaPreview{URL: rawURL, Title: result.Name, TrackCount: len(result.Tracks), IsPlaylist: true, Tracks: result.Tracks, Extractor: tracklistExtractor}
 	key, keyErr := a.storeURL(pendingURL{URL: rawURL, ChatID: chatID, UserID: userID, Preview: preview})
 	if keyErr != nil {
 		log.Printf("save pending URL: %v", keyErr)
@@ -128,17 +129,18 @@ func (a *app) presentMusicCollection(message *tgbotapi.Message, rawURL, kind str
 		return
 	}
 	lines := []string{"📀 <b>" + html.EscapeString(shortenRunes(firstNonEmpty(result.Name, tr("export_untitled", lang)), maxTitleLength)) + "</b>"}
-	lines = append(lines, tr("preview_tracks", lang, "count", strconv.Itoa(preview.TrackCount)), "", notice, tr("music_collection_hint_export", lang))
-	markup := tgbotapi.NewInlineKeyboardMarkup(exportRow(key, lang), tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)))
+	search := tr("music_collection_search", lang, "kind", tr("collection_kind_"+kind, lang), "service", service)
+	lines = append(lines, tr("preview_tracks", lang, "count", strconv.Itoa(preview.TrackCount)), "", search, tr("choose_range", lang))
+	markup := rangeKeyboard(key, preview.TrackCount, a.cfg.MaxPlaylistTracks, lang)
 	text := strings.Join(lines, "\n")
 	if status != nil {
-		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, text, markup)
+		edit := tgbotapi.NewEditMessageTextAndMarkup(status.Chat.ID, status.MessageID, text, *markup)
 		edit.ParseMode = "HTML"
 		if _, err := sendTelegram(a.bot, edit); err == nil {
 			return
 		}
 	}
-	a.sendText(chatID, text, "HTML", &markup)
+	a.sendText(chatID, text, "HTML", markup)
 }
 
 func (a *app) handlePrivateSearch(message *tgbotapi.Message, query, lang string) {

@@ -245,8 +245,9 @@ func (e *deezerError) Error() string {
 }
 
 type deezerTrack struct {
-	Title  string `json:"title"`
-	Artist struct {
+	Title    string `json:"title"`
+	Duration int    `json:"duration"`
+	Artist   struct {
 		Name string `json:"name"`
 	} `json:"artist"`
 	Album struct {
@@ -295,7 +296,7 @@ func deezerTracklist(ctx context.Context, kind, id string, withTracks bool) (exp
 			return exportResult{}, page.Error
 		}
 		for _, track := range page.Data[:min(len(page.Data), maxExportTracks-len(result.Tracks))] {
-			result.Tracks = append(result.Tracks, exportTrack{Artist: track.Artist.Name, Title: track.Title})
+			result.Tracks = append(result.Tracks, exportTrack{Artist: track.Artist.Name, Title: track.Title, Seconds: track.Duration})
 		}
 		total = max(total, page.Total)
 		if len(page.Data) == 0 || page.Next == "" {
@@ -335,10 +336,11 @@ type yandexArtist struct {
 }
 
 type yandexTrack struct {
-	Title    string         `json:"title"`
-	Version  string         `json:"version"`
-	Artists  []yandexArtist `json:"artists"`
-	CoverURI string         `json:"coverUri"`
+	Title      string         `json:"title"`
+	Version    string         `json:"version"`
+	Artists    []yandexArtist `json:"artists"`
+	CoverURI   string         `json:"coverUri"`
+	DurationMs int            `json:"durationMs"`
 }
 
 // export joins every credited artist and appends the version, as Yandex Music shows it:
@@ -348,7 +350,7 @@ func (t yandexTrack) export() exportTrack {
 	if version := strings.TrimSpace(t.Version); version != "" && title != "" {
 		title += " (" + version + ")"
 	}
-	return exportTrack{Artist: yandexArtists(t.Artists), Title: title}
+	return exportTrack{Artist: yandexArtists(t.Artists), Title: title, Seconds: t.DurationMs / 1000}
 }
 
 func yandexArtists(artists []yandexArtist) string {

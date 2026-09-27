@@ -292,7 +292,7 @@ func TestLastfmPickSearchesTheTrackOnYouTube(t *testing.T) {
 	}
 	application.downloader.bin = bin
 	key, err := application.storeURL(pendingURL{ChatID: 10, UserID: 10, Preview: mediaPreview{Title: "RJ - loved tracks", IsPlaylist: true,
-		Tracks: []exportTrack{{"Air", "Playground Love"}, {"Daft Punk", "Aerodynamic"}}}})
+		Tracks: []exportTrack{{Artist: "Air", Title: "Playground Love"}, {Artist: "Daft Punk", Title: "Aerodynamic"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}

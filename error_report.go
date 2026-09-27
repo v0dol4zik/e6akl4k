@@ -222,7 +222,7 @@ var expectedErrorMarkers = []string{
 	"members-only", "members only", "join this channel",
 	"premieres in", "live event will begin", "this live event",
 	"плейлист пуст или недоступен", "the playlist does not exist",
-	errNothingFound.Error(), "no results", "no video formats found",
+	errNothingFound.Error(), "nothing found", "no results", "no video formats found",
 	"http error 404", errLastfmNotFound.Error(),
 }
 

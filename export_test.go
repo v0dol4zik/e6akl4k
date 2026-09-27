@@ -29,13 +29,13 @@ func TestUploadTrackNormalizesTitles(t *testing.T) {
 		uploader, title string
 		want            exportTrack
 	}{
-		{"Daft Punk", "Daft Punk - Get Lucky (Official Video)", exportTrack{"Daft Punk", "Get Lucky"}},
-		{"Rick Astley", "Never Gonna Give You Up [Official Music Video]", exportTrack{"Rick Astley", "Never Gonna Give You Up"}},
-		{"Daft Punk - Topic", "Digital Love", exportTrack{"Daft Punk", "Digital Love"}},
-		{"", "Кино — Группа крови (клип)", exportTrack{"Кино", "Группа крови"}},
-		{"Artist", "Song (Remix)", exportTrack{"Artist", "Song (Remix)"}},
-		{"Channel", "Jay-Z", exportTrack{"Channel", "Jay-Z"}},
-		{"Channel", "(Official Video)", exportTrack{"Channel", "(Official Video)"}},
+		{"Daft Punk", "Daft Punk - Get Lucky (Official Video)", exportTrack{Artist: "Daft Punk", Title: "Get Lucky"}},
+		{"Rick Astley", "Never Gonna Give You Up [Official Music Video]", exportTrack{Artist: "Rick Astley", Title: "Never Gonna Give You Up"}},
+		{"Daft Punk - Topic", "Digital Love", exportTrack{Artist: "Daft Punk", Title: "Digital Love"}},
+		{"", "Кино — Группа крови (клип)", exportTrack{Artist: "Кино", Title: "Группа крови"}},
+		{"Artist", "Song (Remix)", exportTrack{Artist: "Artist", Title: "Song (Remix)"}},
+		{"Channel", "Jay-Z", exportTrack{Artist: "Channel", Title: "Jay-Z"}},
+		{"Channel", "(Official Video)", exportTrack{Artist: "Channel", Title: "(Official Video)"}},
 	}
 	for _, test := range tests {
 		if got := uploadTrack(test.uploader, test.title); got != test.want {
@@ -50,7 +50,7 @@ func TestUploadTrackNormalizesTitles(t *testing.T) {
 	if got := trackFromInfo(topic).line(); got != "Daft Punk - Around the World" {
 		t.Fatalf("topic line=%q", got)
 	}
-	for track, want := range map[exportTrack]string{{"A", "T"}: "A - T", {"", "T"}: "T", {"A", ""}: "A", {" ", " "}: ""} {
+	for track, want := range map[exportTrack]string{{Artist: "A", Title: "T"}: "A - T", {Title: "T"}: "T", {Artist: "A"}: "A", {Artist: " ", Title: " "}: ""} {
 		if got := track.line(); got != want {
 			t.Errorf("line(%#v)=%q, want %q", track, got, want)
 		}
@@ -79,7 +79,7 @@ func TestExportFromInfoCapsAndSkipsUnavailableEntries(t *testing.T) {
 }
 
 func TestPendingExportHonoursRangeAndBatch(t *testing.T) {
-	tracks := []exportTrack{{"A", "1"}, {"A", "2"}, {"A", "3"}, {"A", "4"}, {"A", "5"}}
+	tracks := []exportTrack{{Artist: "A", Title: "1"}, {Artist: "A", Title: "2"}, {Artist: "A", Title: "3"}, {Artist: "A", Title: "4"}, {Artist: "A", Title: "5"}}
 	playlist := mediaPreview{Title: "Album - Five", Artist: "A - Topic", IsPlaylist: true, TrackCount: 5, Tracks: tracks}
 	ranged := pendingExport(pendingURL{Preview: playlist, RangeStart: 2, RangeEnd: 4})
 	if ranged.Name != "A - Five" || !reflect.DeepEqual(ranged.lines(), []string{"A - 2", "A - 3", "A - 4"}) || ranged.Total != 0 {
@@ -100,7 +100,7 @@ func TestPendingExportHonoursRangeAndBatch(t *testing.T) {
 	}
 	batch := pendingExport(pendingURL{
 		Batch:         []string{"https://youtu.be/a", "https://youtu.be/b"},
-		BatchPreviews: []mediaPreview{{Tracks: []exportTrack{{"X", "One"}}}, {Title: "Y - Two"}},
+		BatchPreviews: []mediaPreview{{Tracks: []exportTrack{{Artist: "X", Title: "One"}}}, {Title: "Y - Two"}},
 	})
 	if !batch.Playlist || !reflect.DeepEqual(batch.lines(), []string{"X - One", "Y - Two"}) {
 		t.Fatalf("batch=%#v", batch)
@@ -577,7 +577,7 @@ func TestExportCallbackSendsTracklistFileAndKeepsLink(t *testing.T) {
 	telegram := &exportTelegram{}
 	application := newExportTestApp(t, telegram)
 	preview := mediaPreview{Title: "Album - Discovery", Artist: "Daft Punk - Topic", IsPlaylist: true, TrackCount: 3,
-		Tracks: []exportTrack{{"Daft Punk", "One More Time"}, {"Daft Punk", "Aerodynamic"}, {"Daft Punk", "Digital Love"}}}
+		Tracks: []exportTrack{{Artist: "Daft Punk", Title: "One More Time"}, {Artist: "Daft Punk", Title: "Aerodynamic"}, {Artist: "Daft Punk", Title: "Digital Love"}}}
 	key, err := application.storeURL(pendingURL{URL: "https://music.youtube.com/playlist?list=OLAK", ChatID: 10, UserID: 10, Preview: preview})
 	if err != nil {
 		t.Fatal(err)
@@ -779,14 +779,15 @@ func TestLandingPageTitleIsNotSearched(t *testing.T) {
 	}
 }
 
-func TestDeezerPlaylistOffersTracklistInsteadOfSearch(t *testing.T) {
+func TestDeezerPlaylistOffersRangesOfSearchedTracks(t *testing.T) {
 	client := &exportAPIClient{responses: map[string]string{
 		"api.deezer.com/playlist/123":                          `{"title":"Road <Mix>","nb_tracks":2,"picture_xl":"https://cdn-images.dzcdn.net/images/playlist/x/1000x1000-000000-80-0-0.jpg"}`,
-		"api.deezer.com/playlist/123/tracks?index=0&limit=100": `{"data":[{"title":"Song 1","artist":{"name":"Artist 1"}},{"title":"Song 2","artist":{"name":"Artist 2"}}],"total":2,"next":""}`,
+		"api.deezer.com/playlist/123/tracks?index=0&limit=100": `{"data":[{"title":"Song 1","duration":215,"artist":{"name":"Artist 1"}},{"title":"Song 2","artist":{"name":"Artist 2"}}],"total":2,"next":""}`,
 	}}
 	client.install(t)
 	telegram := &exportTelegram{}
 	application := newExportTestApp(t, telegram)
+	application.cfg.MaxPlaylistTracks = maxPlaylistTracks
 	reports := newErrorReporter(-1001)
 	application.errorReports = reports
 	link := "https://www.deezer.com/en/playlist/123"
@@ -796,14 +797,18 @@ func TestDeezerPlaylistOffersTracklistInsteadOfSearch(t *testing.T) {
 		t.Fatalf("calls=%#v", calls)
 	}
 	text, markup := calls[1].text, calls[1].markup
-	notice := tr("music_collection", "en", "kind", tr("collection_kind_playlist", "en"), "service", "Deezer")
-	if !strings.Contains(text, "📀 <b>Road &lt;Mix&gt;</b>") || !strings.Contains(text, tr("preview_tracks", "en", "count", "2")) || !strings.Contains(text, notice) {
+	notice := tr("music_collection_search", "en", "kind", tr("collection_kind_playlist", "en"), "service", "Deezer")
+	if !strings.Contains(text, "📀 <b>Road &lt;Mix&gt;</b>") || !strings.Contains(text, tr("preview_tracks", "en", "count", "2")) || !strings.Contains(text, notice+"\n"+tr("choose_range", "en")) {
 		t.Fatalf("text=%q", text)
 	}
-	if strings.Contains(markup, `"dl:`) || !strings.Contains(markup, `"cover:`) || !strings.Contains(markup, `"cancel:`) {
-		t.Fatalf("a collection offers only the tracklist, the cover and cancel: %s", markup)
+	if strings.Contains(markup, `"dl:`) || !strings.Contains(markup, `"range:all:`) || !strings.Contains(markup, `"cover:`) || !strings.Contains(markup, `"cancel:`) {
+		t.Fatalf("a collection offers its ranges, the tracklist, the cover and cancel: %s", markup)
 	}
 	key := strings.SplitN(strings.SplitN(markup, `"export:`, 2)[1], `"`, 2)[0]
+	pending, ok := application.getURL(key, 10, 10)
+	if !ok || !searchedTracklist(pending.Preview) || pending.Preview.TrackCount != 2 || pending.Preview.Tracks[0].Seconds != 215 {
+		t.Fatalf("pending=%#v ok=%v", pending, ok)
+	}
 	requested := len(client.requested)
 	application.handleExportCallback(&tgbotapi.CallbackQuery{From: &tgbotapi.User{ID: 10}, Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 10}}, Data: "export:" + key})
 	calls = telegram.snapshot()

@@ -29,9 +29,12 @@ var (
 
 // exportTrack is one "Artist - Title" line of an exported tracklist. An empty value marks an
 // unavailable playlist entry, so that range indices keep matching the source order.
+// exportTrack is one tracklist entry; Seconds is its duration when the source reports one, which
+// helps pick the right YouTube match when the tracklist is downloaded.
 type exportTrack struct {
-	Artist string
-	Title  string
+	Artist  string
+	Title   string
+	Seconds int
 }
 
 func (t exportTrack) line() string {

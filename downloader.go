@@ -1068,6 +1068,18 @@ func (d *downloader) clearSession(session string) {
 	}
 }
 
+// clearSessions removes the session directories of every result; a playlist of searched
+// tracks has one session per track.
+func (d *downloader) clearSessions(results []downloadResult) {
+	cleared := make(map[string]bool)
+	for _, result := range results {
+		if result.Session != "" && !cleared[result.Session] {
+			cleared[result.Session] = true
+			d.clearSession(result.Session)
+		}
+	}
+}
+
 func readManifest(path string) ([]mediaInfo, error) {
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {

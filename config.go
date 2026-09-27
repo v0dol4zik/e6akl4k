@@ -108,7 +108,7 @@ func loadConfig() (config, error) {
 	if cfg.InlineRateLimit, err = strictEnvInt("INLINE_RATE_LIMIT", 60, 1, 10000); err != nil {
 		return config{}, err
 	}
-	if cfg.MaxPlaylistTracks, err = strictEnvInt("MAX_PLAYLIST_TRACKS", maxPlaylistTracks, 1, 1000); err != nil {
+	if cfg.MaxPlaylistTracks, err = strictEnvInt("MAX_PLAYLIST_TRACKS", maxPlaylistTracks, 1, maxPlaylistTracksCeiling); err != nil {
 		return config{}, err
 	}
 	if cfg.TelegramAPIURL, err = envTelegramAPIURL("TELEGRAM_API_URL"); err != nil {
