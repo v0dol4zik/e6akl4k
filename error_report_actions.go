@@ -140,11 +140,13 @@ func (a *app) fixErrorReport(callback *tgbotapi.CallbackQuery, record errorRepor
 }
 
 // rerunErrorReport repeats the failed request as if userID had sent the link to chatID again,
-// with the reported format, so the result lands in that chat.
+// with the reported format, so the result lands in that chat. The stored link is normalized
+// like a sent one, so a report filed before a link rewrite (such as YouTube Samples) is retried
+// with the rewritten link.
 func (a *app) rerunErrorReport(userID, chatID int64, record errorReportRecord, lang string) {
 	format, quality, _ := strings.Cut(record.Format, " ")
 	message := &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: chatID}, From: &tgbotapi.User{ID: userID}}
-	a.openURL(message, record.URL, lang, format, quality)
+	a.openURL(message, firstNonEmpty(normalizeDetectedURL(record.URL), record.URL), lang, format, quality)
 }
 
 func (a *app) editErrorReportKeyboard(callback *tgbotapi.CallbackQuery, markup *tgbotapi.InlineKeyboardMarkup) {

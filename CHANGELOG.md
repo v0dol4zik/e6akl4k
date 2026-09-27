@@ -45,7 +45,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ### Fixed
 
-- YouTube Samples share links (`youtube.com/samples/<id>`) are now downloaded as the video they point to, instead of failing as a channel called "samples".
+- YouTube Samples share links (`youtube.com/samples/<id>`) are now downloaded as the video they point to, instead of failing as a channel called "samples"; the retry and "fixed" buttons of an error report rewrite the stored link the same way.
 - YouTube downloads from a server IP that YouTube has flagged no longer fail with `HTTP Error 403: Forbidden`. The anonymous download used to get `429` and a bot check, and the fallback with cookies then got `403` from the default signed-in client. Now the download without cookies alternates between `tv_simply` and the `yt-dlp` default clients, starting with the set that worked last, and the download with cookies uses `mweb` (configurable as `YTDLP_YOUTUBE_CLIENTS` and `YTDLP_YOUTUBE_COOKIE_CLIENTS`). A `403`, a bot check, a missing audio format, or a refused player page from one set is retried with the other before cookies are tried.
 - An administrator repeating a reported request no longer counts towards the three users of a 🚨 spike alert.
 - Playlist, album, and artist links of Spotify, Apple Music, Deezer, Tidal, and Yandex Music are no longer searched on YouTube as a single track by their title. Deezer and Yandex Music collections show their name and track count with "tracklist as text" and "cover" buttons (the shown list is exported without a new request), other collections get a hint to send single tracks, and Deezer `link.deezer.com` share links are expanded first.

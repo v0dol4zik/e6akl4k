@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +333,31 @@ func TestErrorReportKeyboardOmitsUnrepeatableActions(t *testing.T) {
 	markup = errorReportKeyboard("r2", errorReport{Stage: "download", ChatID: -100, URL: "https://youtu.be/a"}, "en")
 	if len(markup.InlineKeyboard[0]) != 1 || *markup.InlineKeyboard[0][0].CallbackData != "erp:retry:r2" {
 		t.Fatalf("without a user there is nobody to notify: %#v", markup.InlineKeyboard)
+	}
+}
+
+func TestRerunErrorReportRewritesStoredLink(t *testing.T) {
+	directory := t.TempDir()
+	probes := filepath.Join(directory, "probes.log")
+	bin := filepath.Join(directory, "fake-yt-dlp")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nfor last do :; done\nprintf '%s\\n' \"$last\" >> "+probes+"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	application := newExportTestApp(t, &exportTelegram{})
+	application.downloader = &downloader{downloadDir: t.TempDir(), bin: bin, maxFileSize: maxFileSize, maxPlaylistTracks: maxPlaylistTracks}
+	application.rerunErrorReport(10, 10, errorReportRecord{ID: "rsample", Stage: "preview", URL: "https://youtube.com/samples/dQw4w9WgXcQ"}, "en")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		logged, _ := os.ReadFile(probes)
+		if len(logged) > 0 {
+			if !strings.Contains(string(logged), "watch?v=dQw4w9WgXcQ") || strings.Contains(string(logged), "/samples/") {
+				t.Fatalf("probed %q", logged)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stored link was not probed")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
