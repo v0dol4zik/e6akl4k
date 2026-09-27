@@ -241,29 +241,9 @@ func (a *app) handleRangeChoice(callback *tgbotapi.CallbackQuery) {
 		a.sendText(callback.From.ID, tr("action_unavailable", lang), "", nil)
 		return
 	}
-	start, end := 1, pending.Preview.TrackCount
-	switch parts[1] {
-	case "10":
-		end = min(min(10, a.cfg.MaxPlaylistTracks), end)
-	case "25":
-		end = min(min(25, a.cfg.MaxPlaylistTracks), end)
-	case "limit", "75":
-		end = min(a.cfg.MaxPlaylistTracks, end)
-	case "all":
-		if end > a.cfg.MaxPlaylistTracks {
-			end = a.cfg.MaxPlaylistTracks
-		}
-	default:
-		bounds := strings.SplitN(parts[1], "-", 2)
-		if len(bounds) != 2 {
-			return
-		}
-		parsedStart, startErr := strconv.Atoi(bounds[0])
-		parsedEnd, endErr := strconv.Atoi(bounds[1])
-		if startErr != nil || endErr != nil || parsedStart < 1 || parsedEnd < parsedStart || parsedEnd > min(pending.Preview.TrackCount, a.cfg.MaxPlaylistTracks) {
-			return
-		}
-		start, end = parsedStart, parsedEnd
+	start, end, ok := playlistRange(parts[1], pending.Preview.TrackCount, a.cfg.MaxPlaylistTracks)
+	if !ok {
+		return
 	}
 	pending, ok = a.setURLRange(parts[2], callback.From.ID, chatID, start, end)
 	if !ok {
@@ -275,6 +255,29 @@ func (a *app) handleRangeChoice(callback *tgbotapi.CallbackQuery) {
 	}
 	text := previewText(pending.Preview, lang) + "\n" + tr("selected_range", lang, "start", strconv.Itoa(start), "end", strconv.Itoa(end))
 	a.safeEdit(callback, text, "HTML", formatKeyboard(parts[2], lang))
+}
+
+// playlistRange resolves a range button of a playlist with count tracks into its first and last
+// track; a range may lie anywhere in the playlist but select at most limit tracks.
+func playlistRange(choice string, count, limit int) (int, int, bool) {
+	switch choice {
+	case "10":
+		return 1, min(10, limit, count), true
+	case "25":
+		return 1, min(25, limit, count), true
+	case "limit", "75", "all":
+		return 1, min(limit, count), true
+	}
+	bounds := strings.SplitN(choice, "-", 2)
+	if len(bounds) != 2 {
+		return 0, 0, false
+	}
+	start, startErr := strconv.Atoi(bounds[0])
+	end, endErr := strconv.Atoi(bounds[1])
+	if startErr != nil || endErr != nil || start < 1 || end < start || end > count || end-start+1 > limit {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
 // musicSearchQuery is the YouTube query for a music-service track: "Artist Title", or the title

@@ -45,7 +45,7 @@ chmod 600 .env
 | `RATE_LIMIT` | `12` | Private-chat requests allowed per `RATE_WINDOW`. |
 | `INLINE_RATE_LIMIT` | `60` | Inline requests allowed per `RATE_WINDOW`. |
 | `RATE_WINDOW` | `1m` | Go duration used for rate limiting. |
-| `MAX_PLAYLIST_TRACKS` | `75` | Maximum tracks accepted in one request, from 1 to 1000. |
+| `MAX_PLAYLIST_TRACKS` | `1000` | Maximum tracks one playlist request may select, from 1 to 1000. The range buttons still cover a longer playlist, and every selection downloads in batches of 10 tracks (individual files) or 50 tracks (ZIP). |
 | `MAX_FILE_SIZE` | `52428800` | Maximum individual file size in bytes: up to 50 MiB on the cloud Bot API and up to 2000 MiB with `TELEGRAM_API_URL`. |
 
 By default, seven downloads start immediately and there is no waiting download queue. An eighth simultaneous request receives a busy response. Lookup and archive jobs retain their own FIFO queues.

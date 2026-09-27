@@ -24,11 +24,17 @@ const (
 	localMaxFileSize     int64 = 2000 * 1024 * 1024
 	mediaGroupMaxBytes         = 10 * maxFileSize
 	playlistZIPThreshold       = 10
-	maxPlaylistTracks          = 75
-	maxTitleLength             = 200
-	maxParallelDownloads       = 7
-	maxStoredEntries           = 5000
-	pendingURLTTL              = time.Hour
+	// maxPlaylistTracks caps the tracks of one request; a longer playlist is reachable through
+	// the range buttons, and any selection is downloaded in bounded batches.
+	maxPlaylistTracks = 1000
+	// playlistBatchTracks and playlistZIPBatchTracks are the batch sizes of individual and ZIP
+	// playlist delivery: each batch takes its own download slot and at most two are on disk.
+	playlistBatchTracks    = 10
+	playlistZIPBatchTracks = 50
+	maxTitleLength         = 200
+	maxParallelDownloads   = 7
+	maxStoredEntries       = 5000
+	pendingURLTTL          = time.Hour
 	// maxBatchLinks caps how many links from one message are downloaded together.
 	maxBatchLinks = 5
 )
@@ -523,8 +529,14 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 			return
 		}
 	}
-	if pending.Preview.IsPlaylist && pending.Delivery == "individual" && selectedTrackCount(pending) > playlistZIPThreshold {
-		report, batchErr := a.downloadAndSendPlaylistBatches(downloadCtx, chatID, pending, format, quality, lang, status, reporter)
+	if batchedPlaylistDelivery(pending) {
+		var report deliveryReport
+		var batchErr error
+		if pending.Delivery == "zip" {
+			report, batchErr = a.downloadAndSendPlaylistZIPs(downloadCtx, chatID, pending, format, quality, lang, reporter)
+		} else {
+			report, batchErr = a.downloadAndSendPlaylistBatches(downloadCtx, chatID, pending, format, quality, lang, status, reporter)
+		}
 		historyStatus = deliveryStatus(report)
 		historyError = deliveryError(report)
 		a.recordDeliveryMetrics(report)
@@ -547,6 +559,9 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 				} else {
 					a.sendText(chatID, tr("queue_full", lang), "", nil)
 				}
+				return
+			}
+			if errors.Is(batchErr, errDeliveryReported) {
 				return
 			}
 			a.reportDownloadFailure(batchErr.Error(), sourceHost(url))
@@ -676,6 +691,44 @@ func singleRequest(pending pendingURL) *pendingURL {
 }
 
 func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, status *tgbotapi.Message, reporter *statusReporter) (deliveryReport, error) {
+	report, err := a.downloadPlaylistBatches(ctx, pending, format, quality, lang, reporter, playlistBatchTracks, func(_ playlistPart, results []downloadResult) (deliveryReport, error) {
+		return a.sendResultsIndividuallyWithSummary(chatID, results, format, lang, false, reporter), nil
+	})
+	if err != nil {
+		return report, err
+	}
+	a.sendPlaylistSummary(chatID, report, lang)
+	return report, nil
+}
+
+// downloadAndSendPlaylistZIPs delivers a long playlist selection as archives batch by batch, so
+// its files never pile up on disk; each batch waits for an archive slot of its own.
+func (a *app) downloadAndSendPlaylistZIPs(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, reporter *statusReporter) (deliveryReport, error) {
+	report, err := a.downloadPlaylistBatches(ctx, pending, format, quality, lang, reporter, playlistZIPBatchTracks, func(batch playlistPart, results []downloadResult) (deliveryReport, error) {
+		_, releaseArchive, err := a.archives.acquireNotify(ctx, func(position int) {
+			reporter.stage(tr("archive_queued", lang, "position", strconv.Itoa(position)))
+		})
+		if err != nil {
+			if len(results) > 0 {
+				a.downloader.clearSession(results[0].Session)
+			}
+			return deliveryReport{}, err
+		}
+		defer releaseArchive()
+		reporter.stage(tr("zip_batch", lang, "start", strconv.Itoa(batch.start), "end", strconv.Itoa(batch.end), "total", strconv.Itoa(batch.last)))
+		return a.sendZIPArchives(chatID, results, format, lang, &batch)
+	})
+	if err != nil {
+		return report, err
+	}
+	a.sendPlaylistSummary(chatID, report, lang)
+	return report, nil
+}
+
+// downloadPlaylistBatches downloads the selected tracks of a playlist in batches of size tracks
+// and hands each batch to deliver while the next one downloads, so at most two batches are on
+// disk at once. Every batch waits for a download slot of its own.
+func (a *app) downloadPlaylistBatches(ctx context.Context, pending pendingURL, format, quality, lang string, reporter *statusReporter, size int, deliver func(playlistPart, []downloadResult) (deliveryReport, error)) (deliveryReport, error) {
 	start, end := pending.RangeStart, pending.RangeEnd
 	if start <= 0 {
 		start = 1
@@ -684,6 +737,7 @@ func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, 
 		end = pending.Preview.TrackCount
 	}
 	type playlistBatch struct {
+		tracks  playlistPart
 		results []downloadResult
 		err     error
 	}
@@ -693,13 +747,13 @@ func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, 
 	batches := make(chan playlistBatch)
 	go func() {
 		defer close(batches)
-		for batchStart := start; batchStart <= end; batchStart += 10 {
-			batchEnd := min(batchStart+9, end)
+		for batchStart := start; batchStart <= end; batchStart += size {
+			batchEnd := min(batchStart+size-1, end)
 			reporter.stage(tr("download_batch", lang, "start", strconv.Itoa(batchStart), "end", strconv.Itoa(batchEnd), "total", strconv.Itoa(end)))
 			results, err := a.runDownloadRangeQueued(pipelineCtx, pending.URL, format, quality, batchStart, batchEnd, func(position int) {
 				reporter.stage(tr("queued", lang, "position", strconv.Itoa(position)))
 			}, nil)
-			batch := playlistBatch{results: results, err: err}
+			batch := playlistBatch{tracks: playlistPart{start: batchStart, end: batchEnd, last: end}, results: results, err: err}
 			select {
 			case batches <- batch:
 			case <-pipelineCtx.Done():
@@ -718,17 +772,39 @@ func (a *app) downloadAndSendPlaylistBatches(ctx context.Context, chatID int64, 
 		if batch.err != nil {
 			return report, batch.err
 		}
-		report.add(a.sendResultsIndividuallyWithSummary(chatID, batch.results, format, lang, false, reporter))
+		delivered, err := deliver(batch.tracks, batch.results)
+		report.add(delivered)
+		if err != nil {
+			return report, err
+		}
 		if err := pipelineCtx.Err(); err != nil {
 			return report, err
 		}
 	}
+	return report, nil
+}
+
+func (a *app) sendPlaylistSummary(chatID int64, report deliveryReport, lang string) {
 	summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(report.Delivered), "total", strconv.Itoa(report.Delivered+report.Failed))
 	if report.Failed > 0 {
 		summary += tr("some_failed_suffix", lang)
 	}
 	a.sendText(chatID, summary, "", nil)
-	return report, nil
+}
+
+// batchedPlaylistDelivery reports whether a playlist selection is downloaded and sent in
+// batches: individual files beyond one media group, and archives beyond one ZIP batch.
+func batchedPlaylistDelivery(pending pendingURL) bool {
+	if !pending.Preview.IsPlaylist || len(pending.Batch) > 0 {
+		return false
+	}
+	switch pending.Delivery {
+	case "individual":
+		return selectedTrackCount(pending) > playlistZIPThreshold
+	case "zip":
+		return selectedTrackCount(pending) > playlistZIPBatchTracks
+	}
+	return false
 }
 
 func deliveryStatus(report deliveryReport) string {
@@ -1144,6 +1220,23 @@ func (a *app) cacheDeliveredAudio(result downloadResult, format string, size int
 }
 
 func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, lang string) deliveryReport {
+	report, _ := a.sendZIPArchives(chatID, results, format, lang, nil)
+	return report
+}
+
+// playlistPart is one batch of a playlist delivered in batches: its first and last track and
+// the last track of the whole selection.
+type playlistPart struct {
+	start, end, last int
+}
+
+// errDeliveryReported stops a batched delivery after an error the user has already been told about.
+var errDeliveryReported = errors.New("delivery stopped")
+
+// sendZIPArchives packs the downloaded results into archives under the upload limit and sends
+// them. The archives of a playlist part are named after its tracks, and the progress and summary
+// messages are then left to the caller; an error means the user got a ZIP error message.
+func (a *app) sendZIPArchives(chatID int64, results []downloadResult, format, lang string, part *playlistPart) (deliveryReport, error) {
 	session := ""
 	if len(results) > 0 {
 		session = results[0].Session
@@ -1171,12 +1264,14 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		}
 	}
 	if len(valid) == 0 {
-		if len(tooLarge) == 0 {
+		if len(tooLarge) == 0 && part == nil {
 			a.sendText(chatID, tr("no_files_for_zip", lang), "", nil)
 		}
-		return deliveryReport{Failed: len(results), TooLarge: tooLarge}
+		return deliveryReport{Failed: len(results), TooLarge: tooLarge}, nil
 	}
-	a.sendText(chatID, tr("zipping", lang, "count", strconv.Itoa(len(valid))), "", nil)
+	if part == nil {
+		a.sendText(chatID, tr("zipping", lang, "count", strconv.Itoa(len(valid))), "", nil)
+	}
 	chunks := splitResultsBySize(valid, a.fileLimit()*9/10)
 	delivered := 0
 	skipped := len(results) - len(valid)
@@ -1184,24 +1279,24 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 	if skipped > 0 {
 		skippedLine = tr("zip_caption_skipped", lang, "skipped", strconv.Itoa(skipped))
 	}
-	for part, chunk := range chunks {
+	for index, chunk := range chunks {
 		zipID, err := randomID()
 		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}, fmt.Errorf("%w: %v", errDeliveryReported, err)
 		}
-		zipPath := filepath.Join(filepath.Dir(valid[0].FilePath), fmt.Sprintf("playlist_%02d_of_%02d_%s.zip", part+1, len(chunks), zipID))
+		zipPath := filepath.Join(filepath.Dir(valid[0].FilePath), zipName(part, index, len(chunks), zipID))
 		if err := createZIP(zipPath, chunk); err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}, fmt.Errorf("%w: %v", errDeliveryReported, err)
 		}
 		info, err := os.Stat(zipPath)
 		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}, fmt.Errorf("%w: %v", errDeliveryReported, err)
 		}
 		if info.Size() > a.fileLimit() {
 			// Only a part of one file just under the limit can outgrow it with the archive
@@ -1215,8 +1310,13 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		}
 		document := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(zipPath))
 		partLine := ""
-		if len(chunks) > 1 {
-			partLine = tr("zip_part", lang, "part", strconv.Itoa(part+1), "total", strconv.Itoa(len(chunks)))
+		switch {
+		case part != nil && len(chunks) > 1:
+			partLine = tr("zip_tracks_part", lang, "start", strconv.Itoa(part.start), "end", strconv.Itoa(part.end), "part", strconv.Itoa(index+1), "total", strconv.Itoa(len(chunks)))
+		case part != nil:
+			partLine = tr("zip_tracks", lang, "start", strconv.Itoa(part.start), "end", strconv.Itoa(part.end))
+		case len(chunks) > 1:
+			partLine = tr("zip_part", lang, "part", strconv.Itoa(index+1), "total", strconv.Itoa(len(chunks)))
 		}
 		document.Caption = tr("zip_caption", lang, "count", strconv.Itoa(len(chunk)), "size", humanSize(info.Size(), lang), "fmt", strings.ToUpper(format), "skipped", skippedLine+partLine)
 		document.ParseMode = "HTML"
@@ -1225,14 +1325,28 @@ func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, l
 		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
 			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
-			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}, fmt.Errorf("%w: %v", errDeliveryReported, err)
 		}
 		delivered += len(chunk)
 	}
-	if delivered > 0 {
+	if delivered > 0 && part == nil {
 		a.sendText(chatID, tr("zip_sent", lang), "", nil)
 	}
-	return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}
+	return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}, nil
+}
+
+// zipName names archive index of total; the archives of a playlist part carry its tracks, padded
+// to the width of the last track so that they sort in order.
+func zipName(part *playlistPart, index, total int, id string) string {
+	name := fmt.Sprintf("playlist_%02d_of_%02d", index+1, total)
+	if part != nil {
+		width := len(strconv.Itoa(part.last))
+		name = fmt.Sprintf("playlist_%0*d-%0*d", width, part.start, width, part.end)
+		if total > 1 {
+			name += fmt.Sprintf("_%02d_of_%02d", index+1, total)
+		}
+	}
+	return name + "_" + id + ".zip"
 }
 
 func splitResultsBySize(results []downloadResult, limit int64) [][]downloadResult {

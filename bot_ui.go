@@ -137,11 +137,19 @@ func downloadCancelKeyboard(key, lang string) *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
+// maxRangeButtons caps the range buttons of a playlist preview: a long playlist gets wider
+// ranges so that every track stays reachable.
+const maxRangeButtons = 12
+
+// rangeKeyboard offers the whole playlist (or its first limit tracks), the first 10 and 25, and
+// ranges that cover the rest of the playlist, each within the per-request limit.
 func rangeKeyboard(key string, count, limit int, lang string) *tgbotapi.InlineKeyboardMarkup {
-	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 10)
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 12)
 	effective := min(count, limit)
 	if count <= limit {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_all", lang), "range:all:"+key)))
+	} else {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_limit", lang, "limit", strconv.Itoa(limit)), "range:limit:"+key)))
 	}
 	if effective >= 10 {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_10", lang), "range:10:"+key)))
@@ -149,14 +157,18 @@ func rangeKeyboard(key string, count, limit int, lang string) *tgbotapi.InlineKe
 	if effective >= 25 {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_25", lang), "range:25:"+key)))
 	}
-	if count > limit {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_range_limit", lang, "limit", strconv.Itoa(limit)), "range:limit:"+key)))
-	}
+	width := min(playlistRangeWidth(count), limit)
 	var rangeRow []tgbotapi.InlineKeyboardButton
-	for start := 11; start <= effective; start += 10 {
-		end := min(start+9, effective)
+	buttons := 0
+	for start := 1; start <= count && buttons < maxRangeButtons; start += width {
+		end := min(start+width-1, count)
+		if start == 1 && (end == 10 || end == 25 || end == count) && end <= effective {
+			// The same range already has its "entire playlist", "first 10" or "first 25" button.
+			continue
+		}
 		label := tr("btn_range_custom", lang, "start", strconv.Itoa(start), "end", strconv.Itoa(end))
 		rangeRow = append(rangeRow, tgbotapi.NewInlineKeyboardButtonData(label, "range:"+strconv.Itoa(start)+"-"+strconv.Itoa(end)+":"+key))
+		buttons++
 		if len(rangeRow) == 2 {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(rangeRow...))
 			rangeRow = nil
@@ -169,6 +181,18 @@ func rangeKeyboard(key string, count, limit int, lang string) *tgbotapi.InlineKe
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(tr("btn_cancel", lang), "cancel:"+key)))
 	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	return &markup
+}
+
+// playlistRangeWidth is the narrowest range width whose buttons cover count tracks without
+// going over maxRangeButtons.
+func playlistRangeWidth(count int) int {
+	widths := []int{10, 25, 50, 100, 250, 500, 1000}
+	for _, width := range widths {
+		if (count+width-1)/width <= maxRangeButtons {
+			return width
+		}
+	}
+	return widths[len(widths)-1]
 }
 
 func validDownloadOption(format, quality string) bool {

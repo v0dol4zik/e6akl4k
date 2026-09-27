@@ -36,6 +36,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 - Made `yt-dlp` request delay and fragment concurrency configurable, and skipped redundant MP3 remuxing.
 - Added structured per-stage timing and throughput logs for source, conversion, Telegram upload, and cached delivery operations.
 - Pipelined large album delivery so the next bounded batch downloads while the current batch is sent.
+- A whole playlist can now be downloaded: the "entire playlist" button is always offered up to `MAX_PLAYLIST_TRACKS`, which now defaults to 1000 instead of 75, and the range buttons cover every track of a longer playlist with wider ranges (10 to 1000 tracks) in at most six rows. A ZIP selection over 50 tracks is downloaded, packed, and sent 50 tracks at a time, with archives named and captioned by their tracks, so its files never pile up on disk.
 - Kept administrator commands out of Telegram's published command menu while preserving permission-checked manual access.
 - A track over the Telegram file limit is no longer an error: instead of «это дольше 3:37: файл не влезет в лимит Telegram» the user gets buttons with the lighter formats that fit, or one notice for all such tracks of a playlist or batch, and these cases are counted as `downloads_too_large` (also per format and in `/stats`) instead of being posted to the error chat. FLAC is written as 16-bit, about 7.2 MiB a minute instead of 12.7, and the pre-download check lets FLAC, OGG, M4A, and MP3 best estimates exceed the limit by 25% because the real file size is checked before upload.
 

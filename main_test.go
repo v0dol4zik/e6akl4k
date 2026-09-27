@@ -72,7 +72,7 @@ func TestPlaylistTrackLimit(t *testing.T) {
 	if !errors.As(err, &tooLarge) {
 		t.Fatalf("unexpected error type: %T (%v)", err, err)
 	}
-	if tooLarge.Count != 76 || tooLarge.Limit != 75 {
+	if tooLarge.Count != maxPlaylistTracks+1 || tooLarge.Limit != maxPlaylistTracks {
 		t.Fatalf("unexpected limit error: %#v", tooLarge)
 	}
 }
