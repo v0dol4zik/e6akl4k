@@ -17,6 +17,7 @@ type config struct {
 	CacheChatID        int64
 	ErrorChatID        int64
 	LastfmAPIKey       string
+	ShazamPython       string
 	YandexProxy        *url.URL
 	TelegramAPIURL     string
 	HTTPAddr           string
@@ -57,10 +58,11 @@ type config struct {
 
 func loadConfig() (config, error) {
 	cfg := config{
-		BotToken:    strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		DownloadDir: envString("DOWNLOAD_DIR", "downloads"),
-		HTTPAddr:    envString("HTTP_ADDR", "127.0.0.1:8080"),
-		AdminIDs:    make(map[int64]bool),
+		BotToken:     strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		DownloadDir:  envString("DOWNLOAD_DIR", "downloads"),
+		HTTPAddr:     envString("HTTP_ADDR", "127.0.0.1:8080"),
+		ShazamPython: envString("SHAZAM_PYTHON", "python3"),
+		AdminIDs:     make(map[int64]bool),
 	}
 	var err error
 	if cfg.DownloadWorkers, err = strictEnvInt("DOWNLOAD_WORKERS", maxParallelDownloads, 1, 32); err != nil {

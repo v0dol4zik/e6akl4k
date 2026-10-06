@@ -18,6 +18,7 @@ chmod 600 .env
 | `INLINE_CACHE_CHAT_ID` | empty | Legacy alias for `CACHE_CHAT_ID`. |
 | `ERROR_CHAT_ID` | `CACHE_CHAT_ID` | Optional separate chat for user-facing error reports. Without both variables error reporting is disabled. |
 | `LASTFM_API_KEY` | empty | last.fm API key that enables `/lastfm`. Without it the command is hidden from the menu. Create one at https://www.last.fm/api/account/create. |
+| `SHAZAM_PYTHON` | `python3` (Docker: `/opt/shazam/bin/python`) | Python interpreter with `requirements-shazam.txt` installed for voice-message music recognition. No Shazam API key is needed. |
 | `TELEGRAM_API_URL` | empty | Base URL of a local Telegram Bot API server, such as `http://telegram-bot-api:8081`. Empty means the cloud Bot API. See [Files over 50 MB](#files-over-50-mb). |
 | `YANDEX_PROXY` | empty | `socks5h://`, `socks5://`, `http://`, or `https://` proxy for Yandex Music site and API requests only. See [Yandex Music outside the CIS](#yandex-music-outside-the-cis). |
 | `ADMIN_IDS` | empty | Comma-separated immutable owner IDs. Owners manage dynamic admins; all admins can use moderation, `/perf`, and redacted `/log`. |
@@ -144,6 +145,21 @@ The plugin refuses a server of another version: bump the `bgutil-pot` image in `
 Administrators post notices with `/msgall <text>` to every user the bot knows and `/msg <tg_id> <text>` to one user. Instead of text, either command can reply to any message (text, photo, video, or file), which is then copied as is. Formatting of the text is kept. `/msgall` first shows the notice exactly as users will get it and sends it only after the author confirms; confirmation expires after 15 minutes and is lost on restart, so a notice is never sent twice. Broadcasts run one at a time in the background at 20 messages a second, and the confirmation message shows progress and a final report of delivered, unreachable (blocked the bot or deleted the account), and failed recipients. The sender, banned users, and users who muted notices are skipped; `/msg` refuses a muted user and tells the administrator so. Both commands are recorded in the administrator audit.
 
 Every notice carries a button that mutes further notices; users can also switch them with `/notify`, `/notify on`, and `/notify off`. The setting is stored in SQLite.
+
+## Music recognition
+
+Send a private voice message with 5–20 seconds of music playing. The bot accepts recordings of 3–60 seconds up to 2 MiB, identifies the artist and title through Shazam, and searches YouTube for the full song. A confident match is sent automatically as MP3 320 regardless of `/settings`; uncertain versions get selection buttons that also download MP3 320. Speech, silence, or a song outside Shazam's catalog may not produce a match. Forwarded audio files still use their tags for title search.
+
+The Docker image includes a separate Python 3.11 environment with `shazamio`. For a native installation, use Python 3.10–3.13 and `ffmpeg` (the native recognition library is not compatible with Python 3.14):
+
+```bash
+python3.11 -m venv /path/to/shazam-venv
+/path/to/shazam-venv/bin/python -m pip install -r requirements-shazam.txt
+```
+
+Set `SHAZAM_PYTHON=/path/to/shazam-venv/bin/python` in `.env`. Missing recognition dependencies produce a localized unavailable message; text searches and downloads continue to work.
+
+The sample is downloaded only from the configured Telegram server with a byte limit and no redirects. `ffmpeg` decodes at most 60 seconds locally to mono 16 kHz PCM; `shazamio` sends the resulting fingerprint to Shazam. Temporary recordings and WAV files are removed after recognition, including on errors. Recognition shares the bounded lookup queue and holds the per-user heavy-job slot through automatic MP3 delivery. It has a 90-second recognition/search deadline, a 45-second provider deadline, and at most two provider HTTP attempts. Recordings and recognition fingerprints are not persisted or included in error reports.
 
 ## Inline mode
 

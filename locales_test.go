@@ -92,7 +92,7 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 		if !strings.Contains(welcome, "@music_test_bot") || !strings.Contains(help, "@music_test_bot") {
 			t.Errorf("%s guide does not contain the actual bot username", lang)
 		}
-		for _, feature := range []string{"Daft Punk", "YouTube", "Spotify", "ZIP", "MP3", "/settings"} {
+		for _, feature := range []string{"Daft Punk", "YouTube", "Spotify", "ZIP", "MP3", "/settings", "Shazam"} {
 			if !strings.Contains(help, feature) {
 				t.Errorf("%s help does not explain %q", lang, feature)
 			}

@@ -100,6 +100,8 @@ type app struct {
 	flights       flightGroup
 	metrics       metricsCache
 	errorReports  *errorReporter
+	recognizer    musicRecognizer
+	voiceFiles    tgbotapi.HTTPClient
 	// cookieLoginCheck confirms a suspected cookie failure before administrators are alerted.
 	cookieLoginCheck func(context.Context) (cookieLogin, string)
 
@@ -147,6 +149,8 @@ func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *d
 		archives:      newJobGate(cfg.ArchiveWorkers, cfg.ArchiveQueueSize),
 		limiter:       newRateLimiter(cfg.RateLimit, cfg.RateWindow),
 		inlineLimiter: newRateLimiter(cfg.InlineRateLimit, cfg.RateWindow),
+		recognizer:    &shazamRecognizer{python: firstNonEmpty(cfg.ShazamPython, "python3"), ffmpeg: "ffmpeg"},
+		voiceFiles:    newVoiceFileClient(),
 		userLang:      make(map[int64]string),
 		userPref:      make(map[int64]userPreference),
 		urls:          make(map[string]pendingURL),
@@ -252,6 +256,10 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 		if handled {
 			return
 		}
+	}
+	if message.Voice != nil && message.Chat.IsPrivate() {
+		a.handleVoiceRecognition(message)
+		return
 	}
 	if message.Audio != nil && message.Chat.IsPrivate() {
 		a.handleAudioSearch(message)
@@ -435,6 +443,18 @@ func (a *app) startDownload(userID, chatID int64, urlKey, format, quality, lang 
 		return
 	}
 	defer a.finishUserDownload(userID)
+	a.downloadForActiveUser(userID, chatID, urlKey, format, quality, lang, callback)
+}
+
+// downloadForActiveUser keeps the per-user slot held when recognition proceeds straight to
+// downloading. The caller must have acquired it with beginUserDownload.
+func (a *app) downloadForActiveUser(userID, chatID int64, urlKey, format, quality, lang string, callback *tgbotapi.CallbackQuery) {
+	showStatus := func(text, parseMode string, markup *tgbotapi.InlineKeyboardMarkup) *tgbotapi.Message {
+		if callback != nil {
+			return a.safeEdit(callback, text, parseMode, markup)
+		}
+		return a.sendText(chatID, text, parseMode, markup)
+	}
 	pending, ok := a.popURL(urlKey, userID, chatID)
 	if !ok {
 		a.sendText(userID, tr("action_unavailable", lang), "", nil)
@@ -1449,7 +1469,11 @@ func (a *app) guideText(key, lang string) string {
 		username = a.bot.Self.UserName
 	}
 	text := tr(key, lang, "username", html.EscapeString(username))
+	if key == "welcome" {
+		text += "\n\n" + tr("recognition_welcome", lang)
+	}
 	if key == "help" {
+		text += "\n\n" + tr("recognition_help", lang)
 		if a.cfg.LastfmAPIKey != "" {
 			text += "\n" + tr("lastfm_help", lang)
 		}

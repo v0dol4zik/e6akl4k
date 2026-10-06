@@ -47,6 +47,7 @@ Heavy downloads, quick lookups, archive creation, and Telegram update handling h
 | `tracklist.go` | Downloads of Deezer and Yandex Music collections and pasted "Artist - Title" lists: every selected track is searched on YouTube and its best match downloaded within the playlist batches. |
 | `cover.go` | `/cover` artwork from music APIs (largest CDN rendition first) or `yt-dlp` thumbnails, with square selection and lossless PNG Topic cropping; sent as a document to keep full quality. |
 | `lastfm.go` | `/lastfm` profile linking, recent, loved and top track lists from the last.fm API, and a YouTube search for a picked track. |
+| `recognition.go`, `shazam.go`, `shazam_recognize.py` | Bounded Telegram voice download, local decoding and Shazam fingerprint recognition, followed by a YouTube search and MP3 delivery. |
 | `notify.go` | Admin-only `/msgall` broadcasts with preview and confirmation, `/msg <tg_id>` direct notices, and the per-user `/notify` mute switch. |
 | `media_metrics.go` | Bounded stage-sample recorder and performance aggregation. |
 | `upload_progress.go` | Throttled status and multipart upload progress. |

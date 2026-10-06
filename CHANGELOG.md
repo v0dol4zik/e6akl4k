@@ -8,6 +8,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ### Added
 
+- Added Shazam music recognition for private voice messages: short recordings identify the song, confident YouTube matches are delivered as full MP3 320 tracks, and uncertain versions are offered for selection. Recognition has bounded concurrency, input size, deadlines and retries, cleans up temporary audio, and ships with Python dependencies in Docker without an API key.
 - Added persistent dynamic administrators, bans, owner-only role management, moderation audit, `/perf`, and redacted `/log [fresh] <url>` diagnostics.
 - Added confidence-ranked search with alternate-version penalties and exact/similar/version labels.
 - Added one-time `bootstrap.sh`, lean versioned-image deployment, Registry publishing, and explicit `rollback.sh`.

@@ -3,7 +3,7 @@ FROM golang:1.26.5-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go ./
+COPY *.go shazam_recognize.py ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/musicbot .
 
 FROM debian:bookworm-slim
@@ -16,6 +16,7 @@ ARG DENO_VERSION=2.9.5
 # YTDLP_POT_PROVIDER_URL set.
 ARG BGUTIL_PLUGIN_VERSION=2.0.0
 ARG BGUTIL_PLUGIN_SHA256=bce874dfa25896c2798e0f4f8147b7b22e785479eb1e459ab232bf2506c95016
+COPY requirements-shazam.txt /tmp/requirements-shazam.txt
 # apt keeps one mirror address per run, and a stalled CDN node can hang it past its own timeouts,
 # so every networked apt-get call gets a hard limit and a fresh run on retry; release downloads
 # get the same connect, stall and retry limits as the package fetches.
@@ -35,10 +36,13 @@ RUN fetch() { \
     } \
     && apt_get update \
     && apt_get install -y --no-install-recommends ca-certificates curl \
-    && apt-get --print-uris --yes --no-install-recommends install ffmpeg passwd python3 python3-mutagen unzip \
+    && apt-get --print-uris --yes --no-install-recommends install ffmpeg passwd python3 python3-mutagen python3-venv unzip \
        | sed -n "s/^'\\([^']*\\)' \\([^ ]*\\).*/\\1 \\2/p" \
        | xargs -r -n 2 -P 8 sh -c 'curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 30 --retry 5 --retry-delay 2 --retry-all-errors "$1" -o "/var/cache/apt/archives/$2"' sh \
-    && apt_get install -y --no-install-recommends ffmpeg passwd python3 python3-mutagen unzip \
+    && apt_get install -y --no-install-recommends ffmpeg passwd python3 python3-mutagen python3-venv unzip \
+    && python3 -m venv /opt/shazam \
+    && /opt/shazam/bin/python -m pip install --no-cache-dir --timeout 30 --retries 5 -r /tmp/requirements-shazam.txt \
+    && /opt/shazam/bin/python -c "from shazamio import Shazam, HTTPClient" \
     && ARCH="${TARGETARCH:-$(dpkg --print-architecture)}" \
     && case "$ARCH" in \
          amd64) DENO_ASSET=deno-x86_64-unknown-linux-gnu.zip ;; \
@@ -62,7 +66,7 @@ RUN fetch() { \
     && yt-dlp --version \
     && python3 -c "import mutagen" \
     && deno --version \
-    && rm -f /tmp/deno.zip /tmp/yt-dlp /tmp/yt-dlp.sha256 "/tmp/${DENO_ASSET}.sha256sum" /tmp/bgutil-ytdlp-pot-provider.zip \
+    && rm -f /tmp/deno.zip /tmp/yt-dlp /tmp/yt-dlp.sha256 "/tmp/${DENO_ASSET}.sha256sum" /tmp/bgutil-ytdlp-pot-provider.zip /tmp/requirements-shazam.txt \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin musicbot \
     && mkdir -p /app/downloads /app/cache \
@@ -73,6 +77,7 @@ ENV HOME=/home/musicbot \
     XDG_CACHE_HOME=/app/cache \
     XDG_DATA_HOME=/app/cache \
     HTTP_ADDR=0.0.0.0:8080 \
+    SHAZAM_PYTHON=/opt/shazam/bin/python \
     LOG_FORMAT=json
 COPY --from=build /out/musicbot /usr/local/bin/musicbot
 USER 10001:10001

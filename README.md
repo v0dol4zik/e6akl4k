@@ -19,6 +19,8 @@
 
 The bot searches and downloads through YouTube. It also supports albums, playlists, inline search, MP3, FLAC, M4A, OGG, download history, Telegram file caching, tracklist and cover export, and last.fm lists. Spotify, Apple Music, Deezer, Tidal, and Yandex Music links are used as search hints rather than direct audio sources.
 
+Send a voice message with 5–20 seconds of music playing to recognize it through Shazam and receive the full song as MP3 320. Recordings of 3–60 seconds up to 2 MiB are accepted in private chat. An uncertain YouTube match is offered for selection. Docker includes recognition support; [native setup](docs/configuration.md#music-recognition) uses Python and `requirements-shazam.txt`, with no Shazam API key.
+
 Try the public bot: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 
 ### Host your own instance
@@ -50,6 +52,8 @@ git pull --ff-only origin main
 `e6akl4k` — self-hosted Telegram-бот для поиска и скачивания музыки. Отправь ему название песни или ссылку, выбери формат и получи готовый аудиофайл прямо в Telegram.
 
 Бот ищет и скачивает музыку через YouTube. Он также поддерживает альбомы, плейлисты, inline-поиск, MP3, FLAC, M4A, OGG, историю загрузок, Telegram-кэш, экспорт треклистов и обложек и списки last.fm. Ссылки Spotify, Apple Music, Deezer, Tidal и Яндекс Музыки используются как подсказки для поиска, а не как прямые источники аудио.
+
+Отправь в личный чат голосовое с 5–20 секундами звучащей музыки: бот распознает песню через Shazam и пришлёт полный трек в MP3 320. Принимаются записи от 3 до 60 секунд размером до 2 МиБ. Если совпадение на YouTube сомнительное, бот предложит выбрать версию. В Docker всё уже установлено; для [нативного запуска](docs/configuration.md#music-recognition) нужны Python и `requirements-shazam.txt`, ключ Shazam не требуется.
 
 Попробовать публичного бота: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 

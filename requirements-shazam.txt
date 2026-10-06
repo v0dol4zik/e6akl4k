@@ -1,0 +1,4 @@
+# Use Python 3.10–3.13; shazamio-core 1.1.2 does not support 3.14.
+shazamio==0.8.1
+# pydub still imports audioop, which Python removed in 3.13.
+audioop-lts==0.2.2; python_version >= "3.13"

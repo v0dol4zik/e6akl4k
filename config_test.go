@@ -68,6 +68,21 @@ func TestLoadConfigRejectsInvalidEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadConfigShazamPython(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "token")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("SHAZAM_PYTHON", "")
+	cfg, err := loadConfig()
+	if err != nil || cfg.ShazamPython != "python3" {
+		t.Fatalf("Shazam default: Python=%q err=%v", cfg.ShazamPython, err)
+	}
+	t.Setenv("SHAZAM_PYTHON", " /opt/shazam/bin/python ")
+	cfg, err = loadConfig()
+	if err != nil || cfg.ShazamPython != "/opt/shazam/bin/python" {
+		t.Fatalf("Shazam environment: Python=%q err=%v", cfg.ShazamPython, err)
+	}
+}
+
 func TestLoadConfigRequiresToken(t *testing.T) {
 	old, ok := os.LookupEnv("BOT_TOKEN")
 	_ = os.Unsetenv("BOT_TOKEN")
