@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -305,7 +306,7 @@ func TestVoiceFileDownloadEnforcesActualByteLimit(t *testing.T) {
 func TestVoiceFileURLSupportsLocalServerWithoutTrustingPaths(t *testing.T) {
 	cases := []struct{ server, path, want string }{
 		{"", "voice/file.oga", "https://api.telegram.org/file/bottoken/voice/file.oga"},
-		{"http://telegram-bot-api:8081", "/var/lib/telegram-bot-api/123:abc/voice/file.oga", "http://telegram-bot-api:8081/file/bottoken//var/lib/telegram-bot-api/123:abc/voice/file.oga"},
+		{"http://telegram-proxy:8081", "voice/file name.oga", "http://telegram-proxy:8081/file/bottoken/voice/file%20name.oga"},
 	}
 	for _, tt := range cases {
 		got, err := voiceFileURL(tt.server, "token", tt.path)
@@ -314,9 +315,112 @@ func TestVoiceFileURLSupportsLocalServerWithoutTrustingPaths(t *testing.T) {
 		}
 	}
 	for _, path := range []string{"", "../.env", "voice/../../.env", "voice/./file", "https://other.test/file", "/etc/passwd", "voice/file?token=secret", "voice\\file"} {
-		if _, err := voiceFileURL("", "token", path); err == nil {
-			t.Errorf("unsafe Telegram file path accepted: %q", path)
+		for _, server := range []string{"", "http://telegram-bot-api:8081"} {
+			if _, err := voiceFileURL(server, "token", path); err == nil {
+				t.Errorf("unsafe Telegram file path accepted: %q", path)
+			}
 		}
+	}
+}
+
+func TestVoiceDownloadReadsLocalBotAPIFile(t *testing.T) {
+	a, tg := newVoiceTestApp(t, fullSongLookup)
+	a.cfg.TelegramAPIURL = "http://telegram-bot-api:8081"
+	a.cfg.TelegramFileDir = t.TempDir()
+	source := filepath.Join(a.cfg.TelegramFileDir, a.bot.Token, "voice", "file.oga")
+	if err := os.MkdirAll(filepath.Dir(source), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("local voice sample"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	tg.filePath = source
+	// Local getFile paths must work without a file-download HTTP client.
+	a.voiceFiles = nil
+	destination := filepath.Join(t.TempDir(), "sample")
+	if err := a.downloadVoiceFile(a.ctx, "voice", destination); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil || string(data) != "local voice sample" || tg.fileCalls != 1 {
+		t.Fatalf("local sample=%q getFile calls=%d err=%v", data, tg.fileCalls, err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("sample is not private: info=%v err=%v", info, err)
+	}
+}
+
+func TestLocalVoiceFileRejectsEscapesAndInvalidFiles(t *testing.T) {
+	a, _ := newVoiceTestApp(t, fullSongLookup)
+	a.cfg.TelegramAPIURL = "http://telegram-bot-api:8081"
+	a.cfg.TelegramFileDir = t.TempDir()
+	base := filepath.Join(a.cfg.TelegramFileDir, a.bot.Token)
+	if err := os.MkdirAll(filepath.Join(base, "voice"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "sample.oga")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "voice", "escape.oga")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(base, "escape")
+	if err := os.Symlink(filepath.Dir(outside), linkDir); err != nil {
+		t.Fatal(err)
+	}
+	large := filepath.Join(base, "voice", "large.oga")
+	if err := os.WriteFile(large, make([]byte, maxVoiceBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(base, "voice", "empty.oga")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(base, "voice", "fifo.oga")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, path string
+		want       error
+	}{
+		{"outside root", outside, nil},
+		{"other bot", filepath.Join(a.cfg.TelegramFileDir, "another-token", "voice", "file.oga"), nil},
+		{"traversal", base + "/voice/../../another-token/file.oga", nil},
+		{"file symlink", link, nil},
+		{"directory symlink", filepath.Join(linkDir, filepath.Base(outside)), nil},
+		{"directory", filepath.Join(base, "voice"), errInvalidVoiceAudio},
+		{"fifo", fifo, errInvalidVoiceAudio},
+		{"oversized", large, errVoiceTooLarge},
+		{"empty", empty, errInvalidVoiceAudio},
+		{"missing", filepath.Join(base, "voice", "missing.oga"), nil},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "sample")
+			err := a.copyLocalVoiceFile(a.ctx, tt.path, destination)
+			if err == nil || (tt.want != nil && !errors.Is(err, tt.want)) {
+				t.Fatalf("local sample error=%v want=%v", err, tt.want)
+			}
+			if strings.Contains(err.Error(), a.bot.Token) || strings.Contains(err.Error(), a.cfg.TelegramFileDir) {
+				t.Fatalf("local sample error exposes a private path: %v", err)
+			}
+			if data, _ := os.ReadFile(destination); len(data) != 0 {
+				t.Fatalf("rejected local sample was copied: %q", data)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(a.ctx)
+	cancel()
+	if err := a.copyLocalVoiceFile(ctx, empty, filepath.Join(t.TempDir(), "sample")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("local copy ignored cancellation: %v", err)
+	}
+	a.cfg.TelegramFileDir = ""
+	if err := a.copyLocalVoiceFile(a.ctx, empty, filepath.Join(t.TempDir(), "sample")); !errors.Is(err, errRecognitionUnavailable) {
+		t.Fatalf("missing local directory error=%v", err)
 	}
 }
 

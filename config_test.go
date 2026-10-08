@@ -83,6 +83,26 @@ func TestLoadConfigShazamPython(t *testing.T) {
 	}
 }
 
+func TestLoadConfigTelegramFileDir(t *testing.T) {
+	t.Setenv("BOT_TOKEN", "token")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("TELEGRAM_FILE_DIR", "")
+	cfg, err := loadConfig()
+	if err != nil || cfg.TelegramFileDir != "" {
+		t.Fatalf("local files default=%q err=%v", cfg.TelegramFileDir, err)
+	}
+	directory := t.TempDir()
+	t.Setenv("TELEGRAM_FILE_DIR", " "+directory+" ")
+	cfg, err = loadConfig()
+	if err != nil || cfg.TelegramFileDir != directory {
+		t.Fatalf("local files directory=%q err=%v", cfg.TelegramFileDir, err)
+	}
+	t.Setenv("TELEGRAM_FILE_DIR", "relative/path")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("relative local Bot API directory accepted")
+	}
+}
+
 func TestLoadConfigRequiresToken(t *testing.T) {
 	old, ok := os.LookupEnv("BOT_TOKEN")
 	_ = os.Unsetenv("BOT_TOKEN")

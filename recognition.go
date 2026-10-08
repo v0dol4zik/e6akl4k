@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -206,6 +207,9 @@ func (a *app) downloadVoiceFile(ctx context.Context, fileID, path string) error 
 	if file.FileSize > maxVoiceBytes {
 		return errVoiceTooLarge
 	}
+	if a.cfg.TelegramAPIURL != "" && filepath.IsAbs(file.FilePath) {
+		return a.copyLocalVoiceFile(ctx, file.FilePath, path)
+	}
 	address, err := voiceFileURL(a.cfg.TelegramAPIURL, a.bot.Token, file.FilePath)
 	if err != nil {
 		return err
@@ -228,11 +232,62 @@ func (a *app) downloadVoiceFile(ctx context.Context, fileID, path string) error 
 	if response.ContentLength > maxVoiceBytes {
 		return errVoiceTooLarge
 	}
+	return saveVoiceSample(ctx, response.Body, path)
+}
+
+// Local Bot API servers return absolute paths, without a /file HTTP endpoint. The
+// read-only shared directory is restricted to this bot's token, and os.Root prevents
+// symlinks from escaping it. Never include these paths (which contain the token) in errors.
+func (a *app) copyLocalVoiceFile(ctx context.Context, filePath, destination string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if a.cfg.TelegramFileDir == "" {
+		return errRecognitionUnavailable
+	}
+	token := a.bot.Token
+	if token == "" || token == "." || token == ".." || strings.ContainsAny(token, "/\\\x00\r\n") {
+		return errors.New("invalid Telegram voice file path")
+	}
+	base := filepath.Join(a.cfg.TelegramFileDir, token)
+	if !filepath.IsAbs(filePath) || filepath.Clean(filePath) != filePath {
+		return errors.New("invalid Telegram voice file path")
+	}
+	relative, err := filepath.Rel(base, filePath)
+	if err != nil || !filepath.IsLocal(relative) || relative == "." {
+		return errors.New("invalid Telegram voice file path")
+	}
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return errRecognitionUnavailable
+	}
+	defer root.Close()
+	// Nonblocking open ensures a malformed server path pointing at a FIFO cannot
+	// hang a worker. Only regular files are accepted below.
+	input, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return errors.New("open local Telegram voice sample failed")
+	}
+	defer input.Close()
+	info, err := input.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return errInvalidVoiceAudio
+	}
+	if info.Size() > maxVoiceBytes {
+		return errVoiceTooLarge
+	}
+	return saveVoiceSample(ctx, input, destination)
+}
+
+func saveVoiceSample(ctx context.Context, input io.Reader, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	output, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return errors.New("create voice sample file failed")
 	}
-	n, copyErr := io.Copy(output, io.LimitReader(response.Body, maxVoiceBytes+1))
+	n, copyErr := io.Copy(output, io.LimitReader(input, maxVoiceBytes+1))
 	closeErr := output.Close()
 	switch {
 	case ctx.Err() != nil:
@@ -247,10 +302,10 @@ func (a *app) downloadVoiceFile(ctx context.Context, fileID, path string) error 
 	return nil
 }
 
-// The endpoint stays on the configured Telegram server, including for absolute local getFile
-// paths. Such paths are downloaded through HTTP and never opened as local files.
+// Relative cloud/proxy paths stay on the configured server. Absolute local Bot API
+// paths go through copyLocalVoiceFile instead.
 func voiceFileURL(apiURL, token, filePath string) (string, error) {
-	if filePath == "" || strings.Contains(filePath, "://") || strings.ContainsAny(filePath, "\\\x00\r\n?#") || (apiURL == "" && strings.HasPrefix(filePath, "/")) {
+	if filePath == "" || strings.Contains(filePath, "://") || strings.ContainsAny(filePath, "\\\x00\r\n?#") || strings.HasPrefix(filePath, "/") {
 		return "", errors.New("invalid Telegram voice file path")
 	}
 	parts := strings.Split(filePath, "/")

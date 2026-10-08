@@ -4,6 +4,10 @@ services:
     build: .
     restart: unless-stopped
     init: true
+    # The local Bot API stores downloads with group 101. The shared volume is read-only,
+    # and voice recognition opens only paths inside this bot's token directory.
+    group_add:
+      - "101"
     env_file:
       - .env
     environment:
@@ -16,6 +20,10 @@ services:
         target: /app/downloads
         bind:
           create_host_path: false
+      - type: volume
+        source: telegram-bot-api-data
+        target: /var/lib/telegram-bot-api
+        read_only: true
       - type: bind
         source: ./cache
         target: /app/cache

@@ -20,6 +20,7 @@ type config struct {
 	ShazamPython       string
 	YandexProxy        *url.URL
 	TelegramAPIURL     string
+	TelegramFileDir    string
 	HTTPAddr           string
 	DownloadWorkers    int
 	DownloadQueueSize  int
@@ -58,11 +59,12 @@ type config struct {
 
 func loadConfig() (config, error) {
 	cfg := config{
-		BotToken:     strings.TrimSpace(os.Getenv("BOT_TOKEN")),
-		DownloadDir:  envString("DOWNLOAD_DIR", "downloads"),
-		HTTPAddr:     envString("HTTP_ADDR", "127.0.0.1:8080"),
-		ShazamPython: envString("SHAZAM_PYTHON", "python3"),
-		AdminIDs:     make(map[int64]bool),
+		BotToken:        strings.TrimSpace(os.Getenv("BOT_TOKEN")),
+		DownloadDir:     envString("DOWNLOAD_DIR", "downloads"),
+		HTTPAddr:        envString("HTTP_ADDR", "127.0.0.1:8080"),
+		ShazamPython:    envString("SHAZAM_PYTHON", "python3"),
+		TelegramFileDir: envString("TELEGRAM_FILE_DIR", ""),
+		AdminIDs:        make(map[int64]bool),
 	}
 	var err error
 	if cfg.DownloadWorkers, err = strictEnvInt("DOWNLOAD_WORKERS", maxParallelDownloads, 1, 32); err != nil {
@@ -115,6 +117,9 @@ func loadConfig() (config, error) {
 	}
 	if cfg.TelegramAPIURL, err = envTelegramAPIURL("TELEGRAM_API_URL"); err != nil {
 		return config{}, err
+	}
+	if cfg.TelegramFileDir != "" && !filepath.IsAbs(cfg.TelegramFileDir) {
+		return config{}, fmt.Errorf("TELEGRAM_FILE_DIR должен быть абсолютным путём к рабочему каталогу локального Bot API")
 	}
 	fileSizeCap := maxFileSize
 	if cfg.TelegramAPIURL != "" {

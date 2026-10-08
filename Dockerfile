@@ -77,6 +77,7 @@ ENV HOME=/home/musicbot \
     XDG_CACHE_HOME=/app/cache \
     XDG_DATA_HOME=/app/cache \
     HTTP_ADDR=0.0.0.0:8080 \
+    TELEGRAM_FILE_DIR=/var/lib/telegram-bot-api \
     SHAZAM_PYTHON=/opt/shazam/bin/python \
     LOG_FORMAT=json
 COPY --from=build /out/musicbot /usr/local/bin/musicbot
