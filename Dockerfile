@@ -18,17 +18,23 @@ ARG BGUTIL_PLUGIN_VERSION=2.0.0
 ARG BGUTIL_PLUGIN_SHA256=bce874dfa25896c2798e0f4f8147b7b22e785479eb1e459ab232bf2506c95016
 COPY requirements-shazam.txt /tmp/requirements-shazam.txt
 # apt keeps one mirror address per run, and a stalled CDN node can hang it past its own timeouts,
-# so every networked apt-get call gets a hard limit and a fresh run on retry; release downloads
-# get the same connect, stall and retry limits as the package fetches.
+# so apt-get update gets a hard limit and a fresh run on retry. Installation has a separate
+# limit to allow dpkg to finish configuring packages on a busy server; all downloads keep
+# connect, stall and retry limits.
 RUN fetch() { \
         curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 30 \
             --retry 5 --retry-delay 2 --retry-all-errors "$@"; \
     } \
     && apt_get() { \
+        apt_limit=180; \
+        [ "$1" != install ] || apt_limit=900; \
         for attempt in 1 2 3 4 5; do \
-            timeout -k 10 180 apt-get -o Acquire::Retries=5 \
+            DEBIAN_FRONTEND=noninteractive timeout -k 10 "$apt_limit" apt-get -o Acquire::Retries=5 \
                 -o Acquire::http::Timeout=30 \
                 -o Acquire::https::Timeout=30 "$@" && return 0; \
+            if [ "$1" = install ]; then \
+                DEBIAN_FRONTEND=noninteractive timeout -k 10 "$apt_limit" dpkg --configure -a || return 1; \
+            fi; \
             echo "apt-get $1: attempt $attempt failed" >&2; \
             sleep 5; \
         done; \
