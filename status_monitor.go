@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -31,10 +30,6 @@ const (
 	statusMessageKey = "status_message"
 	// statusComponentsKey stores the last level of every component, so transitions survive restarts.
 	statusComponentsKey = "status_components"
-	// cookieLogin*Key persist the last login check with the configured cookies.
-	cookieLoginResultKey = "cookie_login_result"
-	cookieLoginAtKey     = "cookie_login_at"
-	cookieLoginDetailKey = "cookie_login_detail"
 	// ytdlpLatest*Key cache the newest yt-dlp release, asked for once per ytdlpReleaseCheckInterval.
 	ytdlpLatestKey            = "ytdlp_latest"
 	ytdlpLatestAtKey          = "ytdlp_latest_at"
@@ -117,9 +112,10 @@ func (m *statusMonitor) clock() time.Time {
 	return time.Now()
 }
 
-// startStatusMonitor runs the status message and the periodic cookie login check. It needs the
-// error chat, the database and STATUS_MESSAGE=true.
+// startStatusMonitor starts periodic cookie checks independently of the pinned status message.
+// The message itself needs the error chat, the database and STATUS_MESSAGE=true.
 func (a *app) startStatusMonitor(ctx context.Context) {
+	go a.runCookieChecks(ctx)
 	reporter := a.errorReports
 	if reporter == nil || a.store == nil || !a.cfg.StatusMessage {
 		return
@@ -128,7 +124,6 @@ func (a *app) startStatusMonitor(ctx context.Context) {
 	if a.downloader != nil {
 		monitor.installedYtdlp = a.downloader.ytdlpVersion
 	}
-	go a.runCookieChecks(ctx)
 	go func() {
 		ticker := time.NewTicker(statusMonitorInterval)
 		defer ticker.Stop()
@@ -233,9 +228,7 @@ func (a *app) diskStatus(lang string) statusComponent {
 	return component
 }
 
-// cookieStatusComponent shows the last login check with the configured cookies and the age of
-// the cookies file. Downloads go anonymous first, so dead cookies break only age-restricted and
-// members-only videos, but they are the one thing an operator has to replace by hand.
+// cookieStatusComponent only shows green for a fresh complete check of the current cookie file.
 func (a *app) cookieStatusComponent(ctx context.Context, now time.Time, lang string) statusComponent {
 	component := statusComponent{Key: "cookies", Label: tr("status_cookies", lang)}
 	if a.downloader == nil || a.downloader.cookiesFile == "" {
@@ -243,30 +236,40 @@ func (a *app) cookieStatusComponent(ctx context.Context, now time.Time, lang str
 		component.Detail = tr("status_cookies_missing", lang)
 		return component
 	}
-	checked := metadataTime(a.store.metadata(ctx, cookieLoginAtKey))
-	detail := html.EscapeString(a.store.metadata(ctx, cookieLoginDetailKey))
-	ago := ""
-	if !checked.IsZero() {
-		ago = statusDuration(now.Sub(checked), lang)
+	snapshot, err := a.downloader.readCookieSnapshot()
+	if err != nil {
+		component.Level = statusWarn
+		component.Detail = tr("status_cookies_unreadable", lang)
+		return component
 	}
-	switch a.store.metadata(ctx, cookieLoginResultKey) {
-	case cookieLoginValid.String():
+	check := a.lastCookieCheck(ctx)
+	checked := time.Unix(check.CheckedAt, 0)
+	ago := statusDuration(now.Sub(checked), lang)
+	component.Level = statusWarn
+	switch {
+	case check.Version != cookieCheckVersion || check.CheckedAt <= 0:
+		component.Detail = tr("status_cookies_pending", lang)
+	case !check.matches(snapshot):
+		component.Detail = tr("status_cookies_changed", lang)
+	case checked.After(now.Add(time.Minute)):
+		component.Detail = tr("status_cookies_pending", lang)
+	case check.Login == cookieLoginValid && now.Sub(checked) >= a.cookieCheckFreshness():
+		component.Detail = tr("status_cookies_stale", lang, "ago", ago)
+	case check.Login == cookieLoginValid:
+		component.Level = statusOK
 		component.Detail = tr("status_cookies_ok", lang, "ago", ago)
-	case cookieLoginInvalid.String():
+	case check.Login == cookieLoginInvalid:
 		component.Level = statusFail
 		component.Detail = tr("status_cookies_failed", lang, "ago", ago)
-	case cookieLoginUnknown.String():
-		component.Level = statusWarn
-		component.Detail = tr("status_cookies_unknown", lang, "ago", ago)
+	case check.Login == cookieLoginDegraded:
+		component.Detail = tr("status_cookies_degraded", lang, "ago", ago)
 	default:
-		component.Detail = tr("status_cookies_pending", lang)
+		component.Detail = tr("status_cookies_unknown", lang, "ago", ago)
 	}
-	if detail != "" && component.Level != statusOK {
-		component.Detail += " · <code>" + detail + "</code>"
+	if check.Detail != "" && check.matches(snapshot) && check.Login != cookieLoginValid && component.Level != statusOK {
+		component.Detail += " · <code>" + html.EscapeString(check.Detail) + "</code>"
 	}
-	if info, err := os.Stat(a.downloader.cookiesFile); err == nil {
-		component.Detail += " · " + tr("status_cookies_file", lang, "ago", statusDuration(now.Sub(info.ModTime()), lang))
-	}
+	component.Detail += " · " + tr("status_cookies_file", lang, "ago", statusDuration(now.Sub(snapshot.modified), lang))
 	return component
 }
 
@@ -595,24 +598,27 @@ func statusMessageGone(err error) bool {
 	return strings.Contains(low, "message to edit not found") || strings.Contains(low, "message can't be edited") || strings.Contains(low, "message_id_invalid")
 }
 
-// runCookieChecks checks the login with the configured cookies every COOKIE_CHECK_INTERVAL,
-// counting from the last check of any kind, so the status message always has a fresh verdict.
+// runCookieChecks validates the current cookies on schedule and within a minute of replacement.
+// Old login-only results and checks of other files are never reused at startup.
 func (a *app) runCookieChecks(ctx context.Context) {
 	interval := a.cfg.CookieCheckInterval
 	if a.cookieLoginCheck == nil || interval <= 0 || a.downloader == nil || a.downloader.cookiesFile == "" {
 		return
 	}
-	ticker := time.NewTicker(min(interval, 10*time.Minute))
+	ticker := time.NewTicker(min(interval, statusMonitorInterval))
 	defer ticker.Stop()
 	for {
-		if time.Since(metadataTime(a.store.metadata(ctx, cookieLoginAtKey))) >= interval {
-			result, detail := a.cookieLoginCheck(ctx)
-			if ctx.Err() != nil {
-				return
-			}
-			a.cookieAlerts.noteLoginResult(result)
-			a.recordCookieLogin(ctx, result, detail)
-			log.Printf("Плановая проверка входа YouTube по cookies: %s (%s)", result, detail)
+		snapshot, _ := a.downloader.readCookieSnapshot()
+		check := a.lastCookieCheck(ctx)
+		now := a.cookieAlerts.clock()
+		if ctx.Err() != nil {
+			return
+		}
+		if (!check.matches(snapshot) || now.Sub(time.Unix(check.CheckedAt, 0)) >= interval || time.Unix(check.CheckedAt, 0).After(now.Add(time.Minute))) &&
+			a.cookieAlerts.startLoginCheck(ctx, a.store, snapshot.fingerprint, true) {
+			result := a.executeCookieCheck(ctx)
+			a.cookieAlerts.checks.Done()
+			log.Printf("Плановая проверка cookies YouTube: %s (%s)", result.Login, result.Detail)
 		}
 		select {
 		case <-ctx.Done():
@@ -620,16 +626,6 @@ func (a *app) runCookieChecks(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
-}
-
-// recordCookieLogin persists a login check for the status message.
-func (a *app) recordCookieLogin(ctx context.Context, result cookieLogin, detail string) {
-	if a.store == nil {
-		return
-	}
-	_ = a.store.setMetadata(ctx, cookieLoginResultKey, result.String())
-	_ = a.store.setMetadata(ctx, cookieLoginAtKey, strconv.FormatInt(time.Now().Unix(), 10))
-	_ = a.store.setMetadata(ctx, cookieLoginDetailKey, shortenRunes(strings.ToValidUTF8(redactTraceText(detail), ""), 200))
 }
 
 func metadataTime(value string) time.Time {

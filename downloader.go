@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -230,8 +231,6 @@ type downloader struct {
 	downloadDir        string
 	cookiesFile        string
 	maxFileSize        int64
-	cookieSnapshotMu   sync.RWMutex
-	cookieSnapshot     []byte
 	maxPlaylistTracks  int
 	ytdlpSleepRequests int
 	ytdlpFragments     int
@@ -327,7 +326,7 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 		maxPlaylistTracks: maxPlaylistTracks,
 	}
 	if cookiesFile != "" {
-		if err := d.refreshCookieSnapshot(); err != nil {
+		if _, err := d.readCookieSnapshot(); err != nil {
 			return nil, fmt.Errorf("прочитать cookies: %w", err)
 		}
 	}
@@ -955,6 +954,12 @@ func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, e
 }
 
 func (d *downloader) runOnce(ctx context.Context, args []string) ([]byte, string, error) {
+	return d.runOnceLogged(ctx, args, true)
+}
+
+// Cookie validation may receive private playlist data or malformed cookie rows. Its output is
+// classified internally and never copied verbatim to application logs.
+func (d *downloader) runOnceLogged(ctx context.Context, args []string, logFailure bool) ([]byte, string, error) {
 	cmd := exec.CommandContext(ctx, d.bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -965,26 +970,74 @@ func (d *downloader) runOnce(ctx context.Context, args []string) ([]byte, string
 	}
 	cmd.WaitDelay = 5 * time.Second
 	var stdout bytes.Buffer
+	privateStdout := &limitedBuffer{limit: 1024 * 1024}
 	stderr := &limitedBuffer{limit: 256 * 1024}
 	cmd.Stdout = &stdout
+	if !logFailure {
+		cmd.Stdout = privateStdout
+	}
 	cmd.Stderr = stderr
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
-	if err != nil {
+	if err != nil && logFailure {
 		log.Printf("yt-dlp завершился с ошибкой: %v: %s", err, firstLine(stderr.String()))
+	}
+	if !logFailure {
+		return []byte(privateStdout.String()), stderr.String(), err
 	}
 	return stdout.Bytes(), stderr.String(), err
 }
 
 func (d *downloader) isolatedCookieFile() (string, func(), error) {
+	snapshot, err := d.readCookieSnapshot()
+	if err != nil {
+		return "", func() {}, err
+	}
+	return d.isolateCookieSnapshot(snapshot)
+}
+
+type cookieSnapshot struct {
+	data        []byte
+	fingerprint string
+	modified    time.Time
+}
+
+// readCookieSnapshot reads the current file on every operation. An open file and its metadata
+// belong to the same snapshot; replacing cookies never changes an in-flight isolated copy.
+func (d *downloader) readCookieSnapshot() (cookieSnapshot, error) {
 	if d.cookiesFile == "" {
+		return cookieSnapshot{}, nil
+	}
+	file, err := os.Open(d.cookiesFile)
+	if err != nil {
+		return cookieSnapshot{}, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return cookieSnapshot{}, err
+	}
+	const maxCookieFileBytes = 4 * 1024 * 1024
+	if !info.Mode().IsRegular() || info.Size() > maxCookieFileBytes {
+		return cookieSnapshot{}, errors.New("cookies file must be a regular file smaller than 4 MiB")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxCookieFileBytes+1))
+	if err != nil {
+		return cookieSnapshot{}, err
+	}
+	if len(data) > maxCookieFileBytes {
+		return cookieSnapshot{}, errors.New("cookies file exceeds 4 MiB")
+	}
+	digest := sha256.Sum256(data)
+	return cookieSnapshot{data: data, fingerprint: hex.EncodeToString(digest[:]), modified: info.ModTime()}, nil
+}
+
+func (d *downloader) isolateCookieSnapshot(snapshot cookieSnapshot) (string, func(), error) {
+	if snapshot.fingerprint == "" {
 		return "", func() {}, nil
 	}
-	d.cookieSnapshotMu.RLock()
-	snapshot := append([]byte(nil), d.cookieSnapshot...)
-	d.cookieSnapshotMu.RUnlock()
 	file, err := os.CreateTemp(d.downloadDir, ".cookies-readonly-*.txt")
 	if err != nil {
 		return "", func() {}, err
@@ -996,7 +1049,7 @@ func (d *downloader) isolatedCookieFile() (string, func(), error) {
 		cleanup()
 		return "", func() {}, err
 	}
-	if _, err := file.Write(snapshot); err != nil {
+	if _, err := file.Write(snapshot.data); err != nil {
 		_ = file.Close()
 		cleanup()
 		return "", func() {}, err
@@ -1006,20 +1059,6 @@ func (d *downloader) isolatedCookieFile() (string, func(), error) {
 		return "", func() {}, err
 	}
 	return path, cleanup, nil
-}
-
-func (d *downloader) refreshCookieSnapshot() error {
-	if d.cookiesFile == "" {
-		return nil
-	}
-	data, err := os.ReadFile(d.cookiesFile)
-	if err != nil {
-		return err
-	}
-	d.cookieSnapshotMu.Lock()
-	d.cookieSnapshot = data
-	d.cookieSnapshotMu.Unlock()
-	return nil
 }
 
 func argsBeforeSeparator(args []string, values ...string) []string {

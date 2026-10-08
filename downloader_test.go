@@ -217,9 +217,14 @@ func TestOperationsUseIsolatedCookieSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &downloader{downloadDir: dir, cookiesFile: cookies}
-	if err := d.refreshCookieSnapshot(); err != nil {
+	if _, err := d.readCookieSnapshot(); err != nil {
 		t.Fatal(err)
 	}
+	first, clearFirst, err := d.isolatedCookieFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clearFirst()
 	if err := os.WriteFile(cookies, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -232,8 +237,11 @@ func TestOperationsUseIsolatedCookieSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "original" || snapshot == cookies {
+	if string(data) != "changed" || snapshot == cookies {
 		t.Fatalf("snapshot=%q content=%q", snapshot, data)
+	}
+	if original, err := os.ReadFile(first); err != nil || string(original) != "original" {
+		t.Fatalf("replacement changed an in-flight copy: %q, %v", original, err)
 	}
 }
 
@@ -319,7 +327,7 @@ func TestYouTube403RetriesWithoutCookies(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &downloader{bin: fake, downloadDir: dir, cookiesFile: cookies}
-	if err := d.refreshCookieSnapshot(); err != nil {
+	if _, err := d.readCookieSnapshot(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,7 +459,7 @@ exit $status
 				if err := os.WriteFile(d.cookiesFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := d.refreshCookieSnapshot(); err != nil {
+				if _, err := d.readCookieSnapshot(); err != nil {
 					t.Fatal(err)
 				}
 			}

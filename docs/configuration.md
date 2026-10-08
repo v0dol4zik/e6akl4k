@@ -25,7 +25,7 @@ chmod 600 .env
 | `ADMIN_IDS` | empty | Comma-separated immutable owner IDs. Owners manage dynamic admins; all admins can use moderation, `/perf`, and redacted `/log`. |
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory. |
 | `DATABASE_PATH` | `$XDG_DATA_HOME/musicbot.db` | SQLite database path. Falls back under `DOWNLOAD_DIR` when `XDG_DATA_HOME` is unset. |
-| `YTDLP_COOKIES_FILE` | `cookies.txt` | Netscape-format cookies file used through isolated temporary copies. |
+| `YTDLP_COOKIES_FILE` | `cookies.txt` | Netscape-format cookies file, read afresh for each isolated temporary copy. Replace it atomically; recreate the container after replacing a bind-mounted file. |
 | `YTDLP_SLEEP_REQUESTS` | `0` | Delay in seconds between `yt-dlp` HTTP requests, from 0 to 60. |
 | `YTDLP_CONCURRENT_FRAGMENTS` | `4` | Concurrent HLS/DASH fragments per `yt-dlp` process, from 1 to 16. |
 | `YTDLP_YOUTUBE_CLIENTS` | `tv_simply` | Comma-separated YouTube player clients that the download without cookies alternates with the `yt-dlp` default clients, for example `tv_simply,web` or `default,-web`; `default` keeps only the `yt-dlp` choice. See [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies). |
@@ -66,7 +66,7 @@ The zero request delay and four concurrent fragments favor download latency. Inc
 | `DISK_WARNING_BYTES` | `536870912` | Free-space threshold that triggers an administrator warning and the reserve every playlist batch keeps: a batch starts only while the free space, less the batches still downloading, stays above it after the batch's estimated size, and otherwise waits up to 15 minutes. `/healthz` fails below a quarter of it. |
 | `DISK_CHECK_INTERVAL` | `10m` | Disk monitoring interval. |
 | `STATUS_MESSAGE` | `true` | Keep a pinned status message in the error chat and announce failures and recoveries there. See [Status message](#status-message). |
-| `COOKIE_CHECK_INTERVAL` | `3h` | How often the status monitor checks the YouTube login with the configured cookies. `0` disables the scheduled check. |
+| `COOKIE_CHECK_INTERVAL` | `3h` | How often to verify authentication and a full audio download with the configured cookies, signed-in player clients and PO provider. Runs independently of `STATUS_MESSAGE`. `0` disables scheduled checks; manual results expire after three hours. |
 | `ERROR_DIGEST_INTERVAL` | `24h` | Window of the silent digest of expected errors. `0` disables the digest. |
 
 Completed tracks, user language, observed Telegram username-to-ID mappings, dismissed support notices, counters, pending Telegram updates, dynamic administrators, bans, audit records, bounded performance samples, and 90 days of download history are stored in SQLite. `/id @username` can resolve only users previously visible to the bot because the Bot API does not provide arbitrary username lookup. The post-download support notice is shown at most once per 24 hours until the user permanently hides it. IDs in `ADMIN_IDS` are immutable owners; only owners may use `/addadmin` and `/deladmin`. The old `inline-audio-cache.json` is imported automatically and renamed with a `.migrated` suffix.
@@ -96,7 +96,7 @@ With `STATUS_MESSAGE=true` the bot posts a status message to the error chat, pin
 - Telegram API (the local server when `TELEGRAM_API_URL` is set) with `getMe`;
 - SQLite;
 - free disk space: yellow below `DISK_WARNING_BYTES`, red below a quarter of it;
-- YouTube cookies: the result and age of the last login check (the same Watch Later check as the stale-cookie detector, scheduled every `COOKIE_CHECK_INTERVAL`) and the age of the cookies file;
+- YouTube cookies: authentication plus a full test audio download with cookies, and the age of the checked file. Green requires both checks to succeed for the current file within `COOKIE_CHECK_INTERVAL`. A failed login is red; blocked media, inconclusive checks, missing results, changed files and expired successes are yellow;
 - the Yandex relay, when `YANDEX_PROXY` is set, with a TCP connection to the proxy; the address is never shown;
 - the YouTube PO token server, when `YTDLP_POT_PROVIDER_URL` is set, with a TCP connection to it;
 - `yt-dlp`: the installed version and, once every six hours, the newest release on GitHub;
@@ -105,6 +105,8 @@ With `STATUS_MESSAGE=true` the bot posts a status message to the error chat, pin
 The message also shows real and expected errors of the last 24 hours, the last real error with its ID, the last spike, the download queue, the version, the uptime, and the update time. It is edited as soon as something changes and at least every ten minutes. When a component turns red, a loud 🔴 post goes out; a yellow component gets a silent 🟡 post and a recovery a silent 🟢 post with the duration of the problem (loud if the failure itself could not be posted). Component states and the message ID are kept in SQLite, so a restart neither repeats alerts nor posts a second message. If the message is deleted, the next edit posts and pins a new one.
 
 The bot needs to post, edit, and pin messages in the error chat. In a channel that means the "post messages", "edit messages of others", and pin rights; if pinning fails, administrators get one private message about it.
+
+Cookie checks share one gate across the schedule, failure detector and administrator check button. They use download capacity and a disk reservation, with a two-minute deadline and an 8 MiB audio limit; temporary cookies and audio are deleted. The check parses an authenticated private Watch Later response and downloads a fixed public test track without cache or anonymous retries. Playlist contents and signed media URLs are never logged or persisted. Results are stored atomically with a file SHA-256 and checker version: replacing cookies invalidates the result, and a new check starts within a minute when scheduling is enabled. Legacy login-only successes are rechecked on startup. A passing test confirms that track at that time; it does not guarantee that every YouTube video is accessible.
 
 ## Files over 50 MB
 

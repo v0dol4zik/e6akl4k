@@ -103,8 +103,8 @@ type app struct {
 	errorReports  *errorReporter
 	recognizer    musicRecognizer
 	voiceFiles    tgbotapi.HTTPClient
-	// cookieLoginCheck confirms a suspected cookie failure before administrators are alerted.
-	cookieLoginCheck func(context.Context) (cookieLogin, string)
+	// cookieLoginCheck validates both authentication and media with one immutable cookie snapshot.
+	cookieLoginCheck func(context.Context) cookieCheckResult
 
 	mu           sync.Mutex
 	userLang     map[int64]string

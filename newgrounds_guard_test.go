@@ -187,7 +187,7 @@ printf 'ok'
 				t.Fatal(err)
 			}
 			var paths []string
-			d := &downloader{bin: bin, downloadDir: dir, cookiesFile: base, cookieSnapshot: original, newgroundsHTTPClient: newgroundsFixtureClient(t, &paths, "")}
+			d := &downloader{bin: bin, downloadDir: dir, cookiesFile: base, newgroundsHTTPClient: newgroundsFixtureClient(t, &paths, "")}
 			args := []string{"--", newgroundsOrigin + "/audio/listen/549479"}
 			var out []byte
 			var err error

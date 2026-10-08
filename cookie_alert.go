@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
+	"html"
 	"log"
 	"strconv"
 	"strings"
@@ -22,13 +22,12 @@ const (
 	// this many HTTP 403 failures from YouTube inside the window count as a cookie failure.
 	cookieForbiddenWindow    = 10 * time.Minute
 	cookieForbiddenThreshold = 3
-	// cookieCheckCallback runs a fresh download trace against cookieCheckURL.
+	// cookieCheckCallback validates the configured cookies and updates their status.
 	cookieCheckCallback = "cookiecheck"
 	cookieCheckURL      = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-	// cookieLoginTimeout bounds the login check that has to confirm a suspected cookie failure
-	// before administrators are alerted.
-	cookieLoginTimeout = time.Minute
-	// cookieLoginTrust is how long a successful login check suppresses further checks: YouTube keeps
+	// cookieLoginTimeout bounds authentication, download-slot waiting and the full media check.
+	cookieLoginTimeout = 2 * time.Minute
+	// cookieLoginTrust is how long a successful full check suppresses further checks: YouTube keeps
 	// sending the occasional 403 to working sessions, and each one should not cost a new request.
 	cookieLoginTrust = 30 * time.Minute
 )
@@ -41,6 +40,8 @@ const (
 	cookieLoginUnknown cookieLogin = iota
 	cookieLoginValid
 	cookieLoginInvalid
+	// cookieLoginDegraded means authentication works, but the signed-in media probe was blocked.
+	cookieLoginDegraded
 )
 
 func (l cookieLogin) String() string {
@@ -49,6 +50,8 @@ func (l cookieLogin) String() string {
 		return "ok"
 	case cookieLoginInvalid:
 		return "failed"
+	case cookieLoginDegraded:
+		return "degraded"
 	}
 	return "unknown"
 }
@@ -57,14 +60,15 @@ func (l cookieLogin) String() string {
 // sliding window of recent YouTube 403 failures and a cached copy of the persisted
 // last-alert time so ordinary failures never touch the database.
 type cookieAlertState struct {
-	mu           sync.Mutex
-	forbidden    []time.Time
-	lastAlert    time.Time
-	loaded       bool
-	checking     bool
-	trustedUntil time.Time
-	checks       sync.WaitGroup
-	now          func() time.Time
+	mu                 sync.Mutex
+	forbidden          []time.Time
+	lastAlert          time.Time
+	loaded             bool
+	checking           bool
+	trustedUntil       time.Time
+	trustedFingerprint string
+	checks             sync.WaitGroup
+	now                func() time.Time
 }
 
 func (s *cookieAlertState) clock() time.Time {
@@ -124,11 +128,14 @@ func (s *cookieAlertState) coolingDownLocked(ctx context.Context, state *store, 
 // startLoginCheck reports whether a login check should run now: no other check is running, no
 // recent check found the cookies working, and the alert it may lead to is outside the cooldown.
 // Every true result must be followed by finishLoginCheck and, once the alert is handled, checks.Done.
-func (s *cookieAlertState) startLoginCheck(ctx context.Context, state *store) bool {
+func (s *cookieAlertState) startLoginCheck(ctx context.Context, state *store, fingerprint string, force bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.clock()
-	if s.checking || now.Before(s.trustedUntil) || s.coolingDownLocked(ctx, state, now) {
+	if fingerprint != s.trustedFingerprint {
+		s.trustedUntil = time.Time{}
+	}
+	if s.checking || !force && (now.Before(s.trustedUntil) || s.coolingDownLocked(ctx, state, now)) {
 		return false
 	}
 	s.checking = true
@@ -136,19 +143,12 @@ func (s *cookieAlertState) startLoginCheck(ctx context.Context, state *store) bo
 	return true
 }
 
-func (s *cookieAlertState) finishLoginCheck(result cookieLogin) {
+func (s *cookieAlertState) finishLoginCheck(result cookieLogin, fingerprint string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checking = false
-	if result == cookieLoginValid {
-		s.trustedUntil = s.clock().Add(cookieLoginTrust)
-	}
-}
-
-// noteLoginResult lets a scheduled login check suppress checks the way a suspected failure's does.
-func (s *cookieAlertState) noteLoginResult(result cookieLogin) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.trustedUntil = time.Time{}
+	s.trustedFingerprint = fingerprint
 	if result == cookieLoginValid {
 		s.trustedUntil = s.clock().Add(cookieLoginTrust)
 	}
@@ -220,16 +220,21 @@ func (a *app) suspectStaleCookies(alertKey string) {
 	if a.store != nil {
 		a.store.increment(a.ctx, "youtube_cookie_errors")
 	}
-	if a.cookieLoginCheck == nil || !a.cookieAlerts.startLoginCheck(a.ctx, a.store) {
+	fingerprint := ""
+	if a.downloader != nil {
+		if snapshot, err := a.downloader.readCookieSnapshot(); err == nil {
+			fingerprint = snapshot.fingerprint
+		}
+	}
+	if a.cookieLoginCheck == nil || !a.cookieAlerts.startLoginCheck(a.ctx, a.store, fingerprint, false) {
 		return
 	}
 	go func() {
 		defer a.cookieAlerts.checks.Done()
-		result, detail := a.cookieLoginCheck(a.ctx)
-		a.cookieAlerts.finishLoginCheck(result)
+		check := a.executeCookieCheck(a.ctx)
+		result, detail := check.Login, check.Detail
 		if a.store != nil {
 			a.store.increment(a.ctx, "youtube_cookie_login_"+result.String())
-			a.recordCookieLogin(a.ctx, result, detail)
 		}
 		if result != cookieLoginInvalid {
 			log.Printf("Проверка входа YouTube по cookies: %s (%s), уведомление администраторам не отправлено", result, detail)
@@ -246,91 +251,16 @@ func (a *app) suspectStaleCookies(alertKey string) {
 	}()
 }
 
-// checkCookieLogin opens the account's Watch Later playlist with an isolated copy of the cookies.
-// YouTube serves that playlist only to a signed-in session, so it tells dead cookies apart from the
-// occasional 403 that YouTube sends to working ones.
-func (d *downloader) checkCookieLogin(ctx context.Context) (cookieLogin, string) {
-	cookies, cleanup, err := d.isolatedCookieFile()
-	if err != nil {
-		return cookieLoginUnknown, err.Error()
-	}
-	defer cleanup()
-	if cookies == "" {
-		return cookieLoginInvalid, "no cookies file is configured"
-	}
-	ctx, cancel := context.WithTimeout(ctx, cookieLoginTimeout)
-	defer cancel()
-	_, stderr, err := d.runOnce(ctx, []string{
-		"--ignore-config", "--color", "never", "--no-progress",
-		"--flat-playlist", "--playlist-end", "1", "--print", "id",
-		"--cookies", cookies, "--", ":ytwatchlater",
-	})
-	return classifyCookieLogin(stderr, err)
-}
-
-// cookieLoginMarkers are yt-dlp messages that mean YouTube did not treat the request as signed in.
-// For an anonymous visitor Watch Later "does not exist".
-var cookieLoginMarkers = []string{
-	"playlist does not exist",
-	"sign in",
-	"login required",
-	"log in",
-	"authentication",
-}
-
-// classifyCookieLogin turns the result of the Watch Later request into a login verdict. Anything
-// that does not name the login, such as a network error or a timeout, stays unknown and never alerts.
-func classifyCookieLogin(stderr string, err error) (cookieLogin, string) {
-	low := strings.ToLower(stderr)
-	if strings.Contains(low, "cookies are no longer valid") {
-		return cookieLoginInvalid, "cookies are no longer valid"
-	}
-	if err == nil {
-		return cookieLoginValid, "watch later opened"
-	}
-	detail := err.Error()
-	if line := lastYtdlpError(stderr); line != "" {
-		detail = line
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return cookieLoginUnknown, detail
-	}
-	for _, marker := range cookieLoginMarkers {
-		if strings.Contains(low, marker) {
-			return cookieLoginInvalid, detail
-		}
-	}
-	return cookieLoginUnknown, detail
-}
-
-func lastYtdlpError(stderr string) string {
-	lines := strings.Split(strings.TrimSpace(stderr), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if line := strings.TrimSpace(lines[i]); strings.HasPrefix(line, "ERROR:") {
-			if len(line) > 300 {
-				line = line[:300] + "…"
-			}
-			return line
-		}
-	}
-	return ""
-}
-
-// cookieStatus reports "suspect" while the persisted alert time is inside the
-// cooldown window and "ok" otherwise; it is exposed through /healthz.
+// cookieStatus exposes the same fresh, file-bound verdict as the status message. It does not
+// make the service unhealthy: ordinary downloads can still work without authenticated cookies.
 func (a *app) cookieStatus(ctx context.Context) string {
-	var last time.Time
-	if a.store != nil {
-		last = a.store.cookieAlertTime(ctx)
-	} else {
-		a.cookieAlerts.mu.Lock()
-		last = a.cookieAlerts.lastAlert
-		a.cookieAlerts.mu.Unlock()
+	switch a.cookieStatusComponent(ctx, a.cookieAlerts.clock(), defaultLang).Level {
+	case statusOK:
+		return "ok"
+	case statusFail:
+		return "failed"
 	}
-	if !last.IsZero() && a.cookieAlerts.clock().Sub(last) < cookieAlertCooldown {
-		return "suspect"
-	}
-	return "ok"
+	return "unknown"
 }
 
 func cookieCheckKeyboard(lang string) *tgbotapi.InlineKeyboardMarkup {
@@ -340,15 +270,36 @@ func cookieCheckKeyboard(lang string) *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
-// handleCookieCheck runs the /log fresh flow against a fixed YouTube URL for an
-// administrator who pressed the button on the cookie alert. Non-admins are ignored.
+// handleCookieCheck runs the same strict check as the monitor, without anonymous/cache fallback.
 func (a *app) handleCookieCheck(callback *tgbotapi.CallbackQuery) {
-	if !a.isAdmin(callback.From.ID) || a.downloader == nil {
+	if !a.isAdmin(callback.From.ID) || a.downloader == nil || a.cookieLoginCheck == nil {
 		return
 	}
 	chatID := callback.From.ID
 	if callback.Message != nil && callback.Message.Chat != nil {
 		chatID = callback.Message.Chat.ID
 	}
-	a.runDownloadTrace(callback.From.ID, chatID, cookieCheckURL, true)
+	lang := a.langOrDefault(callback.From.ID)
+	if !a.beginUserDownload(callback.From.ID) {
+		a.sendText(chatID, tr("user_download_active", lang), "", nil)
+		return
+	}
+	defer a.finishUserDownload(callback.From.ID)
+	if !a.cookieAlerts.startLoginCheck(a.ctx, a.store, "", true) {
+		a.sendText(chatID, tr("cookie_check_busy", lang), "", nil)
+		return
+	}
+	defer a.cookieAlerts.checks.Done()
+	if a.store != nil {
+		a.store.audit(a.ctx, callback.From.ID, "cookie_check", callback.From.ID, "strict=true")
+	}
+	status := a.sendText(chatID, tr("cookie_check_running", lang), "", nil)
+	a.executeCookieCheck(a.ctx)
+	component := a.cookieStatusComponent(a.ctx, a.cookieAlerts.clock(), lang)
+	text := component.Level.icon() + " <b>" + html.EscapeString(component.Label) + "</b>: " + component.Detail
+	if status != nil {
+		a.editStatusMessageFinal(status, text)
+	} else {
+		a.sendText(chatID, text, "HTML", nil)
+	}
 }

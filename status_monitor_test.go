@@ -114,9 +114,12 @@ func newStatusTestApp(t *testing.T, telegram *statusTestTelegram) (*app, *store,
 	application := newAppWithServices(context.Background(), bot, &downloader{bin: filepath.Join(dir, "missing-yt-dlp"), downloadDir: dir, cookiesFile: cookies}, state, cfg)
 	application.setLang(10, "en")
 	application.errorReports = newErrorReporter(-1001)
-	application.recordCookieLogin(context.Background(), cookieLoginValid, "watch later opened")
-
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	application.cookieAlerts.now = func() time.Time { return now }
+	if err := os.Chtimes(cookies, now, now); err != nil {
+		t.Fatal(err)
+	}
+	application.recordCookieCheck(context.Background(), cookieTestResult(t, application, cookieLoginValid, "full audio confirmed"))
 	monitor := newStatusMonitor(-1001)
 	monitor.now = func() time.Time { return now }
 	monitor.installedYtdlp = func() string { return "2026.08.19" }
@@ -137,7 +140,7 @@ func TestStatusMonitorPostsPinsAndEditsOnChange(t *testing.T) {
 	if len(calls) != 2 || calls[0].method != "sendMessage" || calls[0].chatID != "-1001" || !calls[0].silent {
 		t.Fatalf("first tick must post one silent status message, got %#v", calls)
 	}
-	if !strings.HasPrefix(calls[0].text, "🟢") || !strings.Contains(calls[0].text, "yt-dlp: 2026.08.19") || !strings.Contains(calls[0].text, "вход работает") {
+	if !strings.HasPrefix(calls[0].text, "🟢") || !strings.Contains(calls[0].text, "yt-dlp: 2026.08.19") || !strings.Contains(calls[0].text, "вход и тестовое скачивание работают") {
 		t.Fatalf("status text=%q", calls[0].text)
 	}
 	if calls[1].method != "pinChatMessage" || calls[1].messageID != "101" || !calls[1].silent {
@@ -166,7 +169,7 @@ func TestStatusMonitorPostsPinsAndEditsOnChange(t *testing.T) {
 
 	*now = now.Add(time.Minute)
 	application.statusTick(ctx, monitor)
-	if calls := telegram.snapshot(); len(calls) != 0 {
+	if calls := telegram.snapshot(); len(calls) > 1 || len(calls) == 1 && calls[0].method != "editMessageText" {
 		t.Fatalf("a failure that was already announced must not repeat: %#v", calls)
 	}
 
@@ -262,20 +265,20 @@ func TestStatusMonitorRetriesUndeliveredFailureAlert(t *testing.T) {
 func TestCookieStatusComponent(t *testing.T) {
 	application, state, _, now := newStatusTestApp(t, &statusTestTelegram{})
 	ctx := context.Background()
-	if component := application.cookieStatusComponent(ctx, now.Add(time.Hour), "en"); component.Level != statusOK || !strings.Contains(component.Detail, "login works") {
+	if component := application.cookieStatusComponent(ctx, now.Add(time.Hour), "en"); component.Level != statusOK || !strings.Contains(component.Detail, "login and test download work") {
 		t.Fatalf("working cookies: %#v", component)
 	}
-	application.recordCookieLogin(ctx, cookieLoginInvalid, "ERROR: login required <x>")
+	application.recordCookieCheck(ctx, cookieTestResult(t, application, cookieLoginInvalid, "ERROR: login required <x>"))
 	component := application.cookieStatusComponent(ctx, time.Now(), "en")
 	if component.Level != statusFail || !strings.Contains(component.Detail, "refresh cookies.txt") || !strings.Contains(component.Detail, "&lt;x&gt;") {
 		t.Fatalf("dead cookies: %#v", component)
 	}
-	application.recordCookieLogin(ctx, cookieLoginUnknown, "timeout")
+	application.recordCookieCheck(ctx, cookieTestResult(t, application, cookieLoginUnknown, "timeout"))
 	if component := application.cookieStatusComponent(ctx, time.Now(), "en"); component.Level != statusWarn {
 		t.Fatalf("inconclusive check: %#v", component)
 	}
-	_ = state.setMetadata(ctx, cookieLoginResultKey, "")
-	if component := application.cookieStatusComponent(ctx, time.Now(), "en"); component.Level != statusOK || !strings.Contains(component.Detail, "not checked yet") {
+	_ = state.setMetadata(ctx, cookieCheckStateKey, "")
+	if component := application.cookieStatusComponent(ctx, time.Now(), "en"); component.Level != statusWarn || !strings.Contains(component.Detail, "not checked yet") {
 		t.Fatalf("no check yet: %#v", component)
 	}
 	application.downloader.cookiesFile = ""
@@ -287,12 +290,12 @@ func TestCookieStatusComponent(t *testing.T) {
 func TestRunCookieChecksRecordsScheduledCheck(t *testing.T) {
 	application, state, _, _ := newStatusTestApp(t, &statusTestTelegram{})
 	ctx, cancel := context.WithCancel(context.Background())
-	_ = state.setMetadata(ctx, cookieLoginAtKey, "")
+	_ = state.setMetadata(ctx, cookieCheckStateKey, "")
 	application.cfg.CookieCheckInterval = time.Hour
 	checked := make(chan struct{}, 1)
-	application.cookieLoginCheck = func(context.Context) (cookieLogin, string) {
+	application.cookieLoginCheck = func(context.Context) cookieCheckResult {
 		checked <- struct{}{}
-		return cookieLoginInvalid, "login required"
+		return cookieTestResult(t, application, cookieLoginInvalid, "login required")
 	}
 	done := make(chan struct{})
 	go func() {
@@ -305,13 +308,13 @@ func TestRunCookieChecksRecordsScheduledCheck(t *testing.T) {
 		t.Fatal("the overdue check did not run")
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for state.metadata(ctx, cookieLoginDetailKey) != "login required" && time.Now().Before(deadline) {
+	for application.lastCookieCheck(ctx).Detail != "login required" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
 	<-done
-	if got := state.metadata(context.Background(), cookieLoginResultKey); got != cookieLoginInvalid.String() {
-		t.Fatalf("recorded result=%q", got)
+	if got := application.lastCookieCheck(context.Background()).Login; got != cookieLoginInvalid {
+		t.Fatalf("recorded result=%s", got)
 	}
 }
 

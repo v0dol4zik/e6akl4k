@@ -40,7 +40,7 @@ Heavy downloads, quick lookups, archive creation, and Telegram update handling h
 | `error_report_store.go` | SQLite storage of error reports for the buttons, the digest, and the status message. |
 | `error_report_actions.go` | Administrator buttons under a report: retry, fixed-and-notify, and a developer copy. |
 | `error_digest.go` | Silent periodic digest of expected errors. |
-| `status_monitor.go` | Pinned status message, component health checks, failure and recovery alerts, and the scheduled cookie login check. |
+| `status_monitor.go`, `cookie_check.go` | Pinned status, component alerts, and serialized authentication/full-media cookie checks with atomic file-bound results. |
 | `buildinfo.go` | Bot commit stamped by `git archive` and the cached `yt-dlp` version. |
 | `export.go` | `/export` and preview-button tracklists as "Artist - Title" lines or a `.txt` file. |
 | `export_sources.go` | Deezer and Yandex Music public API tracklists and single tracks of other streaming services. |
@@ -79,7 +79,7 @@ An optional private cache channel lets inline mode obtain a reusable `file_id` b
 
 Newgrounds links accept only the bare or `www.newgrounds.com` host and `/audio/listen/<numeric-id>` path, with no credentials or explicit port. HTTP, scheme-free, trailing-slash, query, and fragment variants become a canonical HTTPS audio-page URL. Artist metadata falls back to the Newgrounds uploader. User profiles, games, movies, collections, and CDN media URLs are outside this integration. A temporary embedded `yt-dlp` plugin reads `og:audio` and the modern player duration; media and thumbnail URLs are restricted to the HTTPS Newgrounds audio/artwork CDNs. An NG Guard 403 gets a bounded SHA-256/Argon2id browser proof through fixed HTTPS endpoints without redirects or remote code execution, followed by one retry with temporary cookies. Neither the plugin nor guard cookies persist. URL detection reads complete subdomains and rejects matches embedded in another hostname or credentials before host validation.
 
-Every `yt-dlp` process receives an isolated temporary copy of `cookies.txt`. The source file remains read-only inside the container.
+Every `yt-dlp` process receives an isolated temporary copy of the current `cookies.txt`, read afresh when the process is prepared. The source file remains read-only inside the container; replacing it does not affect copies already in use. Cookie status requires both a private authenticated Watch Later response and a full signed-in test audio download without anonymous or cache fallback. One metadata value stores the result, timestamp, file SHA-256 and checker version atomically; changed files, legacy results and expired successes cannot produce green status.
 
 ## Delivery constraints
 
