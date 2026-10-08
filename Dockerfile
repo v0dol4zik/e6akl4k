@@ -3,7 +3,7 @@ FROM golang:1.26.5-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go shazam_recognize.py ./
+COPY *.go shazam_recognize.py newgrounds_extractor.py ./
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/musicbot .
 
 FROM debian:bookworm-slim

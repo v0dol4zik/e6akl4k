@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -268,8 +270,15 @@ func detectURL(text string) string {
 func detectURLs(text string, max int) []string {
 	var urls []string
 	seen := make(map[string]struct{})
-	for _, match := range urlPattern.FindAllString(text, -1) {
-		normalized := normalizeDetectedURL(match)
+	for _, match := range urlPattern.FindAllStringIndex(text, -1) {
+		// Do not turn a suffix of another hostname, scheme or credential into a link.
+		if match[0] > 0 {
+			previous, _ := utf8.DecodeLastRuneInString(text[:match[0]])
+			if unicode.IsLetter(previous) || unicode.IsDigit(previous) || strings.ContainsRune("._-/@\\%", previous) {
+				continue
+			}
+		}
+		normalized := normalizeDetectedURL(text[match[0]:match[1]])
 		if normalized == "" {
 			continue
 		}
@@ -294,6 +303,15 @@ func normalizeDetectedURL(rawURL string) string {
 	if err != nil || parsed.User != nil || !allowedHost(parsed.Hostname()) {
 		return ""
 	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if host == "newgrounds.com" || host == "www.newgrounds.com" {
+		// Accept only public audio pages; canonical links also share the URL cache.
+		match := newgroundsAudioPathPattern.FindStringSubmatch(parsed.EscapedPath())
+		if parsed.Port() != "" || len(match) != 2 {
+			return ""
+		}
+		return "https://www.newgrounds.com/audio/listen/" + match[1]
+	}
 	if id := youtubeSampleID(parsed); id != "" {
 		return "https://www.youtube.com/watch?v=" + id
 	}
@@ -316,6 +334,9 @@ func youtubeSampleID(parsed *url.URL) string {
 
 func allowedHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "newgrounds.com" || host == "www.newgrounds.com" {
+		return true
+	}
 	for _, domain := range []string{"youtube.com", "youtu.be", "spotify.com", "soundcloud.com", "music.apple.com", "deezer.com", "tidal.com", "bandcamp.com", "vk.com", "ok.ru", "mixcloud.com", "audiomack.com"} {
 		if host == domain || strings.HasSuffix(host, "."+domain) {
 			return true

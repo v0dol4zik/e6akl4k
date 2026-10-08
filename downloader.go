@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -247,6 +248,8 @@ type downloader struct {
 	youtubeDefaultFirst atomic.Bool
 	// onCookieRetry, when set, is called every time a YouTube 403 with cookies is retried without them.
 	onCookieRetry func()
+	// newgroundsHTTPClient is optional; browser checks otherwise use the resolver transport.
+	newgroundsHTTPClient *http.Client
 }
 
 type downloadProgress func(completed, total int)
@@ -641,15 +644,30 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 }
 
 func (d *downloader) runWithProgress(ctx context.Context, args []string, manifest string, progress downloadProgress, total int) ([]byte, string, error) {
+	args, clearExtractor, err := d.newgroundsExtractorArgs(args)
+	if err != nil {
+		return nil, "", err
+	}
+	defer clearExtractor()
 	cookies, cleanup, err := d.isolatedCookieFile()
 	if err != nil {
 		return nil, "", err
 	}
 	defer cleanup()
-	if cookies == "" {
-		return d.runWithProgressOnce(ctx, args, manifest, progress, total)
+	firstArgs := args
+	if cookies != "" {
+		firstArgs = argsBeforeSeparator(args, "--cookies", cookies)
 	}
-	return d.runWithProgressOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies), manifest, progress, total)
+	stdout, stderr, err := d.runWithProgressOnce(ctx, firstArgs, manifest, progress, total)
+	if err != nil && ctx.Err() == nil && newgroundsTarget(args) != "" && isForbiddenFailure(stderr) {
+		retryArgs, clearGuardCookies, guardErr := d.newgroundsGuardArgs(ctx, args, cookies)
+		if guardErr == nil {
+			defer clearGuardCookies()
+			return d.runWithProgressOnce(ctx, retryArgs, manifest, progress, total)
+		}
+		log.Printf("Newgrounds browser check failed: %v", guardErr)
+	}
+	return stdout, stderr, err
 }
 
 // downloadYouTube downloads without cookies first. Without a PO token provider, YouTube answers
@@ -902,16 +920,30 @@ func argsHaveYouTubeTarget(args []string) bool {
 }
 
 func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, error) {
+	args, clearExtractor, err := d.newgroundsExtractorArgs(args)
+	if err != nil {
+		return nil, "", err
+	}
+	defer clearExtractor()
 	cookies, cleanup, err := d.isolatedCookieFile()
 	if err != nil {
 		return nil, "", err
 	}
 	defer cleanup()
-	if cookies == "" {
-		return d.runOnce(ctx, args)
+	firstArgs := args
+	if cookies != "" {
+		firstArgs = argsBeforeSeparator(args, "--cookies", cookies)
 	}
-	stdout, stderr, err := d.runOnce(ctx, argsBeforeSeparator(args, "--cookies", cookies))
-	if !cookieForbiddenRetry(args, stderr, err, ctx) {
+	stdout, stderr, err := d.runOnce(ctx, firstArgs)
+	if err != nil && ctx.Err() == nil && newgroundsTarget(args) != "" && isForbiddenFailure(stderr) {
+		retryArgs, clearGuardCookies, guardErr := d.newgroundsGuardArgs(ctx, args, cookies)
+		if guardErr == nil {
+			defer clearGuardCookies()
+			return d.runOnce(ctx, retryArgs)
+		}
+		log.Printf("Newgrounds browser check failed: %v", guardErr)
+	}
+	if cookies == "" || !cookieForbiddenRetry(args, stderr, err, ctx) {
 		return stdout, stderr, err
 	}
 	log.Printf("yt-dlp вернул 403 с cookies, повторяю без cookies")

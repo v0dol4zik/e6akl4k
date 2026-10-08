@@ -8,6 +8,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ### Added
 
+- Added direct Newgrounds audio-track downloads from `/audio/listen/<id>` links with the existing format selector, metadata, inline results, and file cache. Current audio-page markup and bounded NG Guard browser proofs are supported through temporary extractor/cookie files. Link variants are canonicalized to HTTPS; unsupported Newgrounds pages, lookalike hosts, credentials, and explicit ports are rejected.
 - Added Shazam music recognition for private voice messages: short recordings identify the song, confident YouTube matches are delivered as full MP3 320 tracks, and uncertain versions are offered for selection. Recognition has bounded concurrency, input size, deadlines and retries, cleans up temporary audio, and ships with Python dependencies in Docker without an API key. Local Bot API recordings use a read-only shared volume, with file reads confined to this bot's directory.
 - Added persistent dynamic administrators, bans, owner-only role management, moderation audit, `/perf`, and redacted `/log [fresh] <url>` diagnostics.
 - Added confidence-ranked search with alternate-version penalties and exact/similar/version labels.

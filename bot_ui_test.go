@@ -42,6 +42,31 @@ func TestDetectURLs(t *testing.T) {
 			max:  5,
 			want: []string{"https://youtu.be/ok"},
 		},
+		"newgrounds canonical links are deduplicated": {
+			text: "https://www.newgrounds.com/audio/listen/549479 http://newgrounds.com/audio/listen/549479/?ref=share#player NEWGROUNDS.COM/audio/listen/549479",
+			max:  5,
+			want: []string{"https://www.newgrounds.com/audio/listen/549479"},
+		},
+		"newgrounds in text with other sources": {
+			text: "трек (newgrounds.com/audio/listen/549479), ещё https://youtu.be/ok",
+			max:  5,
+			want: []string{"https://www.newgrounds.com/audio/listen/549479", "https://youtu.be/ok"},
+		},
+		"newgrounds lookalike hosts and credentials are rejected": {
+			text: "https://notnewgrounds.com/audio/listen/549479 https://evil.newgrounds.com/audio/listen/549479 https://newgrounds.com.evil/audio/listen/549479 https://evil@www.newgrounds.com/audio/listen/549479 https://newgrounds.com@127.0.0.1/audio/listen/549479",
+			max:  5,
+			want: nil,
+		},
+		"newgrounds only supports audio pages": {
+			text: "https://www.newgrounds.com/portal/view/1 https://newgrounds.com/audio/search/title/music https://burn7.newgrounds.com/audio https://newgrounds.com/audio/listen/nope https://newgrounds.com:8443/audio/listen/549479 ftp://newgrounds.com/audio/listen/549479",
+			max:  5,
+			want: nil,
+		},
+		"supported subdomain is preserved": {
+			text: "https://open.spotify.com/track/track https://artist.bandcamp.com/track/song",
+			max:  5,
+			want: []string{"https://open.spotify.com/track/track", "https://artist.bandcamp.com/track/song"},
+		},
 		"no links": {
 			text: "просто текст",
 			max:  5,
@@ -57,6 +82,40 @@ func TestDetectURLs(t *testing.T) {
 	}
 	if got := detectURL("see https://youtu.be/a and https://youtu.be/b"); got != "https://youtu.be/a" {
 		t.Fatalf("detectURL must return the first link, got %q", got)
+	}
+}
+
+func TestNormalizeNewgroundsAudioURL(t *testing.T) {
+	const canonical = "https://www.newgrounds.com/audio/listen/549479"
+	for _, input := range []string{
+		canonical,
+		"newgrounds.com/audio/listen/549479",
+		"www.newgrounds.com/audio/listen/549479/",
+		"HTTP://WWW.NEWGROUNDS.COM/audio/listen/549479?ref=share#player",
+	} {
+		if got := normalizeDetectedURL(input); got != canonical {
+			t.Errorf("normalizeDetectedURL(%q) = %q, want %q", input, got, canonical)
+		}
+	}
+	for _, input := range []string{
+		"https://newgrounds.com",
+		"https://newgrounds.com/audio/listen/",
+		"https://newgrounds.com/audio/listen/549479/extra",
+		"https://newgrounds.com/audio/listen/549479//",
+		"https://newgrounds.com/audio/listen/../549479",
+		"https://newgrounds.com/audio/listen/549479%2f..",
+		"https://newgrounds.com/audio/listen/%35%34%39%34%37%39",
+		"https://newgrounds.com:443/audio/listen/549479",
+		"https://user:password@newgrounds.com/audio/listen/549479",
+		"https://newgrounds.com@127.0.0.1/audio/listen/549479",
+		"https://newgrounds.com.evil/audio/listen/549479",
+		"https://burn7.newgrounds.com/audio/listen/549479",
+		"https://newgrounds.com/portal/view/549479",
+		"https://ngfiles.com/audio/549479.mp3",
+	} {
+		if got := normalizeDetectedURL(input); got != "" {
+			t.Errorf("normalizeDetectedURL(%q) accepted unsupported URL %q", input, got)
+		}
 	}
 }
 

@@ -168,6 +168,9 @@ func TestInlineHelpers(t *testing.T) {
 	if got := inlineCacheKey("ignored", "soundcloud", "123"); got != "soundcloud:123:mp3:320" {
 		t.Fatalf("unexpected SoundCloud cache key: %q", got)
 	}
+	if got := inlineCacheKey("ignored", "Newgrounds:audio", "549479"); got != "newgrounds:549479:mp3:320" || got != inlineCacheKey("ignored", "Newgrounds", "549479") {
+		t.Fatalf("Newgrounds extractor cache keys differ: %q", got)
+	}
 	if got := youtubeThumbnail("dQw4w9WgXcQ"); got != "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg" {
 		t.Fatalf("thumbnail = %q", got)
 	}

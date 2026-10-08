@@ -46,8 +46,9 @@ const (
 )
 
 var (
-	urlPattern = regexp.MustCompile(`(?i)(https?://)?(www\.)?(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com)[\w/\-?=&%.#+@!~]*`)
-	unsafeName = regexp.MustCompile(`[<>:"/\\|?*]`)
+	urlPattern                 = regexp.MustCompile(`(?i)(https?://)?([\w-]+\.)*(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com|newgrounds\.com)[\w/\-?=&%.#+@!~:]*`)
+	newgroundsAudioPathPattern = regexp.MustCompile(`^/audio/listen/([0-9]+)/?$`)
+	unsafeName                 = regexp.MustCompile(`[<>:"/\\|?*]`)
 )
 
 type deliveryReport struct {

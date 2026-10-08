@@ -162,6 +162,12 @@ Set `SHAZAM_PYTHON=/path/to/shazam-venv/bin/python` in `.env`. Missing recogniti
 
 The cloud sample is downloaded only from the configured Telegram server with a byte limit and no redirects. A local Bot API returns an absolute file path instead: Compose shares its working directory read-only, and the bot accepts only regular files inside its own token directory, with the same byte limit and protection against escaping symlinks. For a native local Bot API, set `TELEGRAM_FILE_DIR` to its working directory and grant the bot read access (the Compose image uses group 101). `ffmpeg` decodes at most 60 seconds locally to mono 16 kHz PCM; `shazamio` sends the resulting fingerprint to Shazam. Temporary recordings and WAV files are removed after recognition, including on errors. Recognition shares the bounded lookup queue and holds the per-user heavy-job slot through automatic MP3 delivery. It has a 90-second recognition/search deadline, a 45-second provider deadline, and at most two provider HTTP attempts. Recordings and recognition fingerprints are not persisted or included in error reports.
 
+## Newgrounds audio
+
+Send `https://www.newgrounds.com/audio/listen/<id>` for a public track. The bot downloads the original Newgrounds audio through the usual format, size-limit, cache, and inline workflows. Text searches still query YouTube. User pages, collections, games, and movies are not accepted as Newgrounds audio links.
+
+The binary embeds a small `yt-dlp` audio extractor for the current page layout. It is loaded only for Newgrounds in a private temporary plugin directory, removed after the process. An HTTP 403 with the NG Guard page gets one browser-proof attempt and one download retry, using an isolated temporary cookie file. No remote JavaScript is executed. Only fixed HTTPS Newgrounds endpoints are contacted; redirects are rejected and responses are limited to 64 KiB. The handshake takes at most 25 seconds and proof computation at most 10 seconds. SHA-256 and Argon2id proofs have difficulty and attempt limits; Argon2id is capped at 16 MiB, two iterations, and two lanes. No new environment variables or account credentials are required for public tracks.
+
 ## Inline mode
 
 1. Create a private Telegram channel.
@@ -171,4 +177,4 @@ The cloud sample is downloaded only from the configured Telegram server with a b
 5. Run `/setinlinefeedback` and set it to `100`. Without inline feedback, Telegram does not tell the bot which result was sent, so a track that is not cached yet stays a loading message.
 6. Restart the bot and type `@username song name` in any chat.
 
-Inline results show the track title, artist, duration, and YouTube thumbnail. A track already in the cache channel is sent as audio right away; any other track is sent as a loading message with a cancel button, and the bot turns that message into the audio once the MP3 320 is downloaded and cached. A pasted YouTube, SoundCloud, or other supported link becomes one result, and a music-service track link is searched on YouTube by its title. Playlists and albums are left to the bot chat, and the button above the results says why the list is empty.
+Inline results show the track title, artist, duration, and YouTube thumbnail. A track already in the cache channel is sent as audio right away; any other track is sent as a loading message with a cancel button, and the bot turns that message into the audio once the MP3 320 is downloaded and cached. A pasted YouTube, SoundCloud, Newgrounds, or other supported link becomes one result, and a music-service track link is searched on YouTube by its title. Playlists and albums are left to the bot chat, and the button above the results says why the list is empty.

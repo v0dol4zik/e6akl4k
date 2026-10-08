@@ -331,6 +331,9 @@ func sourceCacheKey(extractor, id, format, quality string) string {
 		return ""
 	}
 	extractor = strings.ToLower(extractor)
+	if extractor == "newgrounds:audio" {
+		extractor = "newgrounds"
+	}
 	if strings.Contains(extractor, "youtube") || extractor == "" {
 		extractor = "youtube"
 	}
