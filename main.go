@@ -1469,9 +1469,6 @@ func (a *app) guideText(key, lang string) string {
 		username = a.bot.Self.UserName
 	}
 	text := tr(key, lang, "username", html.EscapeString(username))
-	if key == "welcome" {
-		text += "\n\n" + tr("recognition_welcome", lang)
-	}
 	if key == "help" {
 		text += "\n\n" + tr("recognition_help", lang)
 		if a.cfg.LastfmAPIKey != "" {
