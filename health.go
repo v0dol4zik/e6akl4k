@@ -119,6 +119,10 @@ func observabilityHandler(a *app) http.Handler {
 				prometheusLabel(stage.Stage), prometheusLabel(stage.Source), prometheusLabel(stage.Mode), float64(stage.OK)/float64(max(stage.Count, 1)),
 				prometheusLabel(stage.Stage), prometheusLabel(stage.Source), prometheusLabel(stage.Mode), stage.P95.Seconds())
 		}
+		for _, stage := range snapshot.variantStages {
+			labels := fmt.Sprintf("stage=\"%s\",source=\"%s\",mode=\"%s\",format=\"%s\",quality=\"%s\"", prometheusLabel(stage.Stage), prometheusLabel(stage.Source), prometheusLabel(stage.Mode), prometheusLabel(stage.Format), prometheusLabel(stage.Quality))
+			_, _ = fmt.Fprintf(w, "musicbot_media_variant_samples{%s} %d\nmusicbot_media_variant_success_p95_seconds{%s} %.6f\nmusicbot_media_variant_failure_p95_seconds{%s} %.6f\n", labels, stage.Count, labels, stage.P95.Seconds(), labels, stage.FailedP95.Seconds())
+		}
 		_, _ = fmt.Fprint(w, "# HELP musicbot_stage_seconds stage latency quantiles over the last hour\n# TYPE musicbot_stage_seconds gauge\n# HELP musicbot_stage_ok_ratio share of successful stage samples over the last hour\n# TYPE musicbot_stage_ok_ratio gauge\n")
 		for _, stage := range snapshot.stages {
 			stageLabel, sourceLabel := prometheusLabel(stage.Stage), prometheusLabel(stage.Source)
@@ -146,6 +150,7 @@ type metricsSnapshot struct {
 	counterNames  []string
 	stages        []stagePerformance
 	modeStages    []stagePerformance
+	variantStages []stagePerformance
 	cacheHitRatio float64
 }
 
@@ -209,7 +214,8 @@ func computeMetricsSnapshot(ctx context.Context, state *store, since time.Time) 
 	}
 	sort.Strings(snapshot.counterNames)
 	snapshot.stages = aggregateStagePerformance(samples, false)
-	snapshot.modeStages = aggregateStagePerformance(samples, true)
+	snapshot.modeStages = aggregateMediaPerformance(samples, true, false)
+	snapshot.variantStages = aggregateStagePerformance(samples, true)
 	if deliveries := stats.CacheHits + stats.DownloadsOK + stats.DownloadsPartial + stats.DownloadsFailed; deliveries > 0 {
 		snapshot.cacheHitRatio = float64(stats.CacheHits) / float64(deliveries)
 	}

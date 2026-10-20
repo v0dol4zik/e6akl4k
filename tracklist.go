@@ -32,21 +32,16 @@ func (a *app) downloadPlaylistRange(ctx context.Context, pending pendingURL, for
 		reporter.stage(tr("queued", lang, "position", strconv.Itoa(position)))
 	}
 	if !searchedTracklist(pending.Preview) {
+		if start >= 1 && end >= start && len(pending.Preview.PlaylistSnapshot) == pending.Preview.TrackCount && end <= len(pending.Preview.PlaylistSnapshot) {
+			return a.downloadSnapshotRange(ctx, pending, format, quality, start, end, queued)
+		}
 		return a.runDownloadRangeQueuedWithPreview(ctx, pending.URL, format, quality, start, end, pending.Preview, queued, nil)
 	}
-	_, release, err := a.downloads.acquireNotify(ctx, queued)
-	if err != nil {
-		if errors.Is(err, errQueueFull) && a.store != nil {
-			a.store.increment(a.ctx, "queue_rejected")
-		}
-		return nil, err
-	}
-	defer release()
 	last := pending.RangeEnd
 	if last <= 0 || last > pending.Preview.TrackCount {
 		last = pending.Preview.TrackCount
 	}
-	return a.downloadTracklistRange(ctx, pending.Preview.Tracks, format, quality, lang, start, end, last, reporter)
+	return a.downloadTracklistRangeWithCache(ctx, pending.Preview.Tracks, format, quality, lang, start, end, last, reporter, pending.Delivery != "zip")
 }
 
 // downloadTracklistRange searches the tracks start to end (1-based) of a tracklist on YouTube one
@@ -54,22 +49,33 @@ func (a *app) downloadPlaylistRange(ctx context.Context, pending pendingURL, for
 // becomes a failed result, so the rest of the list still downloads; last is the final track of
 // the whole selection, shown in the progress.
 func (a *app) downloadTracklistRange(ctx context.Context, tracks []exportTrack, format, quality, lang string, start, end, last int, reporter *statusReporter) ([]downloadResult, error) {
+	return a.downloadTracklistRangeWithCache(ctx, tracks, format, quality, lang, start, end, last, reporter, false)
+}
+
+func (a *app) downloadTracklistRangeWithCache(ctx context.Context, tracks []exportTrack, format, quality, lang string, start, end, last int, reporter *statusReporter, cache bool) ([]downloadResult, error) {
 	results := make([]downloadResult, 0, max(end-start+1, 0))
-	for position := start; position <= end; position++ {
-		if err := ctx.Err(); err != nil {
-			a.downloader.clearSessions(results)
-			return nil, err
-		}
+	var admission trackAdmission
+	err := a.orderedTracks(ctx, max(end-start+1, 0), min(a.cfg.BatchDownloadWorkers, a.cfg.DownloadWorkers), func(ctx context.Context, i int) preparedTrack {
+		position := start + i
 		var track exportTrack
 		if position >= 1 && position <= len(tracks) {
 			track = tracks[position-1]
 		}
 		reporter.stage(tr("tracklist_progress", lang, "current", strconv.Itoa(position), "total", strconv.Itoa(last), "title", html.EscapeString(shortenRunes(track.line(), 80))))
-		results = append(results, a.downloadTracklistTrack(ctx, track, format, quality, lang))
-		if err := ctx.Err(); err != nil {
-			a.downloader.clearSessions(results)
-			return nil, err
+		result := a.prepareTracklistTrack(ctx, track, format, quality, lang, cache, &admission)
+		result.Position, result.Total = position, last
+		return preparedTrack{results: []downloadResult{result}}
+	}, func(_ int, track preparedTrack) error {
+		results = append(results, track.results...)
+		// Transfer ownership to the returned album instead of pipeline cleanup.
+		for i := range track.results {
+			track.results[i].Session = ""
 		}
+		return nil
+	})
+	if err != nil {
+		a.downloader.clearSessions(results)
+		return nil, err
 	}
 	return results, nil
 }
@@ -78,6 +84,10 @@ func (a *app) downloadTracklistRange(ctx context.Context, tracks []exportTrack, 
 // returned as a result naming the entry, since a YouTube title alone would not tell the user
 // which line of the list was lost.
 func (a *app) downloadTracklistTrack(ctx context.Context, track exportTrack, format, quality, lang string) downloadResult {
+	return a.prepareTracklistTrack(ctx, track, format, quality, lang, false, &trackAdmission{})
+}
+
+func (a *app) prepareTracklistTrack(ctx context.Context, track exportTrack, format, quality, lang string, cache bool, admission *trackAdmission) downloadResult {
 	line := track.line()
 	failed := downloadResult{Title: track.Title, Artist: track.Artist, DurationSeconds: track.Seconds}
 	query := strings.TrimSpace(strings.TrimSpace(track.Artist) + " " + strings.TrimSpace(track.Title))
@@ -86,7 +96,7 @@ func (a *app) downloadTracklistTrack(ctx context.Context, track exportTrack, for
 		return failed
 	}
 	searchCtx, cancel := context.WithTimeout(ctx, tracklistSearchTimeout)
-	candidates, err := a.downloader.searchLookup(searchCtx, query, track.Seconds)
+	candidates, err := a.runRankedLookup(searchCtx, query, track.Seconds)
 	cancel()
 	if err == nil && len(candidates) == 0 {
 		err = errNothingFound
@@ -101,7 +111,23 @@ func (a *app) downloadTracklistTrack(ctx context.Context, track exportTrack, for
 	}
 	candidate := candidates[0]
 	failed.URL = candidate.URL
-	results, err := a.downloader.downloadRange(ctx, candidate.URL, format, quality, 0, 0, nil)
+	preview := mediaPreview{URL: candidate.URL, SourceID: candidate.SourceID, Extractor: candidate.Extractor, Title: candidate.Title, Artist: candidate.Artist, Duration: candidate.Duration, DurationSeconds: inlineDurationSeconds(candidate.Duration), TrackCount: 1}
+	if direct, ok := a.directYouTubePreview(candidate.URL, format, quality); ok {
+		preview.direct, preview.SourceID = direct.direct, direct.SourceID
+	}
+	if cache {
+		if cached, ok := a.cachedResult(ctx, pendingURL{URL: candidate.URL, Preview: preview}, format, quality); ok {
+			return cached
+		}
+	}
+	results, err := a.prepareSource(ctx, pendingURL{URL: candidate.URL, Preview: preview}, format, quality, func(ctx context.Context) ([]downloadResult, error) {
+		slot, err := admission.acquire(ctx, a, nil, format, quality)
+		if err != nil {
+			return nil, err
+		}
+		defer slot()
+		return a.downloader.downloadRangeWithPreview(ctx, candidate.URL, format, quality, 0, 0, preview, nil)
+	})
 	if err != nil || len(results) == 0 {
 		a.downloader.clearSessions(results)
 		if err == nil {

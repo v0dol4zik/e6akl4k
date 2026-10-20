@@ -99,6 +99,8 @@ func (a *app) runDownloadTrace(userID, chatID int64, rawURL string, fresh bool) 
 	status := a.sendText(chatID, "🧪 <b>download trace</b>\n<code>"+trace.id+"</code>\ninspect…", "HTML", downloadCancelKeyboard(cancelKey, a.langOrDefault(userID)))
 
 	ctx, cancel := context.WithTimeout(a.ctx, downloadTimeout)
+	operation := &mediaOperation{id: trace.id, mode: "diagnostic", format: "mp3", quality: "320", started: trace.started}
+	ctx = withMediaOperation(ctx, operation)
 	defer cancel()
 	a.mu.Lock()
 	a.active[cancelKey] = activeDownload{cancel: cancel, chatID: chatID, userID: userID}
@@ -163,7 +165,7 @@ func (a *app) runDownloadTrace(userID, chatID int64, rawURL string, fresh bool) 
 	}
 	uploadStarted := time.Now()
 	a.updateDownloadTraceStatus(status, trace, "Telegram upload")
-	report := a.sendResultsIndividually(chatID, results, "mp3", lang)
+	report := a.sendResultsIndividually(chatID, results, "mp3", lang, &statusReporter{ctx: ctx})
 	trace.add("telegram delivery completed in %s delivered=%d failed=%d", time.Since(uploadStarted).Truncate(time.Millisecond), report.Delivered, report.Failed)
 	a.finishDownloadTrace(chatID, status, trace)
 }

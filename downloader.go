@@ -58,6 +58,10 @@ var audioExtensions = map[string]bool{
 }
 
 type downloadResult struct {
+	Cached   *cachedAudio
+	Quality  string
+	Position int
+	Total    int
 	FilePath string
 	Title    string
 	Artist   string
@@ -114,8 +118,12 @@ type mediaPreview struct {
 	// probe holds single-track metadata only in memory; probedAt bounds its reuse after preview.
 	probe    *mediaInfo
 	probedAt time.Time
+	// direct defers extraction to the downloader's pre-transfer match filter.
+	direct bool
 	// Tracks holds the "Artist - Title" export lines, one per playlist position.
 	Tracks []exportTrack
+	// PlaylistSnapshot stores only public IDs/metadata, never signed streams.
+	PlaylistSnapshot []playlistTrack
 }
 
 // errNothingFound means a search returned no results: the query's outcome, not a bot failure.
@@ -373,6 +381,14 @@ func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, err
 		preview.probedAt = time.Now()
 	}
 	preview.Tracks = exportTracksFromInfo(info, preview.IsPlaylist)
+	if preview.IsPlaylist {
+		preview.PlaylistSnapshot = youtubePlaylistSnapshot(url, info)
+		for i := range preview.Tracks {
+			if i < len(info.Entries) && info.Entries[i] != nil {
+				preview.Tracks[i].Seconds = int(info.Entries[i].Duration)
+			}
+		}
+	}
 	preview.Estimated128 = estimateAudioSize(preview.DurationSeconds, "mp3", "128")
 	preview.Estimated320 = estimateAudioSize(preview.DurationSeconds, "mp3", "320")
 	return preview, nil
@@ -485,7 +501,10 @@ func (d *downloader) downloadRangeWithPreview(ctx context.Context, url, format, 
 	// it; the metadata of downloaded tracks is then taken from the yt-dlp manifest.
 	var info *mediaInfo
 	var probeErrors string
-	if previewCanSkipProbe(url, preview) {
+	direct := preview.direct && singleYouTubeID(url) != "" && singleYouTubeID(url) == preview.SourceID && !preview.IsPlaylist
+	if direct {
+		info = &mediaInfo{ID: preview.SourceID, Title: preview.Title, Artist: preview.Artist, Duration: float64(preview.DurationSeconds), Extractor: "youtube", WebpageURL: url}
+	} else if previewCanSkipProbe(url, preview) {
 		info = mediaInfoFromPreview(url, preview)
 	} else {
 		info, probeErrors, err = d.probe(ctx, url, "--flat-playlist")
@@ -544,7 +563,7 @@ func (d *downloader) downloadRangeWithPreview(ctx context.Context, url, format, 
 			continue
 		}
 		title, artist, duration := entry.resultMetadata()
-		results[i] = downloadResult{Title: title, Artist: artist, Duration: duration, Session: session, CacheKey: sourceCacheKey(firstNonEmpty(entry.Extractor, entry.ExtractorKey, entry.IEKey), entry.ID, format, quality), URL: entry.pageURL(), DurationSeconds: int(entry.Duration)}
+		results[i] = downloadResult{Title: title, Artist: artist, Duration: duration, Session: session, Quality: quality, CacheKey: sourceCacheKey(firstNonEmpty(entry.Extractor, entry.ExtractorKey, entry.IEKey), entry.ID, format, quality), URL: entry.pageURL(), DurationSeconds: int(entry.Duration)}
 		if entry.Duration > 0 && int(entry.Duration) > maxDuration {
 			estimate := estimateAudioSize(int(entry.Duration), format, quality)
 			results[i].TooLarge, results[i].Size = true, estimate
@@ -566,6 +585,24 @@ func (d *downloader) downloadRangeWithPreview(ctx context.Context, url, format, 
 	downloaded, parseErr := readManifest(manifest)
 	if parseErr != nil {
 		return nil, fmt.Errorf("прочитать манифест yt-dlp: %w", parseErr)
+	}
+	// Match filters intentionally leave no after_move manifest and exit zero.
+	// Only this uncommon rejection needs a separate probe, to retain the
+	// duration and lighter-format buttons without transferring the audio.
+	if !isPlaylist && singleYouTubeID(url) != "" && len(downloaded) == 0 && runErr == nil {
+		fresh, _, probeErr := d.probe(ctx, url, "--no-playlist")
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if probeErr == nil && fresh != nil {
+			results[0].applyManifest(*fresh, format, quality)
+			if fresh.Duration > float64(maxDuration) {
+				results[0].TooLarge = true
+				results[0].Size = estimateAudioSize(int(fresh.Duration), format, quality)
+				results[0].Error = "Превышен допустимый размер трека"
+				return results, nil
+			}
+		}
 	}
 
 	used := make([]bool, len(downloaded))
@@ -613,6 +650,7 @@ func (d *downloader) downloadRangeWithPreview(ctx context.Context, url, format, 
 // applyManifest replaces the metadata of a flat playlist entry, which may lack the artist, the
 // duration or the extractor, with that of the downloaded track.
 func (r *downloadResult) applyManifest(entry mediaInfo, format, quality string) {
+	r.Quality = quality
 	if entry.Title != "" || entry.Track != "" {
 		r.Title, r.Artist, r.Duration = entry.resultMetadata()
 	}
@@ -646,7 +684,7 @@ func (d *downloader) probe(ctx context.Context, url string, extra ...string) (*m
 	args := append(d.commonArgs(), extra...)
 	args = append(args, "--dump-single-json", "--simulate", "--ignore-errors", "--", url)
 	stdout, stderr, err := d.run(ctx, args...)
-	defer func() { logMediaStage("source_probe", sourceHost(url), started, 0, err == nil) }()
+	defer func() { logMediaStageContext(ctx, "source_probe", sourceHost(url), started, 0, err == nil) }()
 	if bytes.Equal(bytes.TrimSpace(stdout), []byte("null")) {
 		if err == nil {
 			err = errors.New("yt-dlp не вернул информацию")
@@ -671,6 +709,10 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 		args := append(d.commonArgs(),
 			"--no-simulate",
 			"--no-abort-on-error",
+			"--progress", "--newline", "--progress-delta", "1",
+			"--progress-template", "download:"+mediaEventPrefix+"%(progress.status)s:%(progress.downloaded_bytes)j",
+			"--print", "before_dl:"+mediaEventPrefix+"transfer",
+			"--print", "after_move:"+mediaEventPrefix+"complete",
 			"--sleep-interval", "0",
 			"--max-sleep-interval", "3",
 			"--paths", sessionDir,
@@ -684,6 +726,9 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 			"--print-to-file", "before_dl:%(playlist_index)s", progressFile,
 		)
 		args = append(args, audioFormatArgs(format, quality)...)
+		if !playlist && singleYouTubeID(url) != "" {
+			args = append(args, "--no-playlist", "--match-filter", "!is_live & duration <= "+strconv.Itoa(d.maxDurationFor(format, quality)))
+		}
 		if playlist {
 			positions := make([]string, len(items))
 			for i, position := range items {
@@ -701,7 +746,7 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 		progressFile := filepath.Join(sessionDir, "progress.log")
 		_, stderr, err = d.runWithProgress(ctx, argsFor(selected, progressFile), progressFile, progress, total)
 	}
-	logMediaStage("source_download", sourceHost(url), started, regularFilesSize(sessionDir), err == nil, "format", format, "quality", quality)
+	logMediaStageContext(ctx, "source_download", sourceHost(url), started, regularFilesSize(sessionDir), err == nil, "format", format, "quality", quality)
 	return stderr, err
 }
 
@@ -869,10 +914,12 @@ func (d *downloader) runWithProgressOnce(ctx context.Context, args []string, man
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 5 * time.Second
-	var stdout bytes.Buffer
+	stdout := &limitedBuffer{limit: 64 * 1024}
+	events := newDownloadEvents(ctx, args)
+	stdoutEvents, stderrEvents := events.stream(), events.stream()
 	stderr := &limitedBuffer{limit: 256 * 1024}
-	cmd.Stdout = &stdout
-	cmd.Stderr = stderr
+	cmd.Stdout = io.MultiWriter(stdout, stdoutEvents)
+	cmd.Stderr = io.MultiWriter(stderr, stderrEvents)
 
 	lastCompleted := 0
 	stopProgress := make(chan struct{})
@@ -898,6 +945,9 @@ func (d *downloader) runWithProgressOnce(ctx context.Context, args []string, man
 		}()
 	}
 	err := cmd.Run()
+	stdoutEvents.close()
+	stderrEvents.close()
+	events.close(err == nil)
 	close(stopProgress)
 	progressDone.Wait()
 	if completed := progressLineCount(manifest); completed > lastCompleted && progress != nil && total > 1 {
@@ -909,7 +959,7 @@ func (d *downloader) runWithProgressOnce(ctx context.Context, args []string, man
 	if err != nil {
 		log.Printf("yt-dlp завершился с ошибкой: %v: %s", err, firstLine(stderr.String()))
 	}
-	return stdout.Bytes(), stderr.String(), err
+	return []byte(stdout.String()), stderr.String(), err
 }
 
 func (d *downloader) commonArgs() []string {

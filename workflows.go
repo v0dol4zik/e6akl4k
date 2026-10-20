@@ -23,28 +23,43 @@ func (a *app) handleIncomingURL(message *tgbotapi.Message, rawURL, lang string) 
 // openURL previews a link and offers the format keyboard, or starts a single track right away
 // with the given format (the error report buttons) or the user's default format.
 func (a *app) openURL(message *tgbotapi.Message, rawURL, lang, format, quality string) {
+	operation := newMediaOperation("single")
 	status := a.sendText(message.Chat.ID, tr("analyzing", lang), "HTML", nil)
 	ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
+	ctx = withMediaOperation(ctx, operation)
 	defer cancel()
-	_, release, err := a.lookups.acquire(ctx)
-	if err != nil {
-		if errors.Is(err, errQueueFull) && a.store != nil {
-			a.store.increment(a.ctx, "queue_rejected")
-		}
-		a.handleQueueError(message.Chat.ID, lang, err, errorReport{Stage: "preview", UserID: message.From.ID, URL: rawURL})
-		return
+	cacheFormat, cacheQuality := format, quality
+	if !validDownloadOption(cacheFormat, cacheQuality) {
+		cacheFormat, cacheQuality, _ = a.getPreference(message.From.ID)
 	}
-	if requiresMusicResolution(rawURL) {
-		rawURL = expandMusicShortLink(ctx, rawURL)
-		if kind := musicCollectionKind(rawURL); kind != "" {
-			result, handled, err := musicServiceTracklist(ctx, rawURL, true)
-			release()
-			a.presentMusicCollection(message, rawURL, kind, result, handled, err, status, lang)
+	preview, cacheHit := a.cachedYouTubePreview(ctx, rawURL, cacheFormat, cacheQuality)
+	if !cacheHit {
+		preview, cacheHit = a.directYouTubePreview(rawURL, cacheFormat, cacheQuality)
+	}
+	var err error
+	if !cacheHit {
+		queuedAt := time.Now()
+		_, release, queueErr := a.lookups.acquire(ctx)
+		logMediaStageContext(ctx, "lookup_queue", sourceHost(rawURL), queuedAt, 0, queueErr == nil)
+		if queueErr != nil {
+			if errors.Is(queueErr, errQueueFull) && a.store != nil {
+				a.store.increment(a.ctx, "queue_rejected")
+			}
+			a.handleQueueError(message.Chat.ID, lang, queueErr, errorReport{Stage: "preview", UserID: message.From.ID, URL: rawURL})
 			return
 		}
+		if requiresMusicResolution(rawURL) {
+			rawURL = expandMusicShortLink(ctx, rawURL)
+			if kind := musicCollectionKind(rawURL); kind != "" {
+				result, handled, collectionErr := musicServiceTracklist(ctx, rawURL, true)
+				release()
+				a.presentMusicCollection(message, rawURL, kind, result, handled, collectionErr, status, lang)
+				return
+			}
+		}
+		preview, err = a.inspectURL(ctx, rawURL)
+		release()
 	}
-	preview, err := a.inspectURL(ctx, rawURL)
-	release()
 	if err != nil {
 		a.reportError(errorReport{Stage: "preview", ChatID: message.Chat.ID, UserID: message.From.ID, URL: rawURL, Error: err.Error()})
 		a.replaceStatusText(message.Chat.ID, status, previewErrorText(rawURL, err, lang))
@@ -54,7 +69,11 @@ func (a *app) openURL(message *tgbotapi.Message, rawURL, lang, format, quality s
 		a.presentSearchResults(message.Chat.ID, message.From.ID, musicSearchQuery(preview), lang, status, true, preview.DurationSeconds)
 		return
 	}
-	key, err := a.storeURL(pendingURL{URL: rawURL, ChatID: message.Chat.ID, UserID: message.From.ID, Preview: preview})
+	if preview.IsPlaylist {
+		operation.mode = "playlist"
+	}
+	operation.readyAt = time.Now()
+	key, err := a.storeURL(pendingURL{URL: rawURL, ChatID: message.Chat.ID, UserID: message.From.ID, Preview: preview, operation: operation})
 	if err != nil {
 		log.Printf("save pending URL: %v", err)
 		return
@@ -358,7 +377,7 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 	if a.store == nil {
 		return false, false, false
 	}
-	urlKey := generalCacheKey(pending.URL, format, quality)
+	urlKey := downloadIdentity(pending.URL, format, quality)
 	keys := []string{}
 	if source := sourceCacheKey(pending.Preview.Extractor, pending.Preview.SourceID, format, quality); source != "" {
 		keys = append(keys, source)
@@ -368,8 +387,9 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 		if entry, ok := a.store.cachedAudio(ctx, key, a.cfg.CacheTTL); ok {
 			started := time.Now()
 			err := a.sendCachedAudio(chatID, entry, lang)
-			logMediaStage("telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", true, "format", entry.Format)
+			logMediaStageContext(ctx, "telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", true, "format", entry.Format)
 			if err == nil {
+				mediaOperationFromContext(ctx).delivered(ctx)
 				a.store.increment(a.ctx, "cache_hits")
 				return true, true, false
 			} else if !invalidCachedFileError(err) {
@@ -403,7 +423,7 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 	}
 	started := time.Now()
 	err = a.sendCachedAudio(chatID, entry, lang)
-	logMediaStage("telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", false, "format", entry.Format)
+	logMediaStageContext(ctx, "telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", false, "format", entry.Format)
 	if err != nil {
 		if invalidCachedFileError(err) {
 			a.store.deleteCachedAudio(ctx, entry.Key)
@@ -413,6 +433,7 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 		a.sendText(chatID, tr("download_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
 		return true, false, false
 	}
+	mediaOperationFromContext(ctx).delivered(ctx)
 	return true, true, false
 }
 
@@ -428,8 +449,12 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 	if a.cfg.CacheChatID == 0 {
 		return cachedAudio{}, errors.New("cache-канал не настроен")
 	}
-	urlKey := generalCacheKey(pending.URL, format, quality)
-	return a.flights.do(ctx, urlKey, func() (cachedAudio, error) {
+	urlKey := downloadIdentity(pending.URL, format, quality)
+	return a.flights.doContext(ctx, urlKey, func(ctx context.Context) (cachedAudio, error) {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stopShutdown := context.AfterFunc(a.ctx, cancel)
+		defer stopShutdown()
 		if cached, ok := a.store.cachedAudio(ctx, urlKey, a.cfg.CacheTTL); ok {
 			return cached, nil
 		}
@@ -468,7 +493,7 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 			audio.Title, audio.Performer = result.Title, result.Artist
 			uploadStarted := time.Now()
 			sent, sendErr := sendTelegram(a.bot, audio)
-			logMediaStage("telegram_upload", "telegram", uploadStarted, info.Size(), sendErr == nil && sent.Audio != nil, "mode", "multipart", "format", format)
+			logMediaStageContext(ctx, "telegram_upload", "telegram", uploadStarted, info.Size(), sendErr == nil && sent.Audio != nil, "mode", "multipart", "format", format)
 			if sendErr != nil || sent.Audio == nil {
 				return cachedAudio{}, firstError(sendErr, errors.New("Telegram не вернул audio file_id"))
 			}
@@ -478,7 +503,7 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 			document := tgbotapi.NewDocument(a.cfg.CacheChatID, progressFile{path: result.FilePath, progress: progress})
 			uploadStarted := time.Now()
 			sent, sendErr := sendTelegram(a.bot, document)
-			logMediaStage("telegram_upload", "telegram", uploadStarted, info.Size(), sendErr == nil && sent.Document != nil, "mode", "multipart", "format", format)
+			logMediaStageContext(ctx, "telegram_upload", "telegram", uploadStarted, info.Size(), sendErr == nil && sent.Document != nil, "mode", "multipart", "format", format)
 			if sendErr != nil || sent.Document == nil {
 				return cachedAudio{}, firstError(sendErr, errors.New("Telegram не вернул document file_id"))
 			}
@@ -511,8 +536,11 @@ func sourceHost(raw string) string {
 	return strings.ToLower(parsed.Hostname())
 }
 
-func (a *app) sendCachedAudio(chatID int64, entry cachedAudio, lang string) error {
+func (a *app) sendCachedAudio(chatID int64, entry cachedAudio, lang string, details ...downloadResult) error {
 	result := downloadResult{Title: entry.Title, Artist: entry.Artist, Duration: entry.Duration}
+	if len(details) > 0 {
+		result = details[0]
+	}
 	if entry.MediaType == "document" || !telegramAudioFormat(entry.Format) {
 		document := tgbotapi.NewDocument(chatID, tgbotapi.FileID(entry.FileID))
 		document.Caption = buildCaption(result, entry.Size, entry.Format, lang, 1, 1)
@@ -638,6 +666,7 @@ func (a *app) activeUserCount() int { a.mu.Lock(); defer a.mu.Unlock(); return l
 // handleIncomingBatch previews every link of a multi-link message and offers one format for all of them.
 // Playlists are rejected as a whole; links that fail to preview are listed and skipped.
 func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang string) {
+	operation := newMediaOperation("batch")
 	chatID, userID := message.Chat.ID, message.From.ID
 	if len(urls) > maxBatchLinks {
 		a.sendText(chatID, tr("batch_limit", lang, "max", strconv.Itoa(maxBatchLinks)), "HTML", nil)
@@ -645,45 +674,31 @@ func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang
 	}
 	status := a.sendText(chatID, tr("analyzing", lang), "HTML", nil)
 	ctx, cancel := context.WithTimeout(a.ctx, 45*time.Second)
+	ctx = withMediaOperation(ctx, operation)
 	defer cancel()
-	_, release, err := a.lookups.acquire(ctx)
-	if err != nil {
-		if errors.Is(err, errQueueFull) && a.store != nil {
-			a.store.increment(a.ctx, "queue_rejected")
-		}
-		a.handleQueueError(chatID, lang, err, errorReport{Stage: "batch_preview", UserID: userID})
-		return
-	}
+	cacheFormat, cacheQuality, _ := a.getPreference(userID)
+	inspected := a.inspectBatchLinks(ctx, urls, cacheFormat, cacheQuality)
 	kept := make([]string, 0, len(urls))
 	previews := make([]mediaPreview, 0, len(urls))
 	var failed []string
-	for _, rawURL := range urls {
+	for index, rawURL := range urls {
 		if requiresMusicResolution(rawURL) {
 			failed = append(failed, tr("batch_link_failed", lang, "url", html.EscapeString(rawURL), "error", tr("batch_search_only", lang)))
 			continue
 		}
-		linkCtx, linkCancel := context.WithTimeout(ctx, 20*time.Second)
-		preview, previewErr := a.inspectURL(linkCtx, rawURL)
-		linkCancel()
+		preview, previewErr := inspected[index].preview, inspected[index].err
 		if previewErr != nil {
-			if ctx.Err() != nil {
-				release()
-				a.sendText(chatID, tr("preview_error", lang, "error", html.EscapeString(ctx.Err().Error())), "HTML", nil)
-				return
-			}
 			a.reportError(errorReport{Stage: "batch_preview", ChatID: chatID, UserID: userID, URL: rawURL, Error: previewErr.Error()})
 			failed = append(failed, tr("batch_link_failed", lang, "url", html.EscapeString(rawURL), "error", html.EscapeString(previewErr.Error())))
 			continue
 		}
 		if preview.IsPlaylist {
-			release()
 			a.sendText(chatID, tr("batch_no_playlists", lang), "HTML", nil)
 			return
 		}
 		kept = append(kept, rawURL)
 		previews = append(previews, preview)
 	}
-	release()
 	if len(kept) == 0 {
 		a.sendText(chatID, strings.Join(append([]string{tr("nothing_found", lang)}, failed...), "\n"), "HTML", nil)
 		return
@@ -697,7 +712,8 @@ func (a *app) handleIncomingBatch(message *tgbotapi.Message, urls []string, lang
 		batchPreview.Estimated128 += preview.Estimated128
 		batchPreview.Estimated320 += preview.Estimated320
 	}
-	key, err := a.storeURL(pendingURL{URL: kept[0], ChatID: chatID, UserID: userID, Preview: batchPreview, Batch: kept, BatchPreviews: previews})
+	operation.readyAt = time.Now()
+	key, err := a.storeURL(pendingURL{URL: kept[0], ChatID: chatID, UserID: userID, Preview: batchPreview, Batch: kept, BatchPreviews: previews, operation: operation})
 	if err != nil {
 		log.Printf("save pending batch: %v", err)
 		return
@@ -758,35 +774,37 @@ func batchTrackLabel(preview mediaPreview) string {
 	return label
 }
 
-// downloadBatch processes pending.Batch sequentially inside one download slot. Cached tracks are
-// re-sent by file_id, the rest are downloaded one by one; a failing link does not stop the batch.
+// downloadBatch sends cache hits immediately and prepares at most two missing tracks
+// concurrently. Fresh audio keeps the requested media-group or ZIP delivery.
 func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingURL, format, quality, lang string, status *tgbotapi.Message, reporter *statusReporter) (deliveryReport, error) {
-	_, release, err := a.downloads.acquireNotify(ctx, func(position int) {
-		if status != nil {
-			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
-		}
-	})
-	if err != nil {
-		if errors.Is(err, errQueueFull) && a.store != nil {
-			a.store.increment(a.ctx, "queue_rejected")
-		}
-		return deliveryReport{}, err
-	}
-	// The download slot only covers yt-dlp work. Telegram delivery below runs after
-	// releaseDownloads so cached re-sends, archive waits and uploads never block other users.
-	released := false
-	releaseDownloads := func() {
-		if !released {
-			released = true
-			release()
-		}
-	}
-	defer releaseDownloads()
-
 	total := len(pending.Batch)
 	report := deliveryReport{}
+	if pending.Delivery != "zip" && a.cfg.BatchStreamResults {
+		items := make([]pendingURL, len(pending.Batch))
+		keys := make(map[string]bool)
+		unique := true
+		for i, rawURL := range pending.Batch {
+			items[i] = pendingURL{URL: rawURL}
+			if i < len(pending.BatchPreviews) {
+				items[i].Preview = pending.BatchPreviews[i]
+			}
+			key := downloadIdentity(rawURL, format, quality)
+			if keys[key] {
+				unique = false
+			}
+			keys[key] = true
+		}
+		// Aliases retain their one shared session until album delivery finishes.
+		if unique {
+			report, err := a.streamBatch(ctx, chatID, items, format, quality, lang, reporter)
+			if err == nil {
+				a.sendPlaylistSummary(chatID, report, lang)
+			}
+			return report, err
+		}
+	}
 	var results []downloadResult
-	var cached []pendingURL
+	var uncached []pendingURL
 	sessions := make(map[string]struct{})
 	defer func() {
 		for session := range sessions {
@@ -803,58 +821,33 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 		}
 		reporter.stage(tr("batch_progress", lang, "current", strconv.Itoa(i+1), "total", strconv.Itoa(total), "title", html.EscapeString(shortenRunes(firstNonEmpty(preview.Title, rawURL), 80))))
 		item := pendingURL{URL: rawURL, ChatID: pending.ChatID, UserID: pending.UserID, Preview: preview}
-		if pending.Delivery != "zip" && a.hasCachedAudio(ctx, item, format, quality) {
-			// Cached tracks are re-sent by file_id after the download slot is released.
-			cached = append(cached, item)
-			continue
-		}
-		linkResults, downloadErr := a.downloader.downloadRangeWithPreview(ctx, rawURL, format, quality, 0, 0, preview, nil)
-		for _, result := range linkResults {
-			if result.Session != "" {
-				sessions[result.Session] = struct{}{}
+		if pending.Delivery != "zip" {
+			if delivered, handled := a.sendBatchCached(ctx, chatID, item, format, quality, lang); handled {
+				if delivered {
+					report.Delivered++
+				} else {
+					report.Failed++
+				}
+				continue
 			}
 		}
-		if ctx.Err() != nil {
-			return report, ctx.Err()
-		}
-		if downloadErr != nil {
-			log.Printf("Ошибка пакетной загрузки source=%s user_id=%d: %v", sourceHost(rawURL), pending.UserID, downloadErr)
-			linkResults = []downloadResult{{Title: preview.Title, Artist: preview.Artist, Error: downloadErr.Error()}}
-		}
-		if len(linkResults) == 0 {
-			linkResults = []downloadResult{{Title: preview.Title, Artist: preview.Artist, Error: tr("unknown_error", lang)}}
-		}
-		for j, result := range linkResults {
-			if result.URL == "" && len(linkResults) == 1 {
-				// A lighter-format retry of this track re-downloads the link itself.
-				linkResults[j].URL = rawURL
-			}
-			if result.Error != "" && !result.TooLarge {
-				a.reportDownloadFailure(result.Error, sourceHost(rawURL))
-			}
-		}
-		results = append(results, linkResults...)
+		uncached = append(uncached, item)
 	}
-	releaseDownloads()
-	if err := ctx.Err(); err != nil {
-		return report, err
+	downloaded, releaseDisk, downloadErr := a.downloadConcurrent(ctx, uncached, format, quality, func(position int) { reporter.stage(tr("queued", lang, "position", strconv.Itoa(position))) })
+	defer releaseDisk()
+	for _, result := range downloaded {
+		if result.Session != "" {
+			sessions[result.Session] = struct{}{}
+		}
 	}
-	for _, item := range cached {
-		if err := ctx.Err(); err != nil {
-			return report, err
+	if downloadErr != nil {
+		return report, downloadErr
+	}
+	results = append(results, downloaded...)
+	for _, result := range results {
+		if result.Error != "" && !result.TooLarge {
+			a.reportDownloadFailure(result.Error, sourceHost(result.URL))
 		}
-		if delivered, handled := a.sendBatchCached(ctx, chatID, item, format, quality, lang); handled {
-			if delivered {
-				report.Delivered++
-			} else {
-				report.Failed++
-			}
-			continue
-		}
-		// The cache entry disappeared between the check and the send: report it as failed rather
-		// than re-acquiring a download slot mid-delivery.
-		report.Failed++
-		results = append(results, downloadResult{Title: item.Preview.Title, Artist: item.Preview.Artist, Error: tr("history_expired", lang)})
 	}
 	if len(results) > 0 {
 		if pending.Delivery == "zip" {
@@ -864,7 +857,7 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 			if queueErr != nil {
 				return report, queueErr
 			}
-			report.add(a.sendResultsAsZIP(chatID, results, format, lang))
+			report.add(a.sendResultsAsZIP(chatID, results, format, lang, reporter))
 			releaseArchive()
 			return report, nil
 		}
@@ -914,8 +907,9 @@ func (a *app) sendBatchCached(ctx context.Context, chatID int64, item pendingURL
 		}
 		started := time.Now()
 		err := a.sendCachedAudio(chatID, entry, lang)
-		logMediaStage("telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", true, "format", entry.Format)
+		logMediaStageContext(ctx, "telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", true, "format", entry.Format)
 		if err == nil {
+			mediaOperationFromContext(ctx).delivered(ctx)
 			a.store.increment(a.ctx, "cache_hits")
 			return true, true
 		}

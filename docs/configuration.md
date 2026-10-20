@@ -38,6 +38,9 @@ chmod 600 .env
 | --- | --- | --- |
 | `DOWNLOAD_WORKERS` | `7` | Concurrent heavy downloads, from 1 to 32. |
 | `DOWNLOAD_QUEUE_SIZE` | `0` | Waiting download slots. Zero rejects excess work immediately. |
+| `BATCH_DOWNLOAD_WORKERS` | `2` | Tracks prepared concurrently per batch, playlist part, or searched tracklist, from 1 to 2, within `DOWNLOAD_WORKERS`. Set to `1` to restore sequential preparation. |
+| `BATCH_STREAM_RESULTS` | `false` | Send fresh batch links as soon as their turn is ready, in input order. At most two tracks are in preparation or awaiting delivery. `false` preserves audio albums. ZIP and batches containing duplicate source aliases keep album preparation. |
+| `YOUTUBE_SINGLE_EXTRACT` | `true` | With a chosen or saved format, defer a new single-video YouTube link's full extraction to the download. yt-dlp rejects live/unknown-duration/oversized media before transfer. A rejected item may need a metadata-only probe for lighter-format buttons. Set `false` to restore the full preview path. |
 | `LOOKUP_WORKERS` | `2` | Concurrent preview and search jobs, from 1 to 32. |
 | `LOOKUP_QUEUE_SIZE` | `40` | Waiting lookup jobs. |
 | `ARCHIVE_WORKERS` | `1` | Concurrent ZIP jobs, from 1 to 8. |
@@ -51,6 +54,10 @@ chmod 600 .env
 | `MAX_FILE_SIZE` | `52428800` | Maximum individual file size in bytes: up to 50 MiB on the cloud Bot API and up to 2000 MiB with `TELEGRAM_API_URL`. |
 
 By default, seven downloads start immediately and there is no waiting download queue. An eighth simultaneous request receives a busy response. Lookup and archive jobs retain their own FIFO queues.
+
+An admitted collection releases its download slots between tracks and continues through a separate bounded FIFO queue, including with `DOWNLOAD_QUEUE_SIZE=0`. Two previews from one batch can run together, taking one global lookup slot each. Completed previews survive failures of other links. YouTube aliases share a canonical video ID, format, and quality for both the Telegram cache and concurrent source downloads. Cancelling one recipient leaves a shared source job alive until its last recipient leaves. ZIP requests require local files and therefore bypass the `file_id` cache.
+
+The bot fixes YouTube playlist positions at preview time using a bounded snapshot of public video IDs. Later edits to the playlist do not shift a selected range; unavailable positions fail individually. Old pending previews without a snapshot use the original playlist listing path. Searched tracklists overlap at most two searches/preparations through the global lookup/download gates and check the chosen candidate's cache before downloading. Disk space is estimated from known durations or an average track when duration is unavailable; final file sizes are still checked before delivery.
 
 The zero request delay and four concurrent fragments favor download latency. Increase `YTDLP_SLEEP_REQUESTS` or reduce fragment concurrency if a source starts throttling the server IP.
 

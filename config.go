@@ -11,38 +11,41 @@ import (
 )
 
 type config struct {
-	BotToken           string
-	DownloadDir        string
-	DatabasePath       string
-	CacheChatID        int64
-	ErrorChatID        int64
-	LastfmAPIKey       string
-	ShazamPython       string
-	YandexProxy        *url.URL
-	TelegramAPIURL     string
-	TelegramFileDir    string
-	HTTPAddr           string
-	DownloadWorkers    int
-	DownloadQueueSize  int
-	LookupWorkers      int
-	LookupQueueSize    int
-	ArchiveWorkers     int
-	ArchiveQueueSize   int
-	UpdateWorkers      int
-	UpdateQueueSize    int
-	RateLimit          int
-	InlineRateLimit    int
-	RateWindow         time.Duration
-	AdminIDs           map[int64]bool
-	CacheTTL           time.Duration
-	MaxPlaylistTracks  int
-	MaxFileSize        int64
-	ShutdownTimeout    time.Duration
-	DiskWarningBytes   int64
-	DiskCheckInterval  time.Duration
-	DropPendingUpdates bool
-	YTDLPSleepRequests int
-	YTDLPFragments     int
+	BotToken             string
+	DownloadDir          string
+	DatabasePath         string
+	CacheChatID          int64
+	ErrorChatID          int64
+	LastfmAPIKey         string
+	ShazamPython         string
+	YandexProxy          *url.URL
+	TelegramAPIURL       string
+	TelegramFileDir      string
+	HTTPAddr             string
+	DownloadWorkers      int
+	DownloadQueueSize    int
+	BatchDownloadWorkers int
+	BatchStreamResults   bool
+	YouTubeSingleExtract bool
+	LookupWorkers        int
+	LookupQueueSize      int
+	ArchiveWorkers       int
+	ArchiveQueueSize     int
+	UpdateWorkers        int
+	UpdateQueueSize      int
+	RateLimit            int
+	InlineRateLimit      int
+	RateWindow           time.Duration
+	AdminIDs             map[int64]bool
+	CacheTTL             time.Duration
+	MaxPlaylistTracks    int
+	MaxFileSize          int64
+	ShutdownTimeout      time.Duration
+	DiskWarningBytes     int64
+	DiskCheckInterval    time.Duration
+	DropPendingUpdates   bool
+	YTDLPSleepRequests   int
+	YTDLPFragments       int
 	// YTDLPYouTubeClients and YTDLPYouTubeCookieClients pin the YouTube player clients of the
 	// anonymous and the signed-in download; "default" keeps yt-dlp's choice.
 	YTDLPYouTubeClients       string
@@ -71,6 +74,15 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	if cfg.DownloadQueueSize, err = strictEnvInt("DOWNLOAD_QUEUE_SIZE", 0, 0, 10000); err != nil {
+		return config{}, err
+	}
+	if cfg.BatchDownloadWorkers, err = strictEnvInt("BATCH_DOWNLOAD_WORKERS", 2, 1, 2); err != nil {
+		return config{}, err
+	}
+	if cfg.BatchStreamResults, err = strictEnvBool("BATCH_STREAM_RESULTS", false); err != nil {
+		return config{}, err
+	}
+	if cfg.YouTubeSingleExtract, err = strictEnvBool("YOUTUBE_SINGLE_EXTRACT", true); err != nil {
 		return config{}, err
 	}
 	if cfg.YTDLPSleepRequests, err = strictEnvInt("YTDLP_SLEEP_REQUESTS", 0, 0, 60); err != nil {
