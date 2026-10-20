@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,8 @@ const (
 	// the real file size is checked again before upload. Constant-bitrate MP3 is estimated exactly.
 	sizePrecheckSlack = 1.25
 	downloadTimeout   = 2 * time.Hour
+	// Recheck previews left open for a while so changed duration or availability is not reused.
+	singleTrackPreviewTTL = 10 * time.Minute
 	// ytdlpPluginDir holds the bgutil PO token plugin in the Docker image. It is not one of
 	// yt-dlp's default plugin folders, so the plugin loads only with a PO token provider set.
 	ytdlpPluginDir = "/opt/yt-dlp-plugins"
@@ -84,6 +87,8 @@ type mediaInfo struct {
 	WebpageURL     string  `json:"webpage_url"`
 	URL            string  `json:"url"`
 	Thumbnail      string  `json:"thumbnail"`
+	IsLive         bool    `json:"is_live"`
+	LiveStatus     string  `json:"live_status"`
 	PlaylistIndex  int     `json:"playlist_index"`
 	PlaylistCount  int     `json:"playlist_count"`
 	Extractor      string  `json:"extractor"`
@@ -106,6 +111,9 @@ type mediaPreview struct {
 	SourceID        string
 	Extractor       string
 	Thumbnail       string
+	// probe holds single-track metadata only in memory; probedAt bounds its reuse after preview.
+	probe    *mediaInfo
+	probedAt time.Time
 	// Tracks holds the "Artist - Title" export lines, one per playlist position.
 	Tracks []exportTrack
 }
@@ -242,9 +250,8 @@ type downloader struct {
 	// pluginDir the folder with its yt-dlp plugin; both are empty without a provider.
 	potProviderURL string
 	pluginDir      string
-	// youtubeDefaultFirst remembers that yt-dlp's default clients, not youtubeClients, got the
-	// last anonymous YouTube download through, so the next one starts with them.
-	youtubeDefaultFirst atomic.Bool
+	// youtubeAlternateFirst remembers that the alternate clients got the last download through.
+	youtubeAlternateFirst atomic.Bool
 	// onCookieRetry, when set, is called every time a YouTube 403 with cookies is retried without them.
 	onCookieRetry func()
 	// newgroundsHTTPClient is optional; browser checks otherwise use the resolver transport.
@@ -362,6 +369,8 @@ func (d *downloader) preview(ctx context.Context, url string) (mediaPreview, err
 		preview.Duration = secondsToHMS(preview.DurationSeconds)
 	} else {
 		preview.TrackCount = 1
+		preview.probe = info
+		preview.probedAt = time.Now()
 	}
 	preview.Tracks = exportTracksFromInfo(info, preview.IsPlaylist)
 	preview.Estimated128 = estimateAudioSize(preview.DurationSeconds, "mp3", "128")
@@ -401,11 +410,59 @@ func constantBitrate(format, quality string) bool {
 	return strings.EqualFold(format, "mp3") && (quality == "128" || quality == "320")
 }
 
+func previewCanSkipProbe(rawURL string, preview mediaPreview) bool {
+	if preview.probe == nil || preview.IsPlaylist || preview.TrackCount != 1 {
+		return false
+	}
+	age := time.Since(preview.probedAt)
+	if preview.probedAt.IsZero() || age < 0 || age > singleTrackPreviewTTL {
+		return false
+	}
+	info := preview.probe
+	if info.Type == "playlist" || len(info.Entries) > 0 || !(info.Duration > 0) ||
+		info.IsLive || (info.LiveStatus != "" && info.LiveStatus != "not_live" && info.LiveStatus != "was_live") {
+		return false
+	}
+	if !strings.EqualFold(preview.Extractor, "youtube") ||
+		!strings.EqualFold(firstNonEmpty(info.Extractor, info.ExtractorKey), "youtube") ||
+		info.ID != preview.SourceID {
+		return false
+	}
+	id, playlist := youtubeLinkTarget(rawURL)
+	previewID, previewPlaylist := youtubeLinkTarget(preview.URL)
+	if playlist || previewPlaylist || id == "" || id != info.ID || previewID != id {
+		return false
+	}
+	// A watch link with a list parameter can download a playlist even though it has a video ID.
+	for _, target := range []string{rawURL, preview.URL} {
+		parsed, err := url.Parse(target)
+		if err != nil || parsed.Query().Get("list") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func mediaInfoFromPreview(rawURL string, preview mediaPreview) *mediaInfo {
+	info := *preview.probe
+	if info.WebpageURL == "" {
+		info.WebpageURL = rawURL
+	}
+	return &info
+}
+
 func (d *downloader) download(ctx context.Context, url, format, quality string, progress downloadProgress) ([]downloadResult, error) {
 	return d.downloadRange(ctx, url, format, quality, 0, 0, progress)
 }
 
 func (d *downloader) downloadRange(ctx context.Context, url, format, quality string, rangeStart, rangeEnd int, progress downloadProgress) ([]downloadResult, error) {
+	return d.downloadRangeWithPreview(ctx, url, format, quality, rangeStart, rangeEnd, mediaPreview{}, progress)
+}
+
+// downloadRangeWithPreview reuses the metadata already obtained for a single-track preview.
+// Playlists and incomplete previews still take the probe path, because range selection and size
+// checks need the fresh entry list.
+func (d *downloader) downloadRangeWithPreview(ctx context.Context, url, format, quality string, rangeStart, rangeEnd int, preview mediaPreview, progress downloadProgress) ([]downloadResult, error) {
 	session, err := randomID()
 	if err != nil {
 		return nil, err
@@ -426,12 +483,18 @@ func (d *downloader) downloadRange(ctx context.Context, url, format, quality str
 
 	// Each batch of a playlist is downloaded by position, so the flat listing is enough to select
 	// it; the metadata of downloaded tracks is then taken from the yt-dlp manifest.
-	info, probeErrors, err := d.probe(ctx, url, "--flat-playlist")
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	var info *mediaInfo
+	var probeErrors string
+	if previewCanSkipProbe(url, preview) {
+		info = mediaInfoFromPreview(url, preview)
+	} else {
+		info, probeErrors, err = d.probe(ctx, url, "--flat-playlist")
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return []downloadResult{{Error: humanizeError(firstNonEmpty(probeErrors, err.Error())), Session: session}}, nil
 		}
-		return []downloadResult{{Error: humanizeError(firstNonEmpty(probeErrors, err.Error())), Session: session}}, nil
 	}
 
 	isPlaylist := info.Type == "playlist" || len(info.Entries) > 0
@@ -672,8 +735,9 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 // downloadYouTube downloads without cookies first. Without a PO token provider, YouTube answers
 // media requests with 403 for most player clients of a signed-in session, and a server IP it has
 // flagged gets 429 and bot checks on the web clients. Which clients still work changes from hour
-// to hour, so the anonymous passes alternate between youtubeClients and yt-dlp's default clients,
-// starting with the set that worked last, and the signed-in pass pins youtubeCookieClients. Only
+// to hour, so the anonymous passes alternate between youtubeClients and yt-dlp's default clients
+// (or tv_simply when youtubeClients is default), starting with the set that worked last. The
+// signed-in pass pins youtubeCookieClients. Only
 // the items that failed are downloaded again, so a playlist never starts over: once more without
 // cookies and with the other clients after a 403, a bot check, or no audio from the first ones,
 // and then with cookies if YouTube asked to sign in (a bot check, an age gate, a members-only
@@ -681,8 +745,12 @@ func (d *downloader) runWithProgress(ctx context.Context, args []string, manifes
 func (d *downloader) downloadYouTube(ctx context.Context, argsFor func(items []int, progressFile string) []string, sessionDir, manifest string, selected []int, playlist bool, progress downloadProgress, total int) (string, error) {
 	progressFile := filepath.Join(sessionDir, "progress.log")
 	clients := [2]string{firstNonEmpty(d.youtubeClients, "default"), "default"}
-	defaultFirst := d.youtubeDefaultFirst.Load()
-	if defaultFirst {
+	// Keep two distinct choices when the configured first pass already uses yt-dlp's defaults.
+	if clients[0] == "default" {
+		clients[1] = "tv_simply"
+	}
+	alternateFirst := d.youtubeAlternateFirst.Load()
+	if alternateFirst {
 		clients[0], clients[1] = clients[1], clients[0]
 	}
 	_, stderr, err := d.runWithProgressOnce(ctx, argsBeforeSeparator(argsFor(selected, progressFile), youtubeClientArgs(clients[0])...), progressFile, progress, total)
@@ -725,7 +793,7 @@ func (d *downloader) downloadYouTube(ctx context.Context, argsFor func(items []i
 		logMediaStage("youtube_forbidden_retry", "youtube", time.Now(), 0, true, "items", strconv.Itoa(len(missing)), "clients", clients[1])
 		_, stderr, err = d.runWithProgressOnce(ctx, argsBeforeSeparator(args, youtubeClientArgs(clients[1])...), progressFile, retryProgress, total)
 		if err == nil && clients[0] != clients[1] {
-			d.youtubeDefaultFirst.Store(!defaultFirst)
+			d.youtubeAlternateFirst.Store(!alternateFirst)
 		}
 	}
 	return stderr, err

@@ -433,7 +433,7 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 		if cached, ok := a.store.cachedAudio(ctx, urlKey, a.cfg.CacheTTL); ok {
 			return cached, nil
 		}
-		results, downloadErr := a.runDownloadRangeQueued(ctx, pending.URL, format, quality, pending.RangeStart, pending.RangeEnd, queued, nil)
+		results, downloadErr := a.runDownloadRangeQueuedWithPreview(ctx, pending.URL, format, quality, pending.RangeStart, pending.RangeEnd, pending.Preview, queued, nil)
 		if downloadErr != nil {
 			return cachedAudio{}, downloadErr
 		}
@@ -808,7 +808,7 @@ func (a *app) downloadBatch(ctx context.Context, chatID int64, pending pendingUR
 			cached = append(cached, item)
 			continue
 		}
-		linkResults, downloadErr := a.downloader.downloadRange(ctx, rawURL, format, quality, 0, 0, nil)
+		linkResults, downloadErr := a.downloader.downloadRangeWithPreview(ctx, rawURL, format, quality, 0, 0, preview, nil)
 		for _, result := range linkResults {
 			if result.Session != "" {
 				sessions[result.Session] = struct{}{}

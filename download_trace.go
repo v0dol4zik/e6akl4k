@@ -148,7 +148,7 @@ func (a *app) runDownloadTrace(userID, chatID int64, rawURL string, fresh bool) 
 
 	trace.add("local source download started format=mp3 quality=320")
 	a.updateDownloadTraceStatus(status, trace, "local source download")
-	results, err := a.runDownloadRangeQueued(ctx, rawURL, "mp3", "320", 0, 0, func(position int) {
+	results, err := a.runDownloadRangeQueuedWithPreview(ctx, rawURL, "mp3", "320", 0, 0, preview, func(position int) {
 		trace.add("download queue position=%d", position)
 	}, func(current, total int) {
 		trace.add("source progress track=%d/%d", current, total)

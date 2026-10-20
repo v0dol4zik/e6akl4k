@@ -616,7 +616,7 @@ func (a *app) downloadForActiveUser(userID, chatID int64, urlKey, format, qualit
 		return
 	}
 	reporter.stage(tr("stage_source", lang))
-	results, err := a.runDownloadRangeQueued(downloadCtx, url, format, quality, pending.RangeStart, pending.RangeEnd, func(position int) {
+	results, err := a.runDownloadRangeQueuedWithPreview(downloadCtx, url, format, quality, pending.RangeStart, pending.RangeEnd, pending.Preview, func(position int) {
 		if status != nil {
 			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
 		}
@@ -1081,6 +1081,10 @@ func (a *app) runDownloadRange(ctx context.Context, url, format, quality string,
 }
 
 func (a *app) runDownloadRangeQueued(ctx context.Context, url, format, quality string, start, end int, queued func(int), progress downloadProgress) ([]downloadResult, error) {
+	return a.runDownloadRangeQueuedWithPreview(ctx, url, format, quality, start, end, mediaPreview{}, queued, progress)
+}
+
+func (a *app) runDownloadRangeQueuedWithPreview(ctx context.Context, url, format, quality string, start, end int, preview mediaPreview, queued func(int), progress downloadProgress) ([]downloadResult, error) {
 	_, release, err := a.downloads.acquireNotify(ctx, queued)
 	if err != nil {
 		if errors.Is(err, errQueueFull) && a.store != nil {
@@ -1089,7 +1093,7 @@ func (a *app) runDownloadRangeQueued(ctx context.Context, url, format, quality s
 		return nil, err
 	}
 	defer release()
-	return a.downloader.downloadRange(ctx, url, format, quality, start, end, progress)
+	return a.downloader.downloadRangeWithPreview(ctx, url, format, quality, start, end, preview, progress)
 }
 
 func (a *app) handleDownloadCancel(callback *tgbotapi.CallbackQuery) {

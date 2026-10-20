@@ -32,7 +32,7 @@ func (a *app) downloadPlaylistRange(ctx context.Context, pending pendingURL, for
 		reporter.stage(tr("queued", lang, "position", strconv.Itoa(position)))
 	}
 	if !searchedTracklist(pending.Preview) {
-		return a.runDownloadRangeQueued(ctx, pending.URL, format, quality, start, end, queued, nil)
+		return a.runDownloadRangeQueuedWithPreview(ctx, pending.URL, format, quality, start, end, pending.Preview, queued, nil)
 	}
 	_, release, err := a.downloads.acquireNotify(ctx, queued)
 	if err != nil {

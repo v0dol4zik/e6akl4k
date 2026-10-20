@@ -71,6 +71,8 @@ All searches and downloads go through `yt-dlp`. Private text searches and inline
 
 Each media stage emits a structured `media_stage` log and a secret-free bounded SQLite sample. `/perf` aggregates success rate, P50/P95, and throughput. `/log` runs one real MP3 320 workflow and returns a redacted trace. Multipart readers report throttled byte progress without unbounded Telegram edits.
 
+For a single YouTube video, a download reuses the metadata already obtained by preview for up to ten minutes, avoiding a second `yt-dlp` probe. Both links and the saved metadata must identify the same video and include a known duration. Playlists, live streams, old or incomplete previews, and other sources retain the normal probe. The actual download still extracts fresh media URLs and embeds metadata and artwork; size checks and playlist ranges apply as before. Ordinary, cache-miss, batch, and `/log` downloads share this path.
+
 ## Cache behavior
 
 The primary cache stores Telegram `file_id` values in SQLite. A repeated request can therefore be delivered through Telegram without downloading or converting the track again. Cache entries expire after `CACHE_TTL`, which defaults to 180 days.

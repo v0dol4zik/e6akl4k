@@ -28,7 +28,7 @@ chmod 600 .env
 | `YTDLP_COOKIES_FILE` | `cookies.txt` | Netscape-format cookies file, read afresh for each isolated temporary copy. Replace it atomically; recreate the container after replacing a bind-mounted file. |
 | `YTDLP_SLEEP_REQUESTS` | `0` | Delay in seconds between `yt-dlp` HTTP requests, from 0 to 60. |
 | `YTDLP_CONCURRENT_FRAGMENTS` | `4` | Concurrent HLS/DASH fragments per `yt-dlp` process, from 1 to 16. |
-| `YTDLP_YOUTUBE_CLIENTS` | `tv_simply` | Comma-separated YouTube player clients that the download without cookies alternates with the `yt-dlp` default clients, for example `tv_simply,web` or `default,-web`; `default` keeps only the `yt-dlp` choice. See [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies). |
+| `YTDLP_YOUTUBE_CLIENTS` | `tv_simply` | First anonymous YouTube player clients, for example `tv_simply,web` or `default,-web`; failures try the `yt-dlp` defaults. Set `default` to start with the `yt-dlp` choice and retain `tv_simply` as fallback. The last successful set is tried first on subsequent downloads. See [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies). |
 | `YTDLP_YOUTUBE_COOKIE_CLIENTS` | `mweb` | Player clients for the download with cookies after YouTube asks to sign in. |
 | `YTDLP_POT_PROVIDER_URL` | empty | Base address of a bgutil PO token server for YouTube, such as `http://bgutil-pot:4416`; empty runs `yt-dlp` without PO tokens. See [YouTube PO tokens](#youtube-po-tokens). |
 
