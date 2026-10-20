@@ -408,7 +408,7 @@ func TestPlaylistSnapshotReusesPositionsCacheAndAliases(t *testing.T) {
 	if err != nil || len(results) != 4 {
 		t.Fatalf("results=%+v err=%v", results, err)
 	}
-	if results[1].Error == "" || results[2].Cached == nil || results[0].FilePath == "" || results[0].FilePath != results[3].FilePath {
+	if results[1].Error != "track unavailable" || results[2].Cached == nil || results[0].FilePath == "" || results[0].FilePath != results[3].FilePath {
 		t.Fatalf("results=%+v", results)
 	}
 	for i, r := range results {

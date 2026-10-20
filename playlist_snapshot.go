@@ -31,7 +31,7 @@ func youtubePlaylistSnapshot(rawURL string, info *mediaInfo) []playlistTrack {
 	return tracks
 }
 
-func (a *app) downloadSnapshotRange(ctx context.Context, pending pendingURL, format, quality string, start, end int, queued func(int)) ([]downloadResult, error) {
+func (a *app) downloadSnapshotRange(ctx context.Context, pending pendingURL, format, quality, lang string, start, end int, queued func(int)) ([]downloadResult, error) {
 	tracks := pending.Preview.PlaylistSnapshot
 	results := make([]downloadResult, end-start+1)
 	var items []pendingURL
@@ -40,7 +40,7 @@ func (a *app) downloadSnapshotRange(ctx context.Context, pending pendingURL, for
 		track := tracks[position-1]
 		i := position - start
 		if track.ID == "" {
-			results[i] = downloadResult{Title: track.Title, Error: "Трек недоступен"}
+			results[i] = downloadResult{Title: track.Title, Error: tr("playlist_track_unavailable", lang)}
 			continue
 		}
 		rawURL := "https://www.youtube.com/watch?v=" + track.ID

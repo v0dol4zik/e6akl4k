@@ -25,15 +25,16 @@ func searchedTracklist(preview mediaPreview) bool {
 	return preview.IsPlaylist && preview.Extractor == tracklistExtractor
 }
 
-// downloadPlaylistRange downloads the tracks start to end of a playlist selection within one
-// download slot: a playlist link through one yt-dlp run, a searched tracklist track by track.
+// downloadPlaylistRange prepares a playlist part under the global download
+// gate. Snapshots and searched tracklists use at most two per-track slots;
+// legacy playlist previews retain their original single-process path.
 func (a *app) downloadPlaylistRange(ctx context.Context, pending pendingURL, format, quality, lang string, start, end int, reporter *statusReporter) ([]downloadResult, error) {
 	queued := func(position int) {
 		reporter.stage(tr("queued", lang, "position", strconv.Itoa(position)))
 	}
 	if !searchedTracklist(pending.Preview) {
 		if start >= 1 && end >= start && len(pending.Preview.PlaylistSnapshot) == pending.Preview.TrackCount && end <= len(pending.Preview.PlaylistSnapshot) {
-			return a.downloadSnapshotRange(ctx, pending, format, quality, start, end, queued)
+			return a.downloadSnapshotRange(ctx, pending, format, quality, lang, start, end, queued)
 		}
 		return a.runDownloadRangeQueuedWithPreview(ctx, pending.URL, format, quality, start, end, pending.Preview, queued, nil)
 	}
@@ -44,8 +45,8 @@ func (a *app) downloadPlaylistRange(ctx context.Context, pending pendingURL, for
 	return a.downloadTracklistRangeWithCache(ctx, pending.Preview.Tracks, format, quality, lang, start, end, last, reporter, pending.Delivery != "zip")
 }
 
-// downloadTracklistRange searches the tracks start to end (1-based) of a tracklist on YouTube one
-// by one and downloads the best match of each. A track that is not found or fails to download
+// downloadTracklistRange searches the tracks start to end (1-based) of a tracklist on YouTube
+// with bounded parallelism and downloads the best match of each. A track that is not found or fails to download
 // becomes a failed result, so the rest of the list still downloads; last is the final track of
 // the whole selection, shown in the progress.
 func (a *app) downloadTracklistRange(ctx context.Context, tracks []exportTrack, format, quality, lang string, start, end, last int, reporter *statusReporter) ([]downloadResult, error) {
