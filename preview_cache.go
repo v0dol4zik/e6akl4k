@@ -63,6 +63,33 @@ type batchInspection struct {
 	err     error
 }
 
+// Naming a single video does not require extracting its playable formats. Keep
+// that work for the download, which also checks duration/live status and size.
+func (a *app) fastYouTubePreview(ctx context.Context, rawURL string) (mediaPreview, bool) {
+	if !a.cfg.YouTubeSingleExtract || singleYouTubeID(rawURL) == "" || ctx.Err() != nil {
+		return mediaPreview{}, false
+	}
+	previewCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	started := time.Now()
+	preview, err := youtubeOEmbedPreview(previewCtx, rawURL)
+	logMediaStageContext(ctx, "source_preview_metadata", "youtube", started, 0, err == nil)
+	return preview, err == nil
+}
+
+func youtubeOEmbedPreview(ctx context.Context, rawURL string) (mediaPreview, error) {
+	id := singleYouTubeID(rawURL)
+	if id == "" {
+		return mediaPreview{}, errors.New("not a single YouTube video")
+	}
+	canonical := "https://www.youtube.com/watch?v=" + id
+	title, artist, err := fetchOEmbed(ctx, "https://www.youtube.com/oembed?format=json&url="+url.QueryEscape(canonical))
+	if err != nil {
+		return mediaPreview{}, err
+	}
+	return mediaPreview{URL: rawURL, Title: title, Artist: artist, SourceID: id, Extractor: "youtube", Thumbnail: youtubeThumbnail(id), TrackCount: 1, direct: true}, nil
+}
+
 // A timed-out full probe can still offer the format keyboard. oEmbed has no
 // duration; the direct download path checks duration/live status before transfer.
 func (a *app) youtubePreviewAfterTimeout(ctx context.Context, rawURL string, probeErr error) (mediaPreview, error) {
@@ -73,13 +100,12 @@ func (a *app) youtubePreviewAfterTimeout(ctx context.Context, rawURL string, pro
 	fallbackCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	started := time.Now()
-	canonical := "https://www.youtube.com/watch?v=" + id
-	title, artist, err := fetchOEmbed(fallbackCtx, "https://www.youtube.com/oembed?format=json&url="+url.QueryEscape(canonical))
+	preview, err := youtubeOEmbedPreview(fallbackCtx, rawURL)
 	logMediaStageContext(ctx, "source_preview_fallback", "youtube", started, 0, err == nil)
 	if err != nil {
 		return mediaPreview{}, probeErr
 	}
-	return mediaPreview{URL: rawURL, Title: title, Artist: artist, SourceID: id, Extractor: "youtube", Thumbnail: youtubeThumbnail(id), TrackCount: 1, direct: true}, nil
+	return preview, nil
 }
 
 func (a *app) inspectBatchLinks(ctx context.Context, urls []string, format, quality string) []batchInspection {

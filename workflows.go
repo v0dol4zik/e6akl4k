@@ -57,7 +57,11 @@ func (a *app) openURL(message *tgbotapi.Message, rawURL, lang, format, quality s
 				return
 			}
 		}
-		preview, err = a.inspectURL(ctx, rawURL)
+		if quick, ok := a.fastYouTubePreview(ctx, rawURL); ok {
+			preview = quick
+		} else {
+			preview, err = a.inspectURL(ctx, rawURL)
+		}
 		release()
 	}
 	if err != nil {
