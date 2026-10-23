@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -142,11 +143,26 @@ func (a *app) streamBatch(ctx context.Context, chatID int64, items []pendingURL,
 		return preparedTrack{results: results, err: err}
 	}, func(i int, track preparedTrack) error {
 		if track.err != nil {
-			return track.err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(track.err, errQueueFull) {
+				return track.err
+			}
+			// A failed source must not discard later prepared tracks or suppress
+			// the partial-delivery summary. Request cancellation/admission stay fatal.
+			item := items[i]
+			track.results = []downloadResult{{URL: item.URL, Title: item.Preview.Title, Artist: item.Preview.Artist, Quality: quality, Error: track.err.Error()}}
 		}
 		// Delivery makes its own cleanup call; the outer one is idempotent.
 		for j := range track.results {
 			track.results[j].Position, track.results[j].Total = i+1, len(items)
+			if track.results[j].URL == "" {
+				track.results[j].URL = items[i].URL
+			}
+			if track.results[j].Error != "" && !track.results[j].TooLarge {
+				a.reportDownloadFailure(track.results[j].Error, sourceHost(track.results[j].URL))
+			}
 		}
 		report.add(a.sendResultsIndividuallyWithSummary(chatID, track.results, format, lang, false, reporter))
 		return ctx.Err()

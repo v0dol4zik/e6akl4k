@@ -41,6 +41,69 @@ esac
 	}
 }
 
+func TestYouTubePreviewTimeoutFallbackIsBoundedAndKeepsSourceGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name, rawURL                     string
+		err                              error
+		disabled, cancelled, unavailable bool
+		wantFallback                     bool
+	}{
+		{name: "valid", rawURL: "https://youtu.be/aaaaaaaaaaa", err: context.DeadlineExceeded, wantFallback: true},
+		{name: "playlist", rawURL: "https://youtube.com/watch?v=aaaaaaaaaaa&list=PL1", err: context.DeadlineExceeded},
+		{name: "unsafe host", rawURL: "https://youtube.com.evil/watch?v=aaaaaaaaaaa", err: context.DeadlineExceeded},
+		{name: "port", rawURL: "https://youtube.com:444/watch?v=aaaaaaaaaaa", err: context.DeadlineExceeded},
+		{name: "disabled", rawURL: "https://youtu.be/aaaaaaaaaaa", err: context.DeadlineExceeded, disabled: true},
+		{name: "cancelled request", rawURL: "https://youtu.be/aaaaaaaaaaa", err: context.DeadlineExceeded, cancelled: true},
+		{name: "cancelled probe", rawURL: "https://youtu.be/aaaaaaaaaaa", err: context.Canceled},
+		{name: "unavailable video", rawURL: "https://youtu.be/aaaaaaaaaaa", err: errors.New("video unavailable")},
+		{name: "unavailable oembed", rawURL: "https://youtu.be/aaaaaaaaaaa", err: context.DeadlineExceeded, unavailable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBatchHarness(t)
+			h.app.cfg.YouTubeSingleExtract = !tc.disabled
+			calls := 0
+			previous := makeResolverClient
+			makeResolverClient = func() httpDoer {
+				return handlerClient{handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if r.URL.Scheme != "https" || r.URL.Host != "www.youtube.com" || r.URL.Path != "/oembed" || r.URL.Query().Get("url") != "https://www.youtube.com/watch?v=aaaaaaaaaaa" {
+						t.Errorf("unexpected oEmbed endpoint: %s", r.URL)
+					}
+					deadline, ok := r.Context().Deadline()
+					if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 10*time.Second {
+						t.Error("oEmbed request has no bounded deadline")
+					}
+					if tc.unavailable {
+						w.WriteHeader(http.StatusForbidden)
+						return
+					}
+					fmt.Fprint(w, `{"title":"Title","author_name":"Artist"}`)
+				})}
+			}
+			t.Cleanup(func() { makeResolverClient = previous })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			preview, err := h.app.youtubePreviewAfterTimeout(ctx, tc.rawURL, tc.err)
+			if tc.wantFallback {
+				if err != nil || calls != 1 || preview.URL != tc.rawURL || preview.SourceID != "aaaaaaaaaaa" || preview.Title != "Title" || preview.Artist != "Artist" || !preview.direct || preview.IsPlaylist || preview.TrackCount != 1 || preview.DurationSeconds != 0 || preview.probe != nil {
+					t.Fatalf("preview=%+v err=%v calls=%d", preview, err, calls)
+				}
+			} else {
+				wantCalls := 0
+				if tc.unavailable {
+					wantCalls = 1
+				}
+				if !errors.Is(err, tc.err) || calls != wantCalls || preview.SourceID != "" {
+					t.Fatalf("preview=%+v err=%v calls=%d", preview, err, calls)
+				}
+			}
+		})
+	}
+}
+
 func TestContinuationQueueDoesNotConsumeNewRequestQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

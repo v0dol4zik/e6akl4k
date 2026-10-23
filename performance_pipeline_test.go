@@ -167,6 +167,40 @@ func TestBatchDownloadsOverlapPreserveOrderAndDeduplicateAliases(t *testing.T) {
 	}
 }
 
+func TestBatchPreviewCancellationKeepsCompletedResults(t *testing.T) {
+	h := newBatchHarness(t)
+	bin, dir := blockingMediaTool(t, true)
+	h.app.downloader.bin = bin
+	h.app.lookups = newJobGate(2, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	urls := []string{"https://youtu.be/aaaaaaaaaaa", "https://youtu.be/bbbbbbbbbbb", "https://youtu.be/ccccccccccc"}
+	done := make(chan []batchInspection, 1)
+	go func() { done <- h.app.inspectBatchLinks(ctx, urls, "", "") }()
+	waitMarker(t, dir, "aaaaaaaaaaa")
+	waitMarker(t, dir, "bbbbbbbbbbb")
+	releaseMarker(t, dir, "aaaaaaaaaaa")
+	// Starting the third link proves the first result was stored.
+	waitMarker(t, dir, "ccccccccccc")
+	cancel()
+	select {
+	case results := <-done:
+		if results[0].err != nil || results[0].preview.URL != urls[0] {
+			t.Fatalf("completed preview lost: %+v", results[0])
+		}
+		for i := 1; i < len(results); i++ {
+			if !errors.Is(results[i].err, context.Canceled) {
+				t.Fatalf("result %d: %+v", i, results[i])
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("preview workers did not stop")
+	}
+	if active, waiting, _ := h.app.lookups.snapshot(); active != 0 || waiting != 0 {
+		t.Fatalf("lookup gate leaked: %d/%d", active, waiting)
+	}
+}
+
 func TestBatchContinuationWorksWithoutWaitingQueueAndCancellationCleansFiles(t *testing.T) {
 	for _, cancelDownload := range []bool{false, true} {
 		t.Run(fmt.Sprint(cancelDownload), func(t *testing.T) {
@@ -324,6 +358,150 @@ func TestStreamingSendsBeforeSecondTrackAndBoundsReadyQueue(t *testing.T) {
 	}
 	if files, _ := os.ReadDir(h.app.downloader.downloadDir); len(files) != 0 {
 		t.Fatalf("remaining sessions: %v", files)
+	}
+}
+
+func TestStreamingContinuesAfterTrackDownloadFailure(t *testing.T) {
+	for _, failure := range []struct {
+		name, message     string
+		malformedManifest bool
+	}{
+		{name: "download", message: "HTTP 404"},
+		{name: "manifest", message: "unexpected end of JSON input", malformedManifest: true},
+	} {
+		for _, width := range []int{1, 2} {
+			for failedPosition, urls := range [][]string{
+				{"https://youtu.be/13", "https://youtu.be/11", "https://youtu.be/12"},
+				{"https://youtu.be/11", "https://youtu.be/13", "https://youtu.be/12"},
+				{"https://youtu.be/11", "https://youtu.be/12", "https://youtu.be/13"},
+			} {
+				t.Run(fmt.Sprintf("%s/workers=%d/failed=%d", failure.name, width, failedPosition+1), func(t *testing.T) {
+					h := newBatchHarness(t)
+					if failure.malformedManifest {
+						script, err := os.ReadFile(h.app.downloader.bin)
+						if err != nil {
+							t.Fatal(err)
+						}
+						// Let the failed source write a file, then corrupt only its manifest.
+						changed := strings.Replace(string(script), `if [ "$id" = 13 ]; then`, "if false; then", 1)
+						if changed == string(script) {
+							t.Fatal("failed source handler not found")
+						}
+						changed += "\n" + `if [ "$id" = 13 ]; then printf '{' > "$manifest"; fi` + "\n"
+						if err := os.WriteFile(h.app.downloader.bin, []byte(changed), 0700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					h.app.cfg.BatchStreamResults = true
+					h.app.cfg.BatchDownloadWorkers = width
+					h.app.cfg.DownloadWorkers = 2
+					h.app.downloads = newJobGate(2, 0)
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					report, err := h.app.downloadBatch(ctx, 10, pendingURL{Batch: urls, Delivery: "individual"}, "mp3", "320", "en", nil, &statusReporter{ctx: ctx})
+					if err != nil || report.Delivered != 2 || report.Failed != 1 {
+						t.Fatalf("report=%+v err=%v", report, err)
+					}
+					calls := h.snapshot()
+					if got := h.count("sendAudio", calls); got != 2 {
+						t.Fatalf("audio deliveries=%d, want 2", got)
+					}
+					summary := tr("all_sent_summary", "en", "sent", "2", "total", "3") + tr("some_failed_suffix", "en")
+					if !h.hasText(calls, summary) {
+						t.Fatalf("partial summary missing: %+v", calls)
+					}
+					errorsReported := 0
+					for _, call := range calls {
+						if call.method == "sendMessage" && strings.Contains(call.text, failure.message) {
+							errorsReported++
+						}
+					}
+					if errorsReported != 1 {
+						t.Fatalf("download error reports=%d, want 1", errorsReported)
+					}
+					if active, waiting, _ := h.app.downloads.snapshot(); active != 0 || waiting != 0 {
+						t.Fatalf("download gate leaked: %d/%d", active, waiting)
+					}
+					if files, _ := os.ReadDir(h.app.downloader.downloadDir); len(files) != 0 {
+						t.Fatalf("remaining sessions: %v", files)
+					}
+					if h.app.disk.reserved != 0 {
+						t.Fatalf("disk reservation leaked: %d", h.app.disk.reserved)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestStreamingCancellationStopsWorkersAndCleansFiles(t *testing.T) {
+	h := newBatchHarness(t)
+	bin, dir := blockingMediaTool(t, false)
+	h.app.downloader.bin = bin
+	h.app.cfg.DownloadWorkers = 2
+	h.app.cfg.BatchDownloadWorkers = 2
+	h.app.downloads = newJobGate(2, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	items := []pendingURL{{URL: "https://youtu.be/aaaaaaaaaaa"}, {URL: "https://youtu.be/bbbbbbbbbbb"}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.app.streamBatch(ctx, 10, items, "mp3", "best", "en", &statusReporter{ctx: ctx})
+		done <- err
+	}()
+	waitMarker(t, dir, "aaaaaaaaaaa")
+	waitMarker(t, dir, "bbbbbbbbbbb")
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not stop")
+	}
+	if active, waiting, _ := h.app.downloads.snapshot(); active != 0 || waiting != 0 {
+		t.Fatalf("download gate leaked: %d/%d", active, waiting)
+	}
+	if files, _ := os.ReadDir(h.app.downloader.downloadDir); len(files) != 0 {
+		t.Fatalf("remaining sessions: %v", files)
+	}
+	if h.app.disk.reserved != 0 {
+		t.Fatalf("disk reservation leaked: %d", h.app.disk.reserved)
+	}
+	if calls := h.snapshot(); h.count("sendAudio", calls) != 0 {
+		t.Fatalf("cancelled tracks were sent: %+v", calls)
+	}
+}
+
+func TestStreamingQueueRejectionRemainsRequestFailure(t *testing.T) {
+	h := newBatchHarness(t)
+	h.app.cfg.DownloadWorkers = 1
+	h.app.cfg.BatchDownloadWorkers = 2
+	h.app.downloads = newJobGate(1, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, release, err := h.app.downloads.acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	items := []pendingURL{{URL: "https://youtu.be/11"}, {URL: "https://youtu.be/12"}}
+	report, err := h.app.streamBatch(ctx, 10, items, "mp3", "320", "en", &statusReporter{ctx: ctx})
+	if !errors.Is(err, errQueueFull) || report.Delivered != 0 || report.Failed != 0 {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	if active, waiting, _ := h.app.downloads.snapshot(); active != 1 || waiting != 0 {
+		t.Fatalf("download gate changed: %d/%d", active, waiting)
+	}
+	if files, _ := os.ReadDir(h.app.downloader.downloadDir); len(files) != 0 {
+		t.Fatalf("remaining sessions: %v", files)
+	}
+	if h.app.disk.reserved != 0 {
+		t.Fatalf("disk reservation leaked: %d", h.app.disk.reserved)
+	}
+	if calls := h.snapshot(); h.count("sendMessage", calls) != 0 || h.count("sendAudio", calls) != 0 {
+		t.Fatalf("queue rejection was reported as individual track failures: %+v", calls)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strings"
 	"sync"
@@ -62,6 +63,25 @@ type batchInspection struct {
 	err     error
 }
 
+// A timed-out full probe can still offer the format keyboard. oEmbed has no
+// duration; the direct download path checks duration/live status before transfer.
+func (a *app) youtubePreviewAfterTimeout(ctx context.Context, rawURL string, probeErr error) (mediaPreview, error) {
+	id := singleYouTubeID(rawURL)
+	if !a.cfg.YouTubeSingleExtract || id == "" || ctx.Err() != nil || !errors.Is(probeErr, context.DeadlineExceeded) {
+		return mediaPreview{}, probeErr
+	}
+	fallbackCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	started := time.Now()
+	canonical := "https://www.youtube.com/watch?v=" + id
+	title, artist, err := fetchOEmbed(fallbackCtx, "https://www.youtube.com/oembed?format=json&url="+url.QueryEscape(canonical))
+	logMediaStageContext(ctx, "source_preview_fallback", "youtube", started, 0, err == nil)
+	if err != nil {
+		return mediaPreview{}, probeErr
+	}
+	return mediaPreview{URL: rawURL, Title: title, Artist: artist, SourceID: id, Extractor: "youtube", Thumbnail: youtubeThumbnail(id), TrackCount: 1, direct: true}, nil
+}
+
 func (a *app) inspectBatchLinks(ctx context.Context, urls []string, format, quality string) []batchInspection {
 	results := make([]batchInspection, len(urls))
 	jobs := make(chan int, len(urls))
@@ -97,6 +117,9 @@ func (a *app) inspectBatchLinks(ctx context.Context, urls []string, format, qual
 					}
 					defer release()
 					results[i].preview, results[i].err = a.inspectURL(linkCtx, rawURL)
+					if results[i].err != nil {
+						results[i].preview, results[i].err = a.youtubePreviewAfterTimeout(ctx, rawURL, results[i].err)
+					}
 				}()
 			}
 		})

@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/musicbo
 FROM debian:bookworm-slim
 
 ARG TARGETARCH
-ARG YTDLP_VERSION=2026.08.19
+ARG YTDLP_VERSION=2026.10.21
 ARG DENO_VERSION=2.9.5
 # The yt-dlp plugin for the bgutil PO token server; its version must match the bgutil-pot image
 # in docker-compose.yml. It sits outside yt-dlp's default plugin folders and loads only with
