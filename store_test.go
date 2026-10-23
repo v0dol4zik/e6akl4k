@@ -184,7 +184,7 @@ func TestStoreAggregatesMediaPerformance(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("rows=%#v err=%v", rows, err)
 	}
-	if rows[0].Count != 5 || rows[0].OK != 4 || rows[0].P50 != 30*time.Millisecond || rows[0].P95 != 40*time.Millisecond {
+	if rows[0].Count != 5 || rows[0].OK != 4 || rows[0].P50 != 20*time.Millisecond || rows[0].P95 != 40*time.Millisecond || rows[0].FailedP95 != 100*time.Millisecond {
 		t.Fatalf("performance=%#v", rows[0])
 	}
 }

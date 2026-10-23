@@ -91,7 +91,7 @@ func TestMetricsExportsCacheAndStageSeries(t *testing.T) {
 		{name: "counter row", line: `musicbot_counter_total{name="cache_hits"} 3`},
 		{name: "custom counter row", line: `musicbot_counter_total{name="custom_counter"} 1`},
 		{name: "cache hit ratio", line: "musicbot_cache_hit_ratio 0.7500"},
-		{name: "p50", line: `musicbot_stage_seconds{stage="source_download",source="youtube",quantile="0.5"} 0.030000`},
+		{name: "p50", line: `musicbot_stage_seconds{stage="source_download",source="youtube",quantile="0.5"} 0.020000`},
 		{name: "p95", line: `musicbot_stage_seconds{stage="source_download",source="youtube",quantile="0.95"} 0.040000`},
 		{name: "ok ratio", line: `musicbot_stage_ok_ratio{stage="source_download",source="youtube"} 0.8000`},
 		{name: "mode-less upload aggregate", line: `musicbot_stage_ok_ratio{stage="telegram_upload",source="telegram"} 1.0000`},

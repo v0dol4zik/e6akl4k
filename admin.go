@@ -475,7 +475,13 @@ func (a *app) handleAdminPerf(message *tgbotapi.Message) {
 		if row.Mode != "" {
 			name += ":" + row.Mode
 		}
+		if row.Format != "" {
+			name += ":" + row.Format + ":" + row.Quality
+		}
 		line := fmt.Sprintf("<code>%s</code> · n=%d · ok=%d%% · p50=%s · p95=%s", html.EscapeString(name), row.Count, success, shortDuration(row.P50), shortDuration(row.P95))
+		if row.FailedP95 > 0 {
+			line += " · error p95=" + shortDuration(row.FailedP95)
+		}
 		if row.Throughput > 0 {
 			line += " · " + humanSize(row.Throughput, lang) + "/s"
 		}

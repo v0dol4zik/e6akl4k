@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -25,6 +26,9 @@ type stagePerformance struct {
 	Stage      string
 	Source     string
 	Mode       string
+	Format     string
+	Quality    string
+	FailedP95  time.Duration
 	Count      int
 	OK         int
 	P50        time.Duration
@@ -60,6 +64,10 @@ func startMediaMetricsRecorder(ctx context.Context, state *store) *mediaMetricsR
 }
 
 func logMediaStage(stage, source string, started time.Time, size int64, ok bool, extra ...any) {
+	logMediaStageContext(context.Background(), stage, source, started, size, ok, extra...)
+}
+
+func logMediaStageContext(ctx context.Context, stage, source string, started time.Time, size int64, ok bool, extra ...any) {
 	elapsed := time.Since(started)
 	attributes := []any{
 		"stage", stage,
@@ -87,6 +95,21 @@ func logMediaStage(stage, source string, started time.Time, size int64, ok bool,
 		}
 	}
 	attributes = append(attributes, extra...)
+	if operation := mediaOperationFromContext(ctx); operation != nil {
+		attributes = append(attributes, "trace_id", operation.id, "request_mode", operation.mode)
+		if sample.Mode == "" {
+			sample.Mode = operation.mode
+			attributes = append(attributes, "mode", sample.Mode)
+		}
+		if sample.Format == "" && operation.format != "" {
+			sample.Format = operation.format
+			attributes = append(attributes, "format", sample.Format)
+		}
+		if sample.Quality == "" && operation.quality != "" {
+			sample.Quality = operation.quality
+			attributes = append(attributes, "quality", sample.Quality)
+		}
+	}
 	slog.Info("media_stage", attributes...)
 	if recorder := activeMediaRecorder.Load(); recorder != nil {
 		select {
@@ -114,7 +137,7 @@ func (s *store) mediaPerformance(ctx context.Context, since time.Time) ([]stageP
 
 // mediaStageSamples loads bounded raw samples recorded at or after since.
 func (s *store) mediaStageSamples(ctx context.Context, since time.Time) ([]mediaStageSample, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT stage,source,mode,elapsed_ms,size_bytes,ok FROM media_stage_samples WHERE created_at>=? ORDER BY stage,source,mode,elapsed_ms LIMIT 50000`, since.Unix())
+	rows, err := s.db.QueryContext(ctx, `SELECT stage,source,mode,format,quality,elapsed_ms,size_bytes,ok FROM media_stage_samples WHERE created_at>=? ORDER BY stage,source,mode,elapsed_ms LIMIT 50000`, since.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +145,7 @@ func (s *store) mediaStageSamples(ctx context.Context, since time.Time) ([]media
 	var samples []mediaStageSample
 	for rows.Next() {
 		var sample mediaStageSample
-		if err := rows.Scan(&sample.Stage, &sample.Source, &sample.Mode, &sample.ElapsedMS, &sample.SizeBytes, &sample.OK); err != nil {
+		if err := rows.Scan(&sample.Stage, &sample.Source, &sample.Mode, &sample.Format, &sample.Quality, &sample.ElapsedMS, &sample.SizeBytes, &sample.OK); err != nil {
 			return nil, err
 		}
 		samples = append(samples, sample)
@@ -133,11 +156,17 @@ func (s *store) mediaStageSamples(ctx context.Context, since time.Time) ([]media
 // aggregateStagePerformance buckets samples by stage and source, additionally
 // by mode when byMode is set, and computes counts, P50/P95 and throughput.
 func aggregateStagePerformance(samples []mediaStageSample, byMode bool) []stagePerformance {
+	return aggregateMediaPerformance(samples, byMode, byMode)
+}
+
+func aggregateMediaPerformance(samples []mediaStageSample, byMode, byVariant bool) []stagePerformance {
 	type bucket struct {
-		stage, source, mode string
-		elapsed             []int64
-		ok                  int
-		bytes               int64
+		stage, source, mode, format, quality string
+		elapsed                              []int64
+		failed                               []int64
+		count                                int
+		ok                                   int
+		bytes                                int64
 	}
 	buckets := make(map[string]*bucket)
 	for _, sample := range samples {
@@ -145,22 +174,30 @@ func aggregateStagePerformance(samples []mediaStageSample, byMode bool) []stageP
 		if !byMode {
 			mode = ""
 		}
-		key := sample.Stage + "\x00" + sample.Source + "\x00" + mode
+		format, quality := sample.Format, sample.Quality
+		if !byVariant {
+			format, quality = "", ""
+		}
+		key := strings.Join([]string{sample.Stage, sample.Source, mode, format, quality}, "\x00")
 		item := buckets[key]
 		if item == nil {
-			item = &bucket{stage: sample.Stage, source: sample.Source, mode: mode}
+			item = &bucket{stage: sample.Stage, source: sample.Source, mode: mode, format: format, quality: quality}
 			buckets[key] = item
 		}
-		item.elapsed = append(item.elapsed, sample.ElapsedMS)
-		item.bytes += sample.SizeBytes
+		item.count++
 		if sample.OK {
 			item.ok++
+			item.elapsed = append(item.elapsed, sample.ElapsedMS)
+			item.bytes += sample.SizeBytes
+		} else {
+			item.failed = append(item.failed, sample.ElapsedMS)
 		}
 	}
 	result := make([]stagePerformance, 0, len(buckets))
 	for _, bucket := range buckets {
 		sort.Slice(bucket.elapsed, func(i, j int) bool { return bucket.elapsed[i] < bucket.elapsed[j] })
-		count := len(bucket.elapsed)
+		sort.Slice(bucket.failed, func(i, j int) bool { return bucket.failed[i] < bucket.failed[j] })
+		count := bucket.count
 		p50, p95 := percentile(bucket.elapsed, 0.50), percentile(bucket.elapsed, 0.95)
 		var totalMS int64
 		for _, elapsed := range bucket.elapsed {
@@ -170,7 +207,7 @@ func aggregateStagePerformance(samples []mediaStageSample, byMode bool) []stageP
 		if totalMS > 0 {
 			throughput = bucket.bytes * 1000 / totalMS
 		}
-		result = append(result, stagePerformance{Stage: bucket.stage, Source: bucket.source, Mode: bucket.mode, Count: count, OK: bucket.ok, P50: time.Duration(p50) * time.Millisecond, P95: time.Duration(p95) * time.Millisecond, Bytes: bucket.bytes, Throughput: throughput})
+		result = append(result, stagePerformance{Stage: bucket.stage, Source: bucket.source, Mode: bucket.mode, Format: bucket.format, Quality: bucket.quality, FailedP95: time.Duration(percentile(bucket.failed, 0.95)) * time.Millisecond, Count: count, OK: bucket.ok, P50: time.Duration(p50) * time.Millisecond, P95: time.Duration(p95) * time.Millisecond, Bytes: bucket.bytes, Throughput: throughput})
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].P95 != result[j].P95 {
@@ -182,7 +219,7 @@ func aggregateStagePerformance(samples []mediaStageSample, byMode bool) []stageP
 		if result[i].Source != result[j].Source {
 			return strings.Compare(result[i].Source, result[j].Source) < 0
 		}
-		return strings.Compare(result[i].Mode, result[j].Mode) < 0
+		return strings.Compare(result[i].Mode+":"+result[i].Format+":"+result[i].Quality, result[j].Mode+":"+result[j].Format+":"+result[j].Quality) < 0
 	})
 	return result
 }
@@ -191,7 +228,7 @@ func percentile(sorted []int64, fraction float64) int64 {
 	if len(sorted) == 0 {
 		return 0
 	}
-	index := int(float64(len(sorted)-1) * fraction)
+	index := int(math.Ceil(float64(len(sorted))*fraction)) - 1
 	if index < 0 {
 		index = 0
 	}
