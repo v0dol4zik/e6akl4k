@@ -96,6 +96,17 @@ If only the first command fails with `403` while Watch Later passes, authenticat
 
 When YouTube changes which clients work, compare them with the same command and `--extractor-args youtube:player_client=<client>` (with and without `--cookies`), then set the clients that download fully in `.env` without rebuilding the image. `--test` is not enough: it fetches only the first 10 KiB, which often succeeds where the full download gets `403`. The longer-term fix is a PO token provider: the optional `bgutil-pot` service runs third-party code next to the bot, so it is off by default; see [YouTube PO tokens](configuration.md#youtube-po-tokens). With `YTDLP_POT_PROVIDER_URL` set, add `--plugin-dirs /opt/yt-dlp-plugins --extractor-args youtubepot-bgutilhttp:base_url=http://bgutil-pot:4416 -v` to the commands above; the verbose log then lists `bgutil:http` among the PO token providers.
 
+## VK Music cookies
+
+VK Music returns full tracks only to a signed-in session. Export cookies from a browser where music plays on `vk.ru` in Netscape format and deploy them as the optional VK cookies file:
+
+```bash
+sudo install -o 10001 -g 10001 -m 0600 "$HOME/vk-cookies.txt" ./vk-cookies.txt
+./deploy.sh
+```
+
+The mount is optional: without the file, the bot answers VK Music links with a message that the administrator needs to connect a VK session. Only cookies for VK origins are used, even if the export contains other sites; each `yt-dlp` operation works with an isolated temporary copy. VK issues the session cookie (`remixsts`) with a short client-side lifetime, so the browser export date can already be in the past — the server keeps accepting it while the server-side session is alive. When the bot starts reporting that a VK session is required, export fresh cookies and replace the mounted file; `deploy.sh` never overwrites it.
+
 ## Operations
 
 ```bash

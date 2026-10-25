@@ -17,11 +17,13 @@
 
 `e6akl4k` is a self-hosted Telegram bot for finding and downloading music. Send it a song name or a link, choose the format, and receive the finished audio directly in Telegram.
 
-Title searches use YouTube. Supported audio links, including Newgrounds tracks, are downloaded directly from their source. It also supports albums, playlists, inline search, MP3, FLAC, M4A, OGG, download history, Telegram file caching, tracklist and cover export, and last.fm lists. Spotify, Apple Music, Deezer, Tidal, and Yandex Music links are used as search hints rather than direct audio sources.
+Title searches use YouTube. Supported audio links, including Newgrounds tracks and VK Music, are downloaded directly from their source. It also supports albums, playlists, inline search, MP3, FLAC, M4A, OGG, download history, Telegram file caching, tracklist and cover export, and last.fm lists. Spotify, Apple Music, Deezer, Tidal, and Yandex Music links are used as search hints rather than direct audio sources.
 
 Send a voice message with 5–20 seconds of music playing to recognize it through Shazam and receive the full song as MP3 320. Recordings of 3–60 seconds up to 2 MiB are accepted in private chat. An uncertain YouTube match is offered for selection. Docker includes recognition support; [native setup](docs/configuration.md#music-recognition) uses Python and `requirements-shazam.txt`, with no Shazam API key.
 
 For Newgrounds, send an audio page such as `https://www.newgrounds.com/audio/listen/549479` and choose the format. Public audio tracks need no extra configuration or API key; title search still uses YouTube.
+
+For VK Music, send a track, album, or playlist link such as `https://vk.ru/audio700781870_456239768` and choose the format. Full tracks require an administrator-exported VK session file (`vk-cookies.txt`, Netscape format); without it, the bot explains that the administrator needs to connect a VK session. See [deployment](docs/deployment.md#vk-music-cookies).
 
 Try the public bot: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 
@@ -53,11 +55,13 @@ git pull --ff-only origin main
 
 `e6akl4k` — self-hosted Telegram-бот для поиска и скачивания музыки. Отправь ему название песни или ссылку, выбери формат и получи готовый аудиофайл прямо в Telegram.
 
-Поиск по названию работает через YouTube. Поддерживаемые аудиоссылки, включая треки Newgrounds, скачиваются напрямую с исходного сервиса. Он также поддерживает альбомы, плейлисты, inline-поиск, MP3, FLAC, M4A, OGG, историю загрузок, Telegram-кэш, экспорт треклистов и обложек и списки last.fm. Ссылки Spotify, Apple Music, Deezer, Tidal и Яндекс Музыки используются как подсказки для поиска, а не как прямые источники аудио.
+Поиск по названию работает через YouTube. Поддерживаемые аудиоссылки, включая треки Newgrounds и VK Музыку, скачиваются напрямую с исходного сервиса. Он также поддерживает альбомы, плейлисты, inline-поиск, MP3, FLAC, M4A, OGG, историю загрузок, Telegram-кэш, экспорт треклистов и обложек и списки last.fm. Ссылки Spotify, Apple Music, Deezer, Tidal и Яндекс Музыки используются как подсказки для поиска, а не как прямые источники аудио.
 
 Отправь в личный чат голосовое с 5–20 секундами звучащей музыки: бот распознает песню через Shazam и пришлёт полный трек в MP3 320. Принимаются записи от 3 до 60 секунд размером до 2 МиБ. Если совпадение на YouTube сомнительное, бот предложит выбрать версию. В Docker всё уже установлено; для [нативного запуска](docs/configuration.md#music-recognition) нужны Python и `requirements-shazam.txt`, ключ Shazam не требуется.
 
 Для Newgrounds пришли страницу аудиотрека, например `https://www.newgrounds.com/audio/listen/549479`, и выбери формат. Для публичных треков не нужны дополнительные настройки или API-ключ; поиск по названию по-прежнему работает через YouTube.
+
+Для VK Музыки пришли ссылку на трек, альбом или плейлист, например `https://vk.ru/audio700781870_456239768`, и выбери формат. Полные треки требуют файла сессии VK, экспортированного администратором (`vk-cookies.txt`, формат Netscape); без него бот ответит, что администратору нужно подключить сессию VK. Подробнее — в [документации по деплою](docs/deployment.md#vk-music-cookies).
 
 Попробовать публичного бота: [@e6akl4k_bot](https://t.me/e6akl4k_bot)
 

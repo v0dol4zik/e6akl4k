@@ -246,6 +246,8 @@ type downloader struct {
 	ffmpegBin          string
 	downloadDir        string
 	cookiesFile        string
+	vkCookiesFile      string
+	vkGate             vkMusicGate
 	maxFileSize        int64
 	maxPlaylistTracks  int
 	ytdlpSleepRequests int
@@ -337,6 +339,7 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 		ffmpegBin:         ffmpegBin,
 		downloadDir:       absoluteDir,
 		cookiesFile:       cookiesFile,
+		vkCookiesFile:     strings.TrimSpace(os.Getenv("VK_COOKIES_FILE")),
 		maxFileSize:       maxFileSize,
 		maxPlaylistTracks: maxPlaylistTracks,
 	}
@@ -438,6 +441,12 @@ func previewCanSkipProbe(rawURL string, preview mediaPreview) bool {
 	if info.Type == "playlist" || len(info.Entries) > 0 || !(info.Duration > 0) ||
 		info.IsLive || (info.LiveStatus != "" && info.LiveStatus != "not_live" && info.LiveStatus != "was_live") {
 		return false
+	}
+	if target, ok := parseVKMusicURL(rawURL); ok && !target.Playlist {
+		previous, previousOK := parseVKMusicURL(preview.URL)
+		return previousOK && previous == target && strings.EqualFold(preview.Extractor, "vk_music") &&
+			strings.EqualFold(firstNonEmpty(info.Extractor, info.ExtractorKey), "vk_music") &&
+			info.ID == target.sourceID() && preview.SourceID == info.ID
 	}
 	if !strings.EqualFold(preview.Extractor, "youtube") ||
 		!strings.EqualFold(firstNonEmpty(info.Extractor, info.ExtractorKey), "youtube") ||
@@ -636,6 +645,13 @@ func (d *downloader) downloadRangeWithPreview(ctx context.Context, url, format, 
 		}
 		results[resultIndex].FilePath = path
 		results[resultIndex].applyManifest(downloaded[match], format, quality)
+		if _, vk := parseVKMusicURL(url); vk {
+			if err := d.verifyVKMusicAudio(ctx, path, max(int(entry.Duration), results[resultIndex].DurationSeconds)); err != nil {
+				_ = os.Remove(path)
+				results[resultIndex].FilePath = ""
+				results[resultIndex].Error = err.Error()
+			}
+		}
 	}
 
 	for _, result := range results {
@@ -751,12 +767,17 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 }
 
 func (d *downloader) runWithProgress(ctx context.Context, args []string, manifest string, progress downloadProgress, total int) ([]byte, string, error) {
-	args, clearExtractor, err := d.newgroundsExtractorArgs(args)
+	release, err := d.acquireVKMusic(ctx, args)
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
+	args, clearExtractor, err := d.sourceExtractorArgs(args)
 	if err != nil {
 		return nil, "", err
 	}
 	defer clearExtractor()
-	cookies, cleanup, err := d.isolatedCookieFile()
+	cookies, cleanup, err := d.isolatedCookiesForArgs(args)
 	if err != nil {
 		return nil, "", err
 	}
@@ -956,10 +977,11 @@ func (d *downloader) runWithProgressOnce(ctx context.Context, args []string, man
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
+	message, err := vkMusicProcessError(args, stderr.String(), err)
 	if err != nil {
-		log.Printf("yt-dlp завершился с ошибкой: %v: %s", err, firstLine(stderr.String()))
+		log.Printf("yt-dlp завершился с ошибкой: %v: %s", err, firstLine(message))
 	}
-	return []byte(stdout.String()), stderr.String(), err
+	return []byte(stdout.String()), message, err
 }
 
 func (d *downloader) commonArgs() []string {
@@ -1037,12 +1059,17 @@ func argsHaveYouTubeTarget(args []string) bool {
 }
 
 func (d *downloader) run(ctx context.Context, args ...string) ([]byte, string, error) {
-	args, clearExtractor, err := d.newgroundsExtractorArgs(args)
+	release, err := d.acquireVKMusic(ctx, args)
+	if err != nil {
+		return nil, "", err
+	}
+	defer release()
+	args, clearExtractor, err := d.sourceExtractorArgs(args)
 	if err != nil {
 		return nil, "", err
 	}
 	defer clearExtractor()
-	cookies, cleanup, err := d.isolatedCookieFile()
+	cookies, cleanup, err := d.isolatedCookiesForArgs(args)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1099,13 +1126,14 @@ func (d *downloader) runOnceLogged(ctx context.Context, args []string, logFailur
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
+	message, err := vkMusicProcessError(args, stderr.String(), err)
 	if err != nil && logFailure {
-		log.Printf("yt-dlp завершился с ошибкой: %v: %s", err, firstLine(stderr.String()))
+		log.Printf("yt-dlp завершился с ошибкой: %v: %s", err, firstLine(message))
 	}
 	if !logFailure {
-		return []byte(privateStdout.String()), stderr.String(), err
+		return []byte(privateStdout.String()), message, err
 	}
-	return stdout.Bytes(), stderr.String(), err
+	return stdout.Bytes(), message, err
 }
 
 func (d *downloader) isolatedCookieFile() (string, func(), error) {
@@ -1125,10 +1153,14 @@ type cookieSnapshot struct {
 // readCookieSnapshot reads the current file on every operation. An open file and its metadata
 // belong to the same snapshot; replacing cookies never changes an in-flight isolated copy.
 func (d *downloader) readCookieSnapshot() (cookieSnapshot, error) {
-	if d.cookiesFile == "" {
+	return readCookieSnapshotFile(d.cookiesFile)
+}
+
+func readCookieSnapshotFile(path string) (cookieSnapshot, error) {
+	if path == "" {
 		return cookieSnapshot{}, nil
 	}
-	file, err := os.Open(d.cookiesFile)
+	file, err := os.Open(path)
 	if err != nil {
 		return cookieSnapshot{}, err
 	}

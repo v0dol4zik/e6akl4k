@@ -304,6 +304,17 @@ func normalizeDetectedURL(rawURL string) string {
 		return ""
 	}
 	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if vkMusicHost(host) {
+		if parsed.Host != parsed.Hostname() {
+			return ""
+		}
+		if target, ok := parseVKMusicURL(rawURL); ok {
+			return target.canonicalURL()
+		}
+		if strings.HasPrefix(parsed.EscapedPath(), "/audio_playlist") || strings.HasPrefix(parsed.EscapedPath(), "/music/album/") || (strings.HasPrefix(parsed.EscapedPath(), "/audio") && parsed.Path != "/audio" && !strings.HasPrefix(parsed.Path, "/audios")) {
+			return ""
+		}
+	}
 	if host == "newgrounds.com" || host == "www.newgrounds.com" {
 		// Accept only public audio pages; canonical links also share the URL cache.
 		match := newgroundsAudioPathPattern.FindStringSubmatch(parsed.EscapedPath())
@@ -337,7 +348,7 @@ func allowedHost(host string) bool {
 	if host == "newgrounds.com" || host == "www.newgrounds.com" {
 		return true
 	}
-	for _, domain := range []string{"youtube.com", "youtu.be", "spotify.com", "soundcloud.com", "music.apple.com", "deezer.com", "tidal.com", "bandcamp.com", "vk.com", "ok.ru", "mixcloud.com", "audiomack.com"} {
+	for _, domain := range []string{"youtube.com", "youtu.be", "spotify.com", "soundcloud.com", "music.apple.com", "deezer.com", "tidal.com", "bandcamp.com", "vk.com", "vk.ru", "ok.ru", "mixcloud.com", "audiomack.com"} {
 		if host == domain || strings.HasSuffix(host, "."+domain) {
 			return true
 		}

@@ -12,6 +12,7 @@ services:
       - .env
     environment:
       YTDLP_COOKIES_FILE: /app/cookies.txt
+      VK_COOKIES_FILE: /app/vk-cookies.txt
       HTTP_ADDR: 0.0.0.0:8080
       LOG_FORMAT: json
     volumes:
@@ -35,6 +36,14 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: ./vk-cookies.txt
+        target: /app/vk-cookies.txt
+        read_only: true
+        bind:
+          create_host_path: false
+          # VK cookies are optional: without them, the bot politely refuses VK links.
+          required: false
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777,exec

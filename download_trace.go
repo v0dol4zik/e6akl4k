@@ -45,6 +45,10 @@ func (t *downloadTrace) text() string {
 }
 
 func safeTraceURL(raw string) string {
+	if target, ok := parseVKMusicURL(raw); ok {
+		target.AccessKey = ""
+		return target.canonicalURL()
+	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "[invalid-url]"
