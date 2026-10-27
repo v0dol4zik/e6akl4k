@@ -118,6 +118,9 @@ func TestCreateZIPConsumesPackedTracks(t *testing.T) {
 		}
 		results = append(results, downloadResult{FilePath: path, Title: name})
 	}
+	// Repeated aliases can point at the same local file. Consume it only
+	// after its final archive entry has been written.
+	results = append(results, results[0])
 	archive := filepath.Join(dir, "batch.zip")
 	if err := createZIP(archive, results, true); err != nil {
 		t.Fatal(err)
@@ -132,7 +135,7 @@ func TestCreateZIPConsumesPackedTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	if len(reader.File) != 2 {
+	if len(reader.File) != 3 {
 		t.Fatalf("archive holds %d files", len(reader.File))
 	}
 }

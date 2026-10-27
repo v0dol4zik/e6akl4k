@@ -13,6 +13,7 @@ import (
 )
 
 type statusReporter struct {
+	ctx       context.Context
 	app       *app
 	message   *tgbotapi.Message
 	lang      string
@@ -43,7 +44,7 @@ func newStatusReporter(ctx context.Context, application *app, message *tgbotapi.
 		return nil
 	}
 	reporterCtx, cancel := context.WithCancel(ctx)
-	reporter := &statusReporter{app: application, message: message, lang: lang, cancelKey: cancelKey, updates: make(chan string, 1), cancel: cancel, lastPct: -1}
+	reporter := &statusReporter{ctx: ctx, app: application, message: message, lang: lang, cancelKey: cancelKey, updates: make(chan string, 1), cancel: cancel, lastPct: -1}
 	go reporter.loop(reporterCtx)
 	return reporter
 }

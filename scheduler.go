@@ -18,8 +18,9 @@ type jobGate struct {
 }
 
 type gateWaiter struct {
-	ready   chan struct{}
-	granted bool
+	ready        chan struct{}
+	granted      bool
+	continuation bool
 }
 
 func newJobGate(workers, queue int) *jobGate {
@@ -37,17 +38,41 @@ func (g *jobGate) acquire(ctx context.Context) (int, func(), error) {
 }
 
 func (g *jobGate) acquireNotify(ctx context.Context, queued func(int)) (int, func(), error) {
+	return g.acquireJob(ctx, queued, false)
+}
+
+// Continuations belong to an admitted request, which may yield its slot
+// between tracks even with no queue for new requests. At most two workers per
+// request and 256 update handlers bound this separate queue to 512 waiters.
+func (g *jobGate) acquireContinuation(ctx context.Context, queued func(int)) (int, func(), error) {
+	return g.acquireJob(ctx, queued, true)
+}
+
+func (g *jobGate) acquireJob(ctx context.Context, queued func(int), continuation bool) (int, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
 	g.mu.Lock()
 	if g.active < g.workerLimit && len(g.waiters) == 0 {
 		g.active++
 		g.mu.Unlock()
 		return 0, g.releaseFunc(), nil
 	}
-	if len(g.waiters) >= g.queueLimit {
+	waiting := 0
+	for _, waiter := range g.waiters {
+		if waiter.continuation == continuation {
+			waiting++
+		}
+	}
+	limit := g.queueLimit
+	if continuation {
+		limit = 512
+	}
+	if waiting >= limit {
 		g.mu.Unlock()
 		return 0, nil, errQueueFull
 	}
-	waiter := &gateWaiter{ready: make(chan struct{})}
+	waiter := &gateWaiter{ready: make(chan struct{}), continuation: continuation}
 	g.waiters = append(g.waiters, waiter)
 	position := len(g.waiters)
 	g.mu.Unlock()
@@ -147,9 +172,11 @@ func (r *rateLimiter) allow(userID int64) (bool, time.Duration) {
 }
 
 type flightCall struct {
-	done  chan struct{}
-	value cachedAudio
-	err   error
+	done   chan struct{}
+	value  cachedAudio
+	err    error
+	refs   int
+	cancel context.CancelFunc
 }
 
 type flightGroup struct {
@@ -158,26 +185,54 @@ type flightGroup struct {
 }
 
 func (g *flightGroup) do(ctx context.Context, key string, fn func() (cachedAudio, error)) (cachedAudio, error) {
+	return g.doContext(ctx, key, func(context.Context) (cachedAudio, error) { return fn() })
+}
+
+func (g *flightGroup) doContext(ctx context.Context, key string, fn func(context.Context) (cachedAudio, error)) (cachedAudio, error) {
+	if err := ctx.Err(); err != nil {
+		return cachedAudio{}, err
+	}
 	g.mu.Lock()
 	if g.m == nil {
 		g.m = make(map[string]*flightCall)
 	}
-	if call := g.m[key]; call != nil {
-		g.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.value, call.err
-		case <-ctx.Done():
-			return cachedAudio{}, ctx.Err()
-		}
+	call := g.m[key]
+	if call == nil {
+		workCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		call = &flightCall{done: make(chan struct{}), cancel: cancel}
+		g.m[key] = call
+		go func() {
+			call.value, call.err = fn(workCtx)
+			cancel()
+			g.mu.Lock()
+			if g.m[key] == call {
+				delete(g.m, key)
+			}
+			close(call.done)
+			g.mu.Unlock()
+		}()
 	}
-	call := &flightCall{done: make(chan struct{})}
-	g.m[key] = call
+	call.refs++
 	g.mu.Unlock()
-	call.value, call.err = fn()
-	g.mu.Lock()
-	delete(g.m, key)
-	close(call.done)
-	g.mu.Unlock()
-	return call.value, call.err
+	defer func() {
+		g.mu.Lock()
+		call.refs--
+		last := call.refs == 0
+		if last {
+			if g.m[key] == call {
+				delete(g.m, key)
+			}
+			call.cancel()
+		}
+		g.mu.Unlock()
+		if last {
+			<-call.done
+		}
+	}()
+	select {
+	case <-call.done:
+		return call.value, call.err
+	case <-ctx.Done():
+		return cachedAudio{}, ctx.Err()
+	}
 }

@@ -9,17 +9,23 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDownloadRangeSelectsOnlyRequestedPlaylistItems(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fake-yt-dlp")
+	countFile := filepath.Join(dir, "probe-count")
 	entries := make([]string, 30)
 	for i := range entries {
 		entries[i] = fmt.Sprintf(`{"_type":"url","ie_key":"Youtube","id":"id%d","url":"https://www.youtube.com/watch?v=id%d","title":"Track %d","duration":60}`, i+1, i+1, i+1)
 	}
 	// A full probe of the playlist would open every video; only the flat listing is answered.
 	script := `#!/bin/sh
+count_file="` + countFile + `"
+case " $* " in
+  *" --simulate "*) printf 'probe\n' >> "$count_file" ;;
+esac
 case " $* " in
   *" --simulate "*" --flat-playlist "*|*" --flat-playlist "*" --simulate "*) printf '%s' '{"_type":"playlist","title":"List","entries":[` + strings.Join(entries, ",") + `]}' ; exit 0 ;;
   *" --simulate "*) exit 1 ;;
@@ -49,7 +55,11 @@ IFS="$oldifs"
 		t.Fatal(err)
 	}
 	d := downloader{bin: bin, downloadDir: dir, maxFileSize: maxFileSize, maxPlaylistTracks: 75}
-	results, err := d.downloadRange(context.Background(), "https://youtube.com/playlist?list=x", "mp3", "320", 11, 20, nil)
+	preview, err := d.preview(context.Background(), "https://youtube.com/playlist?list=x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := d.downloadRangeWithPreview(context.Background(), preview.URL, "mp3", "320", 11, 20, preview, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,10 +77,121 @@ IFS="$oldifs"
 	if results[0].CacheKey != "youtube:id11:mp3:320" {
 		t.Fatalf("cache key=%q", results[0].CacheKey)
 	}
+	if got := strings.Count(string(mustReadFile(t, countFile)), "probe\n"); got != 2 {
+		t.Fatalf("playlist probe calls=%d, want 2", got)
+	}
 	// The flat entry has no artist; the downloaded track's metadata replaces it.
 	if results[0].Artist != "Artist 11" || results[0].DurationSeconds != 61 || results[0].URL != "https://www.youtube.com/watch?v=id11" {
 		t.Fatalf("metadata=%+v", results[0])
 	}
+}
+
+func TestDownloadRangeReusesSingleTrackPreview(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		url        string
+		change     func(*mediaPreview)
+		wantProbes string
+		maxSize    int64
+		tooLarge   bool
+	}{
+		{name: "same video", wantProbes: "1"},
+		{name: "short URL", url: "https://youtu.be/abcdefghijk?si=test", wantProbes: "1"},
+		{name: "music URL", url: "https://music.youtube.com/watch?v=abcdefghijk", wantProbes: "1"},
+		{name: "different video", url: "https://www.youtube.com/watch?v=lmnopqrstuv", wantProbes: "2"},
+		{name: "added playlist", url: "https://www.youtube.com/watch?v=abcdefghijk&list=PLtest", wantProbes: "2"},
+		{name: "different preview URL", change: func(p *mediaPreview) { p.URL = "https://youtu.be/lmnopqrstuv" }, wantProbes: "2"},
+		{name: "different metadata ID", change: func(p *mediaPreview) { p.probe.ID = "lmnopqrstuv" }, wantProbes: "2"},
+		{name: "unknown duration", change: func(p *mediaPreview) { p.probe.Duration = 0 }, wantProbes: "2"},
+		{name: "live stream", change: func(p *mediaPreview) { p.probe.IsLive = true }, wantProbes: "2"},
+		{name: "upcoming stream", change: func(p *mediaPreview) { p.probe.LiveStatus = "is_upcoming" }, wantProbes: "2"},
+		{name: "old preview", change: func(p *mediaPreview) { p.probedAt = time.Now().Add(-time.Hour) }, wantProbes: "2"},
+		{name: "no timestamp", change: func(p *mediaPreview) { p.probedAt = time.Time{} }, wantProbes: "2"},
+		{name: "future timestamp", change: func(p *mediaPreview) { p.probedAt = time.Now().Add(time.Hour) }, wantProbes: "2"},
+		{name: "no probe", change: func(p *mediaPreview) { p.probe = nil }, wantProbes: "2"},
+		{name: "other extractor", change: func(p *mediaPreview) { p.Extractor, p.probe.Extractor = "soundcloud", "soundcloud" }, wantProbes: "2"},
+		{name: "size limit", wantProbes: "1", maxSize: 1024 * 1024, tooLarge: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "fake-yt-dlp")
+			countFile := filepath.Join(dir, "probe-count")
+			script := `#!/bin/sh
+count_file="` + countFile + `"
+id=abcdefghijk
+case "$*" in *lmnopqrstuv*) id=lmnopqrstuv ;; esac
+case " $* " in
+  *" --simulate "*)
+    count=0
+    if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+    printf '%s' "$((count + 1))" > "$count_file"
+    printf '{"id":"%s","title":"Preview title","uploader":"Preview artist","duration":300,"extractor":"youtube","webpage_url":"https://www.youtube.com/watch?v=%s"}' "$id" "$id"
+    exit 0
+    ;;
+esac
+dir=''; manifest=''; progress=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --paths) dir="$2"; shift 2 ;;
+    --print-to-file)
+      template="$2"; output="$3"
+      case "$template" in after_move:*) manifest="$output" ;; before_dl:*) progress="$output" ;; esac
+      shift 3 ;;
+    *) shift ;;
+  esac
+done
+path="$dir/track.mp3"
+printf 'audio' > "$path"
+printf '1\n' > "$progress"
+printf '{"id":"%s","title":"Downloaded title","uploader":"Downloaded artist","duration":301,"filepath":"%s","ext":"mp3","extractor":"youtube","webpage_url":"https://www.youtube.com/watch?v=%s"}\n' "$id" "$path" "$id" > "$manifest"
+`
+			if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			d := downloader{bin: bin, downloadDir: dir, maxFileSize: maxFileSize}
+			preview, err := d.preview(context.Background(), "https://www.youtube.com/watch?v=abcdefghijk")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.change != nil {
+				tc.change(&preview)
+			}
+			if tc.maxSize > 0 {
+				d.maxFileSize = tc.maxSize
+			}
+			rawURL := firstNonEmpty(tc.url, "https://www.youtube.com/watch?v=abcdefghijk")
+			results, err := d.downloadRangeWithPreview(context.Background(), rawURL, "mp3", "320", 0, 0, preview, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.clearSessions(results)
+			if got := strings.TrimSpace(string(mustReadFile(t, countFile))); got != tc.wantProbes {
+				t.Fatalf("probe calls=%s, want %s", got, tc.wantProbes)
+			}
+			if tc.tooLarge {
+				if len(results) != 1 || !results[0].TooLarge || results[0].FilePath != "" || results[0].Size <= d.maxFileSize {
+					t.Fatalf("size limit bypassed: %+v", results)
+				}
+				return
+			}
+			if len(results) != 1 || results[0].Error != "" || results[0].Title != "Downloaded title" || results[0].DurationSeconds != 301 {
+				t.Fatalf("results=%+v", results)
+			}
+			wantID, _ := youtubeLinkTarget(rawURL)
+			if results[0].CacheKey != "youtube:"+wantID+":mp3:320" {
+				t.Fatalf("wrong video cache key: %q", results[0].CacheKey)
+			}
+		})
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestPreviewListsPlaylistFlat(t *testing.T) {
@@ -92,6 +213,9 @@ esac
 	}
 	if !preview.IsPlaylist || preview.TrackCount != 2 || preview.DurationSeconds != 150 || len(preview.Tracks) != 2 {
 		t.Fatalf("preview=%+v", preview)
+	}
+	if preview.probe != nil {
+		t.Fatal("playlist preview retained the probe entry tree")
 	}
 }
 
@@ -382,31 +506,35 @@ func TestYouTubeDownloadOrder(t *testing.T) {
 		selected   []int
 		wantCalls  []string // "<cookies|anonymous> <items> <player clients>" per call
 		wantFailed bool
-		// defaultFirst is the remembered anonymous client order before the download, and
-		// wantDefaultFirst the order it must leave for the next one.
-		defaultFirst, wantDefaultFirst bool
+		// alternateFirst is the remembered anonymous client order before and after the download.
+		alternateFirst, wantAlternateFirst bool
+		clients                            string
 	}{
-		{"anonymous works", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, false, false, false},
-		{"sign in uses cookies", []string{"anonymous any 1 " + signIn}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "cookies 1 mweb"}, false, false, false},
-		{"sign in without cookies", []string{"anonymous any 1 " + signIn}, false, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, true, false, false},
-		{"anonymous 403 retried", []string{"anonymous 1 1 " + forbidden}, true, "https://www.youtube.com/watch?v=abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, false, false, true},
-		{"anonymous 403 twice", []string{"anonymous any 1 " + forbidden}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, true, false, false},
-		{"no formats falls back to defaults", []string{"anonymous 1 1 " + noFormats}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, false, false, true},
-		{"remembered defaults go first", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default"}, false, true, true},
-		{"bot check on defaults tries pinned clients", []string{"anonymous 1 1 " + botCheck}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default", "anonymous 1 tv_simply"}, false, true, false},
+		{"anonymous works", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, false, false, false, ""},
+		{"sign in uses cookies", []string{"anonymous any 1 " + signIn}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "cookies 1 mweb"}, false, false, false, ""},
+		{"sign in without cookies", []string{"anonymous any 1 " + signIn}, false, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, true, false, false, ""},
+		{"anonymous 403 retried", []string{"anonymous 1 1 " + forbidden}, true, "https://www.youtube.com/watch?v=abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, false, false, true, ""},
+		{"anonymous 403 twice", []string{"anonymous any 1 " + forbidden}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, true, false, false, ""},
+		{"no formats falls back to defaults", []string{"anonymous 1 1 " + noFormats}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, false, false, true, ""},
+		{"remembered defaults go first", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default"}, false, true, true, ""},
+		{"bot check on defaults tries pinned clients", []string{"anonymous 1 1 " + botCheck}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default", "anonymous 1 tv_simply"}, false, true, false, ""},
 		{
 			"bot check after fallback uses cookies",
 			[]string{"anonymous 1 1 " + reload, "anonymous 2 1 " + botCheck},
 			true, "https://youtu.be/abc", []int{1},
-			[]string{"anonymous 1 tv_simply", "anonymous 1 default", "cookies 1 mweb"}, false, false, false,
+			[]string{"anonymous 1 tv_simply", "anonymous 1 default", "cookies 1 mweb"}, false, false, false, "",
 		},
-		{"other error", []string{"anonymous any 1 ERROR: [youtube] abc: Video unavailable"}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, true, false, false},
-		{"other site keeps cookies", nil, true, "https://soundcloud.com/a/b", []int{1}, []string{"cookies 1 default"}, false, false, false},
+		{"other error", []string{"anonymous any 1 ERROR: [youtube] abc: Video unavailable"}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, true, false, false, ""},
+		{"other site keeps cookies", nil, true, "https://soundcloud.com/a/b", []int{1}, []string{"cookies 1 default"}, false, false, false, ""},
+		{"configured defaults go first", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default"}, false, false, false, "default"},
+		{"configured defaults keep TV fallback", []string{"anonymous 1 1 " + forbidden}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 default", "anonymous 1 tv_simply"}, false, false, true, "default"},
+		{"remembered TV fallback goes first", nil, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply"}, false, true, true, "default"},
+		{"TV fallback returns to defaults", []string{"anonymous 1 1 " + botCheck}, true, "https://youtu.be/abc", []int{1}, []string{"anonymous 1 tv_simply", "anonymous 1 default"}, false, true, false, "default"},
 		{
 			"playlist retries only failed items",
 			[]string{"anonymous 1 3 " + forbidden, "anonymous any 5 " + signIn},
 			true, "https://www.youtube.com/playlist?list=x", []int{2, 3, 5},
-			[]string{"anonymous 2,3,5 tv_simply", "anonymous 3,5 default", "cookies 5 mweb"}, false, false, false,
+			[]string{"anonymous 2,3,5 tv_simply", "anonymous 3,5 default", "cookies 5 mweb"}, false, false, false, "",
 		},
 	}
 	for _, tc := range cases {
@@ -452,8 +580,8 @@ exit $status
 			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			d := &downloader{bin: fake, downloadDir: dir, youtubeClients: "tv_simply", youtubeCookieClients: "mweb"}
-			d.youtubeDefaultFirst.Store(tc.defaultFirst)
+			d := &downloader{bin: fake, downloadDir: dir, youtubeClients: firstNonEmpty(tc.clients, "tv_simply"), youtubeCookieClients: "mweb"}
+			d.youtubeAlternateFirst.Store(tc.alternateFirst)
 			if tc.cookies {
 				d.cookiesFile = filepath.Join(dir, "cookies.txt")
 				if err := os.WriteFile(d.cookiesFile, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
@@ -479,8 +607,8 @@ exit $status
 			if got := strings.Split(strings.TrimSpace(string(data)), "\n"); !reflect.DeepEqual(got, tc.wantCalls) {
 				t.Fatalf("calls=%q, want %q", got, tc.wantCalls)
 			}
-			if got := d.youtubeDefaultFirst.Load(); got != tc.wantDefaultFirst {
-				t.Fatalf("default clients first=%v, want %v", got, tc.wantDefaultFirst)
+			if got := d.youtubeAlternateFirst.Load(); got != tc.wantAlternateFirst {
+				t.Fatalf("alternate clients first=%v, want %v", got, tc.wantAlternateFirst)
 			}
 			downloaded, err := readManifest(manifest)
 			if err != nil {

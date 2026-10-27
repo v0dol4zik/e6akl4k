@@ -66,6 +66,7 @@ func (r *deliveryReport) add(other deliveryReport) {
 }
 
 type pendingURL struct {
+	operation  *mediaOperation
 	URL        string
 	ChatID     int64
 	UserID     int64
@@ -99,6 +100,7 @@ type app struct {
 	limiter       *rateLimiter
 	inlineLimiter *rateLimiter
 	flights       flightGroup
+	sourceFlights sourceFlightGroup
 	metrics       metricsCache
 	errorReports  *errorReporter
 	recognizer    musicRecognizer
@@ -126,6 +128,9 @@ func newApp(ctx context.Context, bot *tgbotapi.BotAPI, downloader *downloader) *
 func newAppWithServices(ctx context.Context, bot *tgbotapi.BotAPI, downloader *downloader, state *store, cfg config) *app {
 	if cfg.DownloadWorkers <= 0 {
 		cfg.DownloadWorkers = maxParallelDownloads
+	}
+	if cfg.BatchDownloadWorkers <= 0 {
+		cfg.BatchDownloadWorkers = 2
 	}
 	if cfg.LookupWorkers <= 0 {
 		cfg.LookupWorkers = 2
@@ -482,6 +487,27 @@ func (a *app) downloadForActiveUser(userID, chatID int64, urlKey, format, qualit
 		return
 	}
 	downloadCtx, cancel := context.WithCancel(a.ctx)
+	operation := pending.operation
+	if operation == nil {
+		mode := "single"
+		if len(pending.Batch) > 0 {
+			mode = "batch"
+		} else if pending.Preview.IsPlaylist {
+			mode = "playlist"
+		}
+		operation = newMediaOperation(mode)
+	}
+	operation.format, operation.quality = format, quality
+	downloadCtx = withMediaOperation(downloadCtx, operation)
+	defer func() {
+		ok := historyStatus == "delivered" || historyStatus == "partial"
+		logMediaStageContext(downloadCtx, "request_total", sourceHost(url), operation.started, 0, ok, "mode", operation.mode, "format", format, "quality", quality)
+		processingStarted := historyStarted
+		if !operation.readyAt.IsZero() {
+			processingStarted = historyStarted.Add(-operation.readyAt.Sub(operation.started))
+		}
+		logMediaStageContext(downloadCtx, "request_processing", sourceHost(url), processingStarted, 0, ok, "mode", operation.mode, "format", format, "quality", quality)
+	}()
 	defer func() {
 		if a.store != nil {
 			a.store.recordDownload(a.ctx, userID, sourceHost(url), format+":"+quality, historyStatus, time.Since(historyStarted), historyError, historyKey, pending.Preview.Title, pending.Preview.Artist)
@@ -616,7 +642,7 @@ func (a *app) downloadForActiveUser(userID, chatID int64, urlKey, format, qualit
 		return
 	}
 	reporter.stage(tr("stage_source", lang))
-	results, err := a.runDownloadRangeQueued(downloadCtx, url, format, quality, pending.RangeStart, pending.RangeEnd, func(position int) {
+	results, err := a.runDownloadRangeQueuedWithPreview(downloadCtx, url, format, quality, pending.RangeStart, pending.RangeEnd, pending.Preview, func(position int) {
 		if status != nil {
 			a.editStatusMessage(status, tr("queued", lang, "position", strconv.Itoa(position)))
 		}
@@ -706,7 +732,7 @@ func (a *app) downloadForActiveUser(userID, chatID int64, urlKey, format, qualit
 			return
 		}
 		defer releaseArchive()
-		report := a.sendResultsAsZIP(chatID, results, format, lang)
+		report := a.sendResultsAsZIP(chatID, results, format, lang, reporter)
 		historyStatus = deliveryStatus(report)
 		historyError = deliveryError(report)
 		a.recordDeliveryMetrics(report)
@@ -757,7 +783,7 @@ func (a *app) downloadAndSendPlaylistZIPs(ctx context.Context, chatID int64, pen
 		}
 		defer releaseArchive()
 		reporter.stage(tr("zip_batch", lang, "start", strconv.Itoa(batch.start), "end", strconv.Itoa(batch.end), "total", strconv.Itoa(batch.last)))
-		return a.sendZIPArchives(chatID, results, format, lang, &batch)
+		return a.sendZIPArchives(chatID, results, format, lang, &batch, reporter)
 	})
 	if err != nil {
 		return report, err
@@ -788,7 +814,9 @@ func (a *app) downloadPlaylistBatches(ctx context.Context, pending pendingURL, f
 	defer cancel()
 	pipelineCtx = withStatusReporter(pipelineCtx, reporter)
 	batches := make(chan playlistBatch)
+	producerDone := make(chan struct{})
 	go func() {
+		defer close(producerDone)
 		defer close(batches)
 		for batchStart := start; batchStart <= end; batchStart += size {
 			batchEnd := min(batchStart+size-1, end)
@@ -817,6 +845,10 @@ func (a *app) downloadPlaylistBatches(ctx context.Context, pending pendingURL, f
 				return
 			}
 		}
+	}()
+	defer func() {
+		cancel()
+		<-producerDone
 	}()
 	report := deliveryReport{}
 	for batch := range batches {
@@ -1081,7 +1113,22 @@ func (a *app) runDownloadRange(ctx context.Context, url, format, quality string,
 }
 
 func (a *app) runDownloadRangeQueued(ctx context.Context, url, format, quality string, start, end int, queued func(int), progress downloadProgress) ([]downloadResult, error) {
+	return a.runDownloadRangeQueuedWithPreview(ctx, url, format, quality, start, end, mediaPreview{}, queued, progress)
+}
+
+func (a *app) runDownloadRangeQueuedWithPreview(ctx context.Context, url, format, quality string, start, end int, preview mediaPreview, queued func(int), progress downloadProgress) ([]downloadResult, error) {
+	if start == 0 && end == 0 && !preview.IsPlaylist && singleYouTubeID(url) != "" {
+		return a.prepareSource(ctx, pendingURL{URL: url, Preview: preview}, format, quality, func(ctx context.Context) ([]downloadResult, error) {
+			return a.downloadRangeInSlot(ctx, url, format, quality, start, end, preview, queued, progress)
+		})
+	}
+	return a.downloadRangeInSlot(ctx, url, format, quality, start, end, preview, queued, progress)
+}
+
+func (a *app) downloadRangeInSlot(ctx context.Context, url, format, quality string, start, end int, preview mediaPreview, queued func(int), progress downloadProgress) ([]downloadResult, error) {
+	started := time.Now()
 	_, release, err := a.downloads.acquireNotify(ctx, queued)
+	logMediaStageContext(ctx, "download_queue", sourceHost(url), started, 0, err == nil, "format", format, "quality", quality)
 	if err != nil {
 		if errors.Is(err, errQueueFull) && a.store != nil {
 			a.store.increment(a.ctx, "queue_rejected")
@@ -1089,7 +1136,7 @@ func (a *app) runDownloadRangeQueued(ctx context.Context, url, format, quality s
 		return nil, err
 	}
 	defer release()
-	return a.downloader.downloadRange(ctx, url, format, quality, start, end, progress)
+	return a.downloader.downloadRangeWithPreview(ctx, url, format, quality, start, end, preview, progress)
 }
 
 func (a *app) handleDownloadCancel(callback *tgbotapi.CallbackQuery) {
@@ -1127,6 +1174,11 @@ func (a *app) sendResultsIndividually(chatID int64, results []downloadResult, fo
 }
 
 func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloadResult, format, lang string, showSummary bool, reporters ...*statusReporter) deliveryReport {
+	for _, result := range results {
+		if result.Cached != nil {
+			return a.sendCachedResults(chatID, results, format, lang, showSummary, reporters...)
+		}
+	}
 	var reporter *statusReporter
 	if len(reporters) > 0 {
 		reporter = reporters[0]
@@ -1173,13 +1225,16 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 			document := tgbotapi.NewDocument(chatID, progressFile{path: item.result.FilePath, progress: progress})
 			document.Caption = buildCaption(item.result, item.size, format, lang, item.index+1, len(results))
 			document.ParseMode = "HTML"
+			uploadStarted := time.Now()
 			message, err := sendTelegram(a.bot, document)
+			logMediaStageContext(reporterContext(reporter), "telegram_upload", "telegram", uploadStarted, item.size, err == nil, "mode", "multipart", "format", format)
 			if err != nil {
 				failures.add(item.index+1, err.Error())
 				a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(err.Error())), "HTML", nil)
 				continue
 			}
 			a.cacheDeliveredAudio(item.result, format, item.size, message)
+			mediaOperationFromContext(reporterContext(reporter)).delivered(reporterContext(reporter))
 			sent++
 		}
 		summary := tr("all_sent_summary", lang, "sent", strconv.Itoa(sent), "total", strconv.Itoa(len(results)))
@@ -1217,6 +1272,7 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 		}
 		var delivered []tgbotapi.Message
 		var sendErr error
+		uploadStarted := time.Now()
 		if len(batch) == 1 {
 			audio := tgbotapi.NewAudio(chatID, progressFile{path: batch[0].result.FilePath, progress: progress})
 			audio.Caption, audio.ParseMode = buildCaption(batch[0].result, batch[0].size, format, lang, batch[0].index+1, len(results)), "HTML"
@@ -1226,6 +1282,10 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 			delivered = []tgbotapi.Message{message}
 		} else {
 			delivered, sendErr = sendMediaGroupTelegram(a.bot, tgbotapi.NewMediaGroup(chatID, media))
+		}
+		logMediaStageContext(reporterContext(reporter), "telegram_upload", "telegram", uploadStarted, batchSize, sendErr == nil, "mode", "multipart", "format", format)
+		if sendErr == nil {
+			mediaOperationFromContext(reporterContext(reporter)).delivered(reporterContext(reporter))
 		}
 		if sendErr != nil {
 			log.Printf("Не удалось отправить группу аудио: %v", sendErr)
@@ -1241,7 +1301,9 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 				audio := tgbotapi.NewAudio(chatID, progressFile{path: item.result.FilePath, progress: fallbackProgress})
 				audio.Title, audio.Performer = item.result.Title, item.result.Artist
 				audio.Caption, audio.ParseMode = buildCaption(item.result, item.size, format, lang, item.index+1, len(results)), "HTML"
+				fallbackStarted := time.Now()
 				message, err := sendTelegram(a.bot, audio)
+				logMediaStageContext(reporterContext(reporter), "telegram_upload", "telegram", fallbackStarted, item.size, err == nil, "mode", "multipart_fallback", "format", format)
 				if err != nil {
 					failures.add(item.index+1, err.Error())
 					a.sendText(chatID, tr("send_failed", lang, "idx", strconv.Itoa(item.index+1), "total", strconv.Itoa(len(results)), "error", html.EscapeString(err.Error())), "HTML", nil)
@@ -1249,6 +1311,7 @@ func (a *app) sendResultsIndividuallyWithSummary(chatID int64, results []downloa
 				}
 				delivered = []tgbotapi.Message{message}
 				a.cacheDeliveredAudio(item.result, format, item.size, delivered[0])
+				mediaOperationFromContext(reporterContext(reporter)).delivered(reporterContext(reporter))
 				sent++
 			}
 			continue
@@ -1274,7 +1337,7 @@ func (a *app) cacheDeliveredAudio(result downloadResult, format string, size int
 	if a.store == nil || result.CacheKey == "" {
 		return
 	}
-	entry := cachedAudio{Key: result.CacheKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Size: size}
+	entry := cachedAudio{Key: result.CacheKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: result.Quality, Size: size}
 	if delivered.Audio != nil {
 		entry.FileID, entry.MediaType = delivered.Audio.FileID, "audio"
 	} else if delivered.Document != nil {
@@ -1285,8 +1348,8 @@ func (a *app) cacheDeliveredAudio(result downloadResult, format string, size int
 	}
 }
 
-func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, lang string) deliveryReport {
-	report, _ := a.sendZIPArchives(chatID, results, format, lang, nil)
+func (a *app) sendResultsAsZIP(chatID int64, results []downloadResult, format, lang string, reporters ...*statusReporter) deliveryReport {
+	report, _ := a.sendZIPArchives(chatID, results, format, lang, nil, reporters...)
 	return report
 }
 
@@ -1302,7 +1365,12 @@ var errDeliveryReported = errors.New("delivery stopped")
 // sendZIPArchives packs the downloaded results into archives under the upload limit and sends
 // them. The archives of a playlist part are named after its tracks, and the progress and summary
 // messages are then left to the caller; an error means the user got a ZIP error message.
-func (a *app) sendZIPArchives(chatID int64, results []downloadResult, format, lang string, part *playlistPart) (deliveryReport, error) {
+func (a *app) sendZIPArchives(chatID int64, results []downloadResult, format, lang string, part *playlistPart, reporters ...*statusReporter) (deliveryReport, error) {
+	var reporter *statusReporter
+	if len(reporters) > 0 {
+		reporter = reporters[0]
+	}
+	ctx := reporterContext(reporter)
 	defer a.downloader.clearSessions(results)
 
 	failures := deliveryFailures{total: len(results)}
@@ -1334,6 +1402,23 @@ func (a *app) sendZIPArchives(chatID int64, results []downloadResult, format, la
 	if part == nil {
 		a.sendText(chatID, tr("zipping", lang, "count", strconv.Itoa(len(valid))), "", nil)
 	}
+	// Each archive consumes its inputs. Keep another link for repeated
+	// sources, including repeats assigned to a later archive part.
+	defer func() { a.downloader.clearSessions(valid) }()
+	seenPaths := make(map[string]bool)
+	for i, result := range valid {
+		if !seenPaths[result.FilePath] {
+			seenPaths[result.FilePath] = true
+			continue
+		}
+		copies, err := a.downloader.cloneResults([]downloadResult{result})
+		if err != nil {
+			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
+			a.sendText(chatID, tr("zip_error", lang, "error", html.EscapeString(err.Error())), "HTML", nil)
+			return deliveryReport{Failed: len(results), TooLarge: tooLarge}, fmt.Errorf("%w: %v", errDeliveryReported, err)
+		}
+		valid[i] = copies[0]
+	}
 	chunks := splitResultsBySize(valid, a.fileLimit()*9/10)
 	delivered := 0
 	skipped := len(results) - len(valid)
@@ -1342,6 +1427,9 @@ func (a *app) sendZIPArchives(chatID int64, results []downloadResult, format, la
 		skippedLine = tr("zip_caption_skipped", lang, "skipped", strconv.Itoa(skipped))
 	}
 	for index, chunk := range chunks {
+		if err := ctx.Err(); err != nil {
+			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}, err
+		}
 		zipID, err := randomID()
 		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
@@ -1387,7 +1475,9 @@ func (a *app) sendZIPArchives(chatID int64, results []downloadResult, format, la
 		}
 		document.Caption = tr("zip_caption", lang, "count", strconv.Itoa(len(chunk)), "size", humanSize(info.Size(), lang), "fmt", strings.ToUpper(format), "skipped", skippedLine+partLine)
 		document.ParseMode = "HTML"
+		uploadStarted := time.Now()
 		_, err = sendTelegram(a.bot, document)
+		logMediaStageContext(ctx, "telegram_upload", "telegram", uploadStarted, info.Size(), err == nil, "mode", "zip", "format", format)
 		_ = os.Remove(zipPath)
 		if err != nil {
 			a.reportError(errorReport{Stage: "zip", ChatID: chatID, Format: format, Error: err.Error()})
@@ -1395,6 +1485,7 @@ func (a *app) sendZIPArchives(chatID int64, results []downloadResult, format, la
 			return deliveryReport{Delivered: delivered, Failed: len(results) - delivered, TooLarge: tooLarge}, fmt.Errorf("%w: %v", errDeliveryReported, err)
 		}
 		delivered += len(chunk)
+		mediaOperationFromContext(ctx).delivered(ctx)
 	}
 	if delivered > 0 && part == nil {
 		a.sendText(chatID, tr("zip_sent", lang), "", nil)

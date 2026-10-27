@@ -28,7 +28,7 @@ chmod 600 .env
 | `YTDLP_COOKIES_FILE` | `cookies.txt` | Netscape-format cookies file, read afresh for each isolated temporary copy. Replace it atomically; recreate the container after replacing a bind-mounted file. |
 | `YTDLP_SLEEP_REQUESTS` | `0` | Delay in seconds between `yt-dlp` HTTP requests, from 0 to 60. |
 | `YTDLP_CONCURRENT_FRAGMENTS` | `4` | Concurrent HLS/DASH fragments per `yt-dlp` process, from 1 to 16. |
-| `YTDLP_YOUTUBE_CLIENTS` | `tv_simply` | Comma-separated YouTube player clients that the download without cookies alternates with the `yt-dlp` default clients, for example `tv_simply,web` or `default,-web`; `default` keeps only the `yt-dlp` choice. See [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies). |
+| `YTDLP_YOUTUBE_CLIENTS` | `tv_simply` | First anonymous YouTube player clients, for example `tv_simply,web` or `default,-web`; failures try the `yt-dlp` defaults. Set `default` to start with the `yt-dlp` choice and retain `tv_simply` as fallback. The last successful set is tried first on subsequent downloads. See [deployment](deployment.md#http-error-403-forbidden-with-valid-cookies). |
 | `YTDLP_YOUTUBE_COOKIE_CLIENTS` | `mweb` | Player clients for the download with cookies after YouTube asks to sign in. |
 | `YTDLP_POT_PROVIDER_URL` | empty | Base address of a bgutil PO token server for YouTube, such as `http://bgutil-pot:4416`; empty runs `yt-dlp` without PO tokens. See [YouTube PO tokens](#youtube-po-tokens). |
 
@@ -38,6 +38,9 @@ chmod 600 .env
 | --- | --- | --- |
 | `DOWNLOAD_WORKERS` | `7` | Concurrent heavy downloads, from 1 to 32. |
 | `DOWNLOAD_QUEUE_SIZE` | `0` | Waiting download slots. Zero rejects excess work immediately. |
+| `BATCH_DOWNLOAD_WORKERS` | `2` | Tracks prepared concurrently per batch, playlist part, or searched tracklist, from 1 to 2, within `DOWNLOAD_WORKERS`. Set to `1` to restore sequential preparation. |
+| `BATCH_STREAM_RESULTS` | `false` | Send fresh batch links as soon as their turn is ready, in input order. At most two tracks are in preparation or awaiting delivery. `false` preserves audio albums. ZIP and batches containing duplicate source aliases keep album preparation. |
+| `YOUTUBE_SINGLE_EXTRACT` | `true` | With a chosen or saved format, defer a new single-video YouTube link's full extraction to the download. yt-dlp rejects live/unknown-duration/oversized media before transfer. A rejected item may need a metadata-only probe for lighter-format buttons. Set `false` to restore the full preview path. |
 | `LOOKUP_WORKERS` | `2` | Concurrent preview and search jobs, from 1 to 32. |
 | `LOOKUP_QUEUE_SIZE` | `40` | Waiting lookup jobs. |
 | `ARCHIVE_WORKERS` | `1` | Concurrent ZIP jobs, from 1 to 8. |
@@ -51,6 +54,12 @@ chmod 600 .env
 | `MAX_FILE_SIZE` | `52428800` | Maximum individual file size in bytes: up to 50 MiB on the cloud Bot API and up to 2000 MiB with `TELEGRAM_API_URL`. |
 
 By default, seven downloads start immediately and there is no waiting download queue. An eighth simultaneous request receives a busy response. Lookup and archive jobs retain their own FIFO queues.
+
+For a single YouTube link without a saved format, `YOUTUBE_SINGLE_EXTRACT=true` first reads the title and author through oEmbed, with a three-second deadline and one global lookup slot. The format keyboard omits duration and size estimates on this path; yt-dlp checks duration/live status before transfer and the final file size before delivery. If oEmbed is unavailable, the existing full preview is used within the request's 45-second budget. Playlists retain their full preview. Saved-format and Telegram-cache hits still skip this metadata request.
+
+An admitted collection releases its download slots between tracks and continues through a separate bounded FIFO queue, including with `DOWNLOAD_QUEUE_SIZE=0`. Two previews from one batch can run together, taking one global lookup slot each. Each full preview has up to 20 seconds within the batch's total 45-second budget. If a single YouTube video times out and `YOUTUBE_SINGLE_EXTRACT=true`, a bounded 10-second oEmbed fallback can provide its title and author. This fallback omits duration/size estimates; yt-dlp checks duration and live status before transfer after the format is chosen. Completed previews survive failures of other links. YouTube aliases share a canonical video ID, format, and quality for both the Telegram cache and concurrent source downloads. Cancelling one recipient leaves a shared source job alive until its last recipient leaves. ZIP requests require local files and therefore bypass the `file_id` cache.
+
+The bot fixes YouTube playlist positions at preview time using a bounded snapshot of public video IDs. Later edits to the playlist do not shift a selected range; unavailable positions fail individually. Old pending previews without a snapshot use the original playlist listing path. Searched tracklists overlap at most two searches/preparations through the global lookup/download gates and check the chosen candidate's cache before downloading. Disk space is estimated from known durations or an average track when duration is unavailable; final file sizes are still checked before delivery.
 
 The zero request delay and four concurrent fragments favor download latency. Increase `YTDLP_SLEEP_REQUESTS` or reduce fragment concurrency if a source starts throttling the server IP.
 

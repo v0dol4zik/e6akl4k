@@ -30,6 +30,10 @@ func createZIP(path string, results []downloadResult, consume bool) (returnErr e
 	}()
 
 	used := make(map[string]bool)
+	remaining := make(map[string]int)
+	for _, result := range results {
+		remaining[result.FilePath]++
+	}
 	for i, result := range results {
 		extension := filepath.Ext(result.FilePath)
 		name := result.Title
@@ -63,7 +67,8 @@ func createZIP(path string, results []downloadResult, consume bool) (returnErr e
 		if closeErr != nil {
 			return closeErr
 		}
-		if consume {
+		remaining[result.FilePath]--
+		if consume && remaining[result.FilePath] == 0 {
 			_ = os.Remove(result.FilePath)
 		}
 	}

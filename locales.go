@@ -218,6 +218,7 @@ var texts = map[string]map[string]string{
 		"en": "🔎 <b>searching YouTube and downloading track {current} of {total}…</b>\n{title}",
 	},
 	"tracklist_not_found":         {"ru": "ничего не найдено на YouTube: {track}", "en": "nothing found on YouTube: {track}"},
+	"playlist_track_unavailable":  {"ru": "трек недоступен", "en": "track unavailable"},
 	"tracklist_search_failed":     {"ru": "поиск на YouTube не удался: {track}: {error}", "en": "YouTube search failed: {track}: {error}"},
 	"music_collection_read_error": {"ru": "❌ не удалось прочитать состав: <code>{error}</code>", "en": "❌ couldn't read the contents: <code>{error}</code>"},
 	"music_service_blocked": {

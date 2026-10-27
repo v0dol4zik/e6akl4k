@@ -370,6 +370,9 @@ func humanSize(size int64, lang string) string {
 }
 
 func buildCaption(result downloadResult, size int64, format, lang string, index, total int) string {
+	if result.Position > 0 && result.Total > 0 {
+		index, total = result.Position, result.Total
+	}
 	title := shortenRunes(firstNonEmpty(result.Title, strings.TrimSuffix(filepath.Base(result.FilePath), filepath.Ext(result.FilePath))), maxTitleLength)
 	lines := []string{"<b>" + html.EscapeString(title) + "</b>"}
 	if result.Artist != "" {
