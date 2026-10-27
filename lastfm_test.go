@@ -319,12 +319,12 @@ func TestLastfmIsHiddenWithoutAKey(t *testing.T) {
 	telegram := &exportTelegram{}
 	application, _ := newLastfmTestApp(t, telegram)
 	for _, lang := range languageOrder {
-		if help := application.guideText("help", lang); !strings.Contains(help, "/lastfm") || len([]rune(help)) > 4096 {
+		if help, ok := application.helpSectionText("collections", lang); !ok || !strings.Contains(help, "/lastfm") || len([]rune(help)) > 4096 {
 			t.Errorf("%s help with last.fm: %d runes", lang, len([]rune(help)))
 		}
 	}
 	application.cfg.LastfmAPIKey = ""
-	if help := application.guideText("help", "en"); strings.Contains(help, "/lastfm") {
+	if help, _ := application.helpSectionText("collections", "en"); strings.Contains(help, "/lastfm") {
 		t.Error("help must not mention /lastfm without a key")
 	}
 	application.handleMessage(lastfmCommand(10, "/lastfm rj"))

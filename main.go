@@ -222,7 +222,7 @@ func (a *app) handleMessage(message *tgbotapi.Message) {
 			a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 		case "help":
 			if lang, ok := a.getLang(userID); ok {
-				a.sendText(message.Chat.ID, a.guideText("help", lang), "HTML", nil)
+				a.sendText(message.Chat.ID, a.guideText("help", lang), "HTML", helpKeyboard(lang))
 			} else {
 				a.sendText(message.Chat.ID, chooseLanguageText, "", languageKeyboard())
 			}
@@ -358,6 +358,8 @@ func (a *app) handleCallback(callback *tgbotapi.CallbackQuery) {
 		a.handleSupportNoticeDismiss(callback)
 	case strings.HasPrefix(data, "inline_cancel:"):
 		a.handleInlineCancel(callback)
+	case strings.HasPrefix(data, "help:"):
+		a.handleHelpSection(callback)
 	case strings.HasPrefix(data, "setlang:"):
 		lang := strings.TrimPrefix(data, "setlang:")
 		if _, ok := languages[lang]; !ok {
@@ -1560,15 +1562,41 @@ func (a *app) guideText(key, lang string) string {
 	if a.bot != nil && a.bot.Self.UserName != "" {
 		username = a.bot.Self.UserName
 	}
-	text := tr(key, lang, "username", html.EscapeString(username))
-	if key == "help" {
-		text += "\n\n" + tr("recognition_help", lang)
+	return tr(key, lang, "username", html.EscapeString(username))
+}
+
+// helpSectionText renders one help section by folding the guide paragraphs into a single message.
+func (a *app) helpSectionText(section, lang string) (string, bool) {
+	switch section {
+	case "search":
+		return a.guideText("help_search", lang) + "\n\n" + tr("recognition_help", lang) + "\n\n" + a.guideText("help_inline", lang), true
+	case "links":
+		return tr("help_links", lang) + "\n\n" + tr("help_services", lang), true
+	case "collections":
+		text := tr("help_collections", lang) + "\n\n" + tr("help_export", lang)
 		if a.cfg.LastfmAPIKey != "" {
-			text += "\n" + tr("lastfm_help", lang)
+			text += "\n\n" + tr("lastfm_help", lang)
 		}
-		text += "\n" + tr("notify_help", lang) + "\n" + tr("id_help", lang)
+		return text, true
+	case "formats":
+		return tr("help_formats", lang) + "\n\n" + tr("help_commands", lang) + "\n" + tr("notify_help", lang) + "\n" + tr("id_help", lang), true
 	}
-	return text
+	return "", false
+}
+
+// handleHelpSection swaps the help message between the table of contents and section texts.
+func (a *app) handleHelpSection(callback *tgbotapi.CallbackQuery) {
+	section := strings.TrimPrefix(callback.Data, "help:")
+	lang := a.langOrDefault(callback.From.ID)
+	if section == "main" {
+		a.safeEdit(callback, a.guideText("help", lang), "HTML", helpKeyboard(lang))
+		return
+	}
+	text, ok := a.helpSectionText(section, lang)
+	if !ok {
+		return
+	}
+	a.safeEdit(callback, text, "HTML", helpBackKeyboard(lang))
 }
 
 func (a *app) sendText(chatID int64, text, parseMode string, markup *tgbotapi.InlineKeyboardMarkup) *tgbotapi.Message {
