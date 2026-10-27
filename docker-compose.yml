@@ -42,8 +42,6 @@ services:
         read_only: true
         bind:
           create_host_path: false
-          # VK cookies are optional: without them, the bot politely refuses VK links.
-          required: false
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777,exec

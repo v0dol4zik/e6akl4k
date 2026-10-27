@@ -73,6 +73,8 @@ sudo install -o 10001 -g 10001 -m 0600 "$HOME/cookies.txt" ./cookies.txt
 
 The source file is stored with `0600` permissions and mounted read-only. Every `yt-dlp` operation uses an isolated temporary copy, so concurrent processes cannot corrupt the original file.
 
+The VK cookies file must exist next to `docker-compose.yml`; an empty `vk-cookies.txt` disables VK Music links, and the bot answers them with a message that the administrator needs to connect a VK session.
+
 If the bot check returns, replace the mounted file explicitly and run the deployment again. `deploy.sh` itself never overwrites it.
 
 ### `HTTP Error 403: Forbidden` with valid cookies
@@ -98,14 +100,14 @@ When YouTube changes which clients work, compare them with the same command and 
 
 ## VK Music cookies
 
-VK Music returns full tracks only to a signed-in session. Export cookies from a browser where music plays on `vk.ru` in Netscape format and deploy them as the optional VK cookies file:
+VK Music returns full tracks only to a signed-in session. Export cookies from a browser where music plays on `vk.ru` in Netscape format and deploy them as the VK cookies file:
 
 ```bash
 sudo install -o 10001 -g 10001 -m 0600 "$HOME/vk-cookies.txt" ./vk-cookies.txt
 ./deploy.sh
 ```
 
-The mount is optional: without the file, the bot answers VK Music links with a message that the administrator needs to connect a VK session. Only cookies for VK origins are used, even if the export contains other sites; each `yt-dlp` operation works with an isolated temporary copy. VK issues the session cookie (`remixsts`) with a short client-side lifetime, so the browser export date can already be in the past — the server keeps accepting it while the server-side session is alive. When the bot starts reporting that a VK session is required, export fresh cookies and replace the mounted file; `deploy.sh` never overwrites it.
+The file must exist next to `docker-compose.yml`; an empty `vk-cookies.txt` disables VK Music links, and the bot answers them with a message that the administrator needs to connect a VK session. Only cookies for VK origins are used, even if the export contains other sites; each `yt-dlp` operation works with an isolated temporary copy. VK issues the session cookie (`remixsts`) with a short client-side lifetime, so the browser export date can already be in the past — the server keeps accepting it while the server-side session is alive. The session is also bound to the login IP region: export it from a browser whose traffic exits through the same network as the bot, for example an SSH SOCKS tunnel through the server (`ssh -D 1080 -N <server>` with a separate browser profile). When the bot starts reporting that a VK session is required, export fresh cookies and replace the mounted file; `deploy.sh` never overwrites it.
 
 ## Operations
 
