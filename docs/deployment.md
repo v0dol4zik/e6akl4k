@@ -73,6 +73,8 @@ sudo install -o 10001 -g 10001 -m 0600 "$HOME/cookies.txt" ./cookies.txt
 
 The source file is stored with `0600` permissions and mounted read-only. Every `yt-dlp` operation uses an isolated temporary copy, so concurrent processes cannot corrupt the original file.
 
+The VK cookies file must exist next to `docker-compose.yml`; an empty `vk-cookies.txt` disables VK Music links, and the bot answers them with a message that the administrator needs to connect a VK session.
+
 If the bot check returns, replace the mounted file explicitly and run the deployment again. `deploy.sh` itself never overwrites it.
 
 ### `HTTP Error 403: Forbidden` with valid cookies
@@ -95,6 +97,17 @@ sudo docker exec e6akl4k-music_bot-1 sh -c 'yt-dlp --ignore-config -f bestaudio 
 If only the first command fails with `403` while Watch Later passes, authentication works but downloading with that session does not. The bot can still serve public tracks anonymously; cookie status must stay yellow until the signed-in test download also succeeds. Replacing cookies is appropriate for rejected authentication; a media-only failure may instead require a different signed-in client or a working PO token provider. One passing public track does not guarantee access to every video.
 
 When YouTube changes which clients work, compare them with the same command and `--extractor-args youtube:player_client=<client>` (with and without `--cookies`), then set the clients that download fully in `.env` without rebuilding the image. `--test` is not enough: it fetches only the first 10 KiB, which often succeeds where the full download gets `403`. The longer-term fix is a PO token provider: the optional `bgutil-pot` service runs third-party code next to the bot, so it is off by default; see [YouTube PO tokens](configuration.md#youtube-po-tokens). With `YTDLP_POT_PROVIDER_URL` set, add `--plugin-dirs /opt/yt-dlp-plugins --extractor-args youtubepot-bgutilhttp:base_url=http://bgutil-pot:4416 -v` to the commands above; the verbose log then lists `bgutil:http` among the PO token providers.
+
+## VK Music cookies
+
+VK Music returns full tracks only to a signed-in session. Export cookies from a browser where music plays on `vk.ru` in Netscape format and deploy them as the VK cookies file:
+
+```bash
+sudo install -o 10001 -g 10001 -m 0600 "$HOME/vk-cookies.txt" ./vk-cookies.txt
+./deploy.sh
+```
+
+The file must exist next to `docker-compose.yml`; an empty `vk-cookies.txt` disables VK Music links, and the bot answers them with a message that the administrator needs to connect a VK session. Only cookies for VK origins are used, even if the export contains other sites; each `yt-dlp` operation works with an isolated temporary copy. VK issues the session cookie (`remixsts`) with a short client-side lifetime, so the browser export date can already be in the past — the server keeps accepting it while the server-side session is alive. The session is also bound to the login IP region: export it from a browser whose traffic exits through the same network as the bot, for example an SSH SOCKS tunnel through the server (`ssh -D 1080 -N <server>` with a separate browser profile). When the bot starts reporting that a VK session is required, export fresh cookies and replace the mounted file; `deploy.sh` never overwrites it.
 
 ## Operations
 

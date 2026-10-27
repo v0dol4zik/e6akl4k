@@ -46,7 +46,7 @@ const (
 )
 
 var (
-	urlPattern                 = regexp.MustCompile(`(?i)(https?://)?([\w-]+\.)*(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com|newgrounds\.com)[\w/\-?=&%.#+@!~:]*`)
+	urlPattern                 = regexp.MustCompile(`(?i)(https?://)?([\w-]+\.)*(youtube\.com|youtu\.be|spotify\.com|soundcloud\.com|music\.apple\.com|deezer\.com|tidal\.com|bandcamp\.com|vk\.com|vk\.ru|ok\.ru|music\.yandex\.|mixcloud\.com|audiomack\.com|newgrounds\.com)[\w/\-?=&%.#+@!~:]*`)
 	newgroundsAudioPathPattern = regexp.MustCompile(`^/audio/listen/([0-9]+)/?$`)
 	unsafeName                 = regexp.MustCompile(`[<>:"/\\|?*]`)
 )

@@ -12,6 +12,7 @@ services:
       - .env
     environment:
       YTDLP_COOKIES_FILE: /app/cookies.txt
+      VK_COOKIES_FILE: /app/vk-cookies.txt
       HTTP_ADDR: 0.0.0.0:8080
       LOG_FORMAT: json
     volumes:
@@ -32,6 +33,12 @@ services:
       - type: bind
         source: ./cookies.txt
         target: /app/cookies.txt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./vk-cookies.txt
+        target: /app/vk-cookies.txt
         read_only: true
         bind:
           create_host_path: false
