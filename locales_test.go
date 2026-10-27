@@ -88,7 +88,7 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 	app := &app{bot: bot}
 	for _, lang := range languageOrder {
 		welcome := app.guideText("welcome", lang)
-		help := app.guideText("help", lang)
+		help := aHelpSectionsText(t, app, lang)
 		if !strings.Contains(welcome, "@music_test_bot") || !strings.Contains(help, "@music_test_bot") {
 			t.Errorf("%s guide does not contain the actual bot username", lang)
 		}
@@ -100,10 +100,27 @@ func TestUserGuidesExplainNewFeatures(t *testing.T) {
 		if strings.Contains(welcome, "{username}") || strings.Contains(help, "{username}") {
 			t.Errorf("%s guide contains an unresolved placeholder", lang)
 		}
-		if len([]rune(help)) > 4096 {
-			t.Errorf("%s help is too long for a Telegram message: %d runes", lang, len([]rune(help)))
-		}
 	}
+}
+
+// aHelpSectionsText joins the help table of contents and every section message the way /help renders them.
+func aHelpSectionsText(t *testing.T, app *app, lang string) string {
+	t.Helper()
+	text := app.guideText("help", lang)
+	for _, section := range helpSectionIDs {
+		sectionText, ok := app.helpSectionText(section, lang)
+		if !ok {
+			t.Fatalf("help section %q is not defined", section)
+		}
+		if strings.Contains(sectionText, "{username}") {
+			t.Fatalf("%s help section %q contains an unresolved placeholder", lang, section)
+		}
+		if len([]rune(sectionText)) > 4096 {
+			t.Errorf("%s help section %q is too long for a Telegram message: %d runes", lang, section, len([]rune(sectionText)))
+		}
+		text += "\n\n" + sectionText
+	}
+	return text
 }
 
 func TestBotCommandsAreLocalized(t *testing.T) {
@@ -126,7 +143,7 @@ func TestBotCommandsAreLocalized(t *testing.T) {
 }
 
 func TestHelpCommandSendsLocalizedHTMLGuide(t *testing.T) {
-	var sentText, parseMode string
+	var sentText, parseMode, sentMarkup string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch filepath.Base(r.URL.Path) {
@@ -134,7 +151,7 @@ func TestHelpCommandSendsLocalizedHTMLGuide(t *testing.T) {
 			fmt.Fprint(w, `{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"bot","username":"guide_bot"}}`)
 		case "sendMessage":
 			_ = r.ParseForm()
-			sentText, parseMode = r.FormValue("text"), r.FormValue("parse_mode")
+			sentText, parseMode, sentMarkup = r.FormValue("text"), r.FormValue("parse_mode"), r.FormValue("reply_markup")
 			fmt.Fprint(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":10,"type":"private"}}}`)
 		default:
 			fmt.Fprint(w, `{"ok":true,"result":true}`)
@@ -152,7 +169,15 @@ func TestHelpCommandSendsLocalizedHTMLGuide(t *testing.T) {
 		From:     &tgbotapi.User{ID: 10},
 		Chat:     &tgbotapi.Chat{ID: 10, Type: "private"},
 	})
-	if parseMode != "HTML" || !strings.Contains(sentText, "@guide_bot") || !strings.Contains(sentText, "поиск по названию") {
+	if parseMode != "HTML" || !strings.Contains(sentText, "справка e6akl4k") {
 		t.Fatalf("unexpected help response: parse_mode=%q text=%q", parseMode, sentText)
+	}
+	if !strings.Contains(sentMarkup, `"help:search"`) || !strings.Contains(sentMarkup, `"help:formats"`) {
+		t.Fatalf("help response must show section buttons: markup=%q", sentMarkup)
+	}
+	for _, section := range helpSectionIDs {
+		if _, ok := app.helpSectionText(section, "ru"); !ok {
+			t.Fatalf("help section %q must render in the guide", section)
+		}
 	}
 }

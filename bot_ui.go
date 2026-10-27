@@ -24,6 +24,35 @@ func languageKeyboard() *tgbotapi.InlineKeyboardMarkup {
 	return &markup
 }
 
+// helpSectionIDs enumerates help sections in button order; help:main returns to the table of contents.
+var helpSectionIDs = []string{"search", "links", "collections", "formats"}
+
+// helpKeyboard renders the main help screen: two section buttons per row.
+func helpKeyboard(lang string) *tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(helpSectionIDs))
+	for i := 0; i < len(helpSectionIDs); i += 2 {
+		end := i + 2
+		if end > len(helpSectionIDs) {
+			end = len(helpSectionIDs)
+		}
+		row := make([]tgbotapi.InlineKeyboardButton, 0, end-i)
+		for _, section := range helpSectionIDs[i:end] {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(tr("help_section_"+section, lang), "help:"+section))
+		}
+		rows = append(rows, row)
+	}
+	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	return &markup
+}
+
+// helpBackKeyboard renders the single button that returns to the main help screen.
+func helpBackKeyboard(lang string) *tgbotapi.InlineKeyboardMarkup {
+	markup := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(tr("help_section_back", lang), "help:main"),
+	))
+	return &markup
+}
+
 type downloadOption struct {
 	labelKey, format, quality string
 }
