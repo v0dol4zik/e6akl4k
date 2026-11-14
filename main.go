@@ -1339,7 +1339,7 @@ func (a *app) cacheDeliveredAudio(result downloadResult, format string, size int
 	if a.store == nil || result.CacheKey == "" {
 		return
 	}
-	entry := cachedAudio{Key: result.CacheKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: result.Quality, Size: size}
+	entry := cachedAudio{Key: result.CacheKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: result.Quality, Size: size, Source: sourceHost(result.URL)}
 	if delivered.Audio != nil {
 		entry.FileID, entry.MediaType = delivered.Audio.FileID, "audio"
 	} else if delivered.Document != nil {

@@ -397,7 +397,7 @@ func (a *app) sendUserInfo(message *tgbotapi.Message) {
 		role = tr("admin_role_admin", lang)
 	}
 	ban, banned := a.store.isBanned(a.ctx, target)
-	lines := []string{fmt.Sprintf("👤 <code>%d</code>", target), tr("admin_user_line", lang, "role", role, "known", strconv.FormatBool(known), "lang", firstNonEmpty(info.Language, "—"), "downloads", strconv.FormatInt(info.Downloads, 10), "banned", strconv.FormatBool(banned))}
+	lines := []string{fmt.Sprintf("<code>%d</code>", target), tr("admin_user_line", lang, "role", role, "known", strconv.FormatBool(known), "lang", firstNonEmpty(info.Language, "—"), "downloads", strconv.FormatInt(info.Downloads, 10), "banned", strconv.FormatBool(banned))}
 	if banned && ban.Reason != "" {
 		lines = append(lines, tr("admin_reason_line", lang, "reason", html.EscapeString(ban.Reason)))
 	}

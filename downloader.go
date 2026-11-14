@@ -70,7 +70,9 @@ type downloadResult struct {
 	Session  string
 	CacheKey string
 	// URL is the track's own page, used to offer a lighter format when the file does not fit.
-	URL             string
+	URL string
+	// Source names the original download host for captions when the URL is absent.
+	Source          string
 	DurationSeconds int
 	// TooLarge marks a track whose file or estimate (Size) exceeds the Telegram upload limit.
 	TooLarge bool

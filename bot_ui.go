@@ -409,6 +409,57 @@ func humanSize(size int64, lang string) string {
 	return fmt.Sprintf("%.1f %s", value, units[len(units)-1])
 }
 
+// sourceDisplayName maps a URL or bare host to the display name of the download source.
+// Unknown or missing hosts return "", which callers render without the source part.
+func sourceDisplayName(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" || raw == "unknown" {
+		return ""
+	}
+	host := raw
+	if strings.Contains(raw, "/") {
+		parse := raw
+		if !strings.Contains(raw, "://") {
+			parse = "https://" + raw
+		}
+		if parsed, err := url.Parse(parse); err == nil && parsed.Hostname() != "" {
+			host = parsed.Hostname()
+		}
+	}
+	switch {
+	case host == "music.youtube.com":
+		return "YouTube Music"
+	case host == "youtu.be" || strings.HasSuffix(host, "youtube.com"):
+		return "YouTube"
+	case host == "soundcloud.com" || strings.HasSuffix(host, ".soundcloud.com"):
+		return "SoundCloud"
+	case host == "bandcamp.com" || strings.HasSuffix(host, ".bandcamp.com"):
+		return "Bandcamp"
+	case host == "newgrounds.com" || strings.HasSuffix(host, ".newgrounds.com"):
+		return "Newgrounds"
+	case host == "vk.ru" || host == "vk.com" || strings.HasSuffix(host, ".vk.ru") || strings.HasSuffix(host, ".vk.com"):
+		return "VK"
+	case host == "mixcloud.com" || strings.HasSuffix(host, ".mixcloud.com"):
+		return "Mixcloud"
+	case host == "audiomack.com" || strings.HasSuffix(host, ".audiomack.com"):
+		return "Audiomack"
+	case host == "music.yandex.ru" || host == "music.yandex.com" || host == "yandex.ru" || strings.HasSuffix(host, ".yandex.ru") || strings.HasSuffix(host, ".yandex.com"):
+		return "Яндекс Музыка"
+	case host == "spotify.com" || strings.HasSuffix(host, ".spotify.com"):
+		return "Spotify"
+	case host == "deezer.com" || strings.HasSuffix(host, ".deezer.com"):
+		return "Deezer"
+	case host == "last.fm" || strings.HasSuffix(host, ".last.fm"):
+		return "last.fm"
+	case host == "sber.ru" || host == "zvuk.com" || strings.HasSuffix(host, ".zvuk.com"):
+		return "Звук"
+	default:
+		return ""
+	}
+}
+
+// buildCaption renders the caption under a sent track: bold title, artist, duration
+// and one plain information line with the format, quality, source and size.
 func buildCaption(result downloadResult, size int64, format, lang string, index, total int) string {
 	if result.Position > 0 && result.Total > 0 {
 		index, total = result.Position, result.Total
@@ -416,12 +467,28 @@ func buildCaption(result downloadResult, size int64, format, lang string, index,
 	title := shortenRunes(firstNonEmpty(result.Title, strings.TrimSuffix(filepath.Base(result.FilePath), filepath.Ext(result.FilePath))), maxTitleLength)
 	lines := []string{"<b>" + html.EscapeString(title) + "</b>"}
 	if result.Artist != "" {
-		lines = append(lines, "👤 "+html.EscapeString(shortenRunes(result.Artist, maxTitleLength)))
+		lines = append(lines, html.EscapeString(shortenRunes(result.Artist, maxTitleLength)))
 	}
 	if result.Duration != "" {
-		lines = append(lines, "⏱ "+html.EscapeString(result.Duration))
+		lines = append(lines, html.EscapeString(result.Duration))
 	}
-	lines = append(lines, "📦 "+humanSize(size, lang)+" | "+strings.ToUpper(format))
+	var details []string
+	if format != "" {
+		detail := strings.ToUpper(format)
+		if result.Quality != "" && strings.ToUpper(result.Quality) != strings.ToUpper(format) {
+			detail += " " + strings.ToUpper(result.Quality)
+		}
+		details = append(details, detail)
+	}
+	if source := firstNonEmpty(sourceDisplayName(result.Source), sourceDisplayName(result.URL)); source != "" {
+		details = append(details, source)
+	}
+	if size > 0 {
+		details = append(details, humanSize(size, lang))
+	}
+	if len(details) > 0 {
+		lines = append(lines, strings.Join(details, " · "))
+	}
 	if total > 1 {
 		lines = append(lines, fmt.Sprintf("[%d/%d]", index, total))
 	}
