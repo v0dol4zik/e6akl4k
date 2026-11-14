@@ -394,16 +394,36 @@ func (a *app) postErrorReport(ctx context.Context, chatID int64, entry errorRepo
 	if a.store != nil && entry.report.UserID > 0 {
 		username = a.store.telegramUsername(ctx, entry.report.UserID)
 	}
-	message := tgbotapi.NewMessage(chatID, formatErrorReport(entry, username, defaultLang))
+	text := formatErrorReport(entry, username, defaultLang)
+	var keyboard *tgbotapi.InlineKeyboardMarkup
+	hasKeyboard := a.store != nil && entry.id != ""
+	if hasKeyboard {
+		keyboard = errorReportKeyboard(entry.id, entry.report, defaultLang)
+	}
+	// Single reports arrive silently; only a spike of the same failure makes a sound.
+	spike := entry.spikeUsers > 0
+	// Operator chats get the post first; administrator DMs also receive a copy,
+	// because important failures must not stay unnoticed in a muted group.
+	a.deliverErrorReport(chatID, text, keyboard, hasKeyboard, spike, "операторский чат")
+	for _, adminID := range a.administratorIDs(a.ctx) {
+		if adminID == chatID {
+			continue
+		}
+		a.deliverErrorReport(adminID, text, keyboard, hasKeyboard, spike, "личка")
+	}
+}
+
+// deliverErrorReport posts one report copy and counts successful deliveries.
+func (a *app) deliverErrorReport(chatID int64, text string, keyboard *tgbotapi.InlineKeyboardMarkup, hasKeyboard, notify bool, target string) {
+	message := tgbotapi.NewMessage(chatID, text)
 	message.ParseMode = "HTML"
 	message.DisableWebPagePreview = true
-	// Single reports arrive silently; only a spike of the same failure makes a sound.
-	message.DisableNotification = entry.spikeUsers == 0
-	if a.store != nil && entry.id != "" {
-		message.ReplyMarkup = errorReportKeyboard(entry.id, entry.report, defaultLang)
+	message.DisableNotification = !notify
+	if hasKeyboard {
+		message.ReplyMarkup = keyboard
 	}
 	if _, err := sendTelegram(a.bot, message); err != nil {
-		log.Printf("Не удалось отправить отчёт об ошибке в чат %d: %v", chatID, err)
+		log.Printf("Не удалось отправить отчёт об ошибке (%s) в чат %d: %v", target, chatID, err)
 		return
 	}
 	if a.store != nil {

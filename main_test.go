@@ -92,7 +92,7 @@ func TestDetectURL(t *testing.T) {
 }
 
 func TestTranslationFallbackAndValues(t *testing.T) {
-	if got := tr("downloaded_count", "unknown", "count", "12"); got != "📦 скачано треков: <b>12</b>. как отправить?" {
+	if got := tr("downloaded_count", "unknown", "count", "12"); got != "скачано треков: <b>12</b>. как отправить?" {
 		t.Fatalf("unexpected translation: %q", got)
 	}
 }
@@ -357,7 +357,7 @@ printf '%s' '{"id":"11","title":"Track","uploader":"Artist","duration":180,"extr
 	defer mu.Unlock()
 	hinted := false
 	for _, text := range statusTexts {
-		if strings.Contains(text, "format: 🎵 MP3 (320 kbps)") && strings.Contains(text, "/settings") {
+		if strings.Contains(text, "format: MP3 (320 kbps)") && strings.Contains(text, "/settings") {
 			hinted = true
 		}
 	}

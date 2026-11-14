@@ -45,7 +45,7 @@ func TestSupportNoticeIsThrottledAndCanBeHiddenForever(t *testing.T) {
 	application := newAppWithServices(context.Background(), bot, nil, state, config{})
 	application.maybeSendSupportNotice(7, 7, "ru")
 	application.maybeSendSupportNotice(7, 7, "ru")
-	if sends.Load() != 1 || !strings.Contains(sentText, "нравится бот?") || !strings.Contains(replyMarkup, "❌ скрыть это сообщение.") {
+	if sends.Load() != 1 || !strings.Contains(sentText, "нравится бот?") || !strings.Contains(replyMarkup, "скрыть это сообщение.") {
 		t.Fatalf("sends=%d text=%q markup=%q", sends.Load(), sentText, replyMarkup)
 	}
 	application.handleSupportNoticeDismiss(&tgbotapi.CallbackQuery{

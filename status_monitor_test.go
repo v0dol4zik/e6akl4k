@@ -160,7 +160,7 @@ func TestStatusMonitorPostsPinsAndEditsOnChange(t *testing.T) {
 	*now = now.Add(time.Minute)
 	application.statusTick(ctx, monitor)
 	calls = telegram.snapshot()
-	if len(calls) != 2 || calls[0].method != "sendMessage" || calls[0].silent || !strings.HasPrefix(calls[0].text, "🔴") || !strings.Contains(calls[0].text, "Telegram API") || !strings.Contains(calls[0].text, "502") {
+	if len(calls) != 2 || calls[0].method != "sendMessage" || calls[0].silent || !strings.HasPrefix(calls[0].text, "<b>сбой</b>") || !strings.Contains(calls[0].text, "Telegram API") || !strings.Contains(calls[0].text, "502") {
 		t.Fatalf("a failure must be announced loudly: %#v", calls)
 	}
 	if calls[1].method != "editMessageText" || calls[1].messageID != "101" || !strings.HasPrefix(calls[1].text, "🔴") {
@@ -177,7 +177,7 @@ func TestStatusMonitorPostsPinsAndEditsOnChange(t *testing.T) {
 	*now = now.Add(4 * time.Minute)
 	application.statusTick(ctx, monitor)
 	calls = telegram.snapshot()
-	if len(calls) != 2 || !calls[0].silent || !strings.HasPrefix(calls[0].text, "🟢") || !strings.Contains(calls[0].text, "5 мин") {
+	if len(calls) != 2 || !calls[0].silent || !strings.HasPrefix(calls[0].text, "<b>снова в норме</b>") || !strings.Contains(calls[0].text, "5 мин") {
 		t.Fatalf("recovery must be announced silently with its duration: %#v", calls)
 	}
 	if calls[1].method != "editMessageText" || !strings.HasPrefix(calls[1].text, "🟢") {

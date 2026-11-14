@@ -92,14 +92,14 @@ func TestReportErrorStoresExpectedAndAlertsOnSpike(t *testing.T) {
 	}
 	forbidden := errorReport{Stage: "download", UserID: 11, URL: "https://youtu.be/abc", Format: "mp3 320", Error: "HTTP Error 403: Forbidden"}
 	application.reportError(forbidden)
-	calls := collect(1)
+	calls := collect(2)
 	first, ok := state.lastRealErrorReport(context.Background())
-	if !ok || len(calls) != 1 || !calls[0].silent || !strings.Contains(calls[0].text, first.ID) || !strings.Contains(calls[0].text, "версия: <code>") {
-		t.Fatalf("a single real failure must be posted silently with its ID and version: %#v", calls)
+	if !ok || len(calls) != 2 || !calls[0].silent || !calls[1].silent || !strings.Contains(calls[0].text, first.ID) || !strings.Contains(calls[1].text, first.ID) || calls[1].chatID != "10" || !strings.Contains(calls[1].text, "версия: <code>") {
+		t.Fatalf("a single real failure must be posted silently to the operator chat and every admin DM: %#v", calls)
 	}
 	for _, button := range []string{"erp:retry:" + first.ID, "erp:fix:" + first.ID, "erp:copy:" + first.ID} {
-		if !strings.Contains(calls[0].markup, button) {
-			t.Fatalf("report lacks button %s: %s", button, calls[0].markup)
+		if !strings.Contains(calls[0].markup, button) || !strings.Contains(calls[1].markup, button) {
+			t.Fatalf("report lacks button %s: %s / %s", button, calls[0].markup, calls[1].markup)
 		}
 	}
 
@@ -112,9 +112,9 @@ func TestReportErrorStoresExpectedAndAlertsOnSpike(t *testing.T) {
 	}
 	forbidden.UserID = 13
 	application.reportError(forbidden)
-	calls = collect(1)
-	if len(calls) != 1 || calls[0].silent || !strings.HasPrefix(calls[0].text, "🚨") {
-		t.Fatalf("the third user must trigger a loud spike alert: %#v", calls)
+	calls = collect(2)
+	if len(calls) != 2 || calls[0].silent || calls[1].silent || !strings.HasPrefix(calls[0].text, "<b>всплеск</b>") || !strings.HasPrefix(calls[1].text, "<b>всплеск</b>") {
+		t.Fatalf("the third user must trigger a loud spike alert in the chat and admin DMs: %#v", calls)
 	}
 	real, expected, err := state.errorReportCounts(context.Background(), time.Now().Add(-time.Hour))
 	if err != nil || real != 4 || expected != 1 {

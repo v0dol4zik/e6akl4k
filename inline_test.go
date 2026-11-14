@@ -466,7 +466,7 @@ func TestChosenInlineResultReportsFailureInMessage(t *testing.T) {
 			texts = append(texts, call.text)
 		}
 	}
-	if len(texts) != 1 || !strings.HasPrefix(texts[0], "❌ <b>couldn't download:</b>") || !strings.Contains(texts[0], "<b>Third</b>") {
+	if len(texts) != 1 || !strings.HasPrefix(texts[0], "<b>couldn't download:</b>") || !strings.Contains(texts[0], "<b>Third</b>") {
 		t.Fatalf("texts = %q", texts)
 	}
 }

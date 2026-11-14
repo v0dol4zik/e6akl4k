@@ -330,10 +330,10 @@ func previewText(preview mediaPreview, lang string) string {
 	artist := html.EscapeString(shortenRunes(preview.Artist, maxTitleLength))
 	lines := []string{"<b>" + title + "</b>"}
 	if artist != "" {
-		lines = append(lines, "👤 "+artist)
+		lines = append(lines, artist)
 	}
 	if preview.Duration != "" {
-		lines = append(lines, "⏱ "+html.EscapeString(preview.Duration))
+		lines = append(lines, html.EscapeString(preview.Duration))
 	}
 	if preview.IsPlaylist {
 		lines = append(lines, tr("preview_tracks", lang, "count", strconv.Itoa(preview.TrackCount)))
@@ -490,7 +490,7 @@ func (a *app) ensureCachedAudio(ctx context.Context, pending pendingURL, format,
 			result.TooLarge, result.Size = true, info.Size()
 			return cachedAudio{}, fileTooLargeError{Result: result, Limit: a.fileLimit()}
 		}
-		entry := cachedAudio{Key: urlKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: quality, Size: info.Size()}
+		entry := cachedAudio{Key: urlKey, Title: result.Title, Artist: result.Artist, Duration: result.Duration, Format: format, Quality: quality, Size: info.Size(), Source: sourceHost(result.URL)}
 		if telegramAudioFormat(format) {
 			progress := newUploadBatchProgress(reporter, info.Size())
 			audio := tgbotapi.NewAudio(a.cfg.CacheChatID, progressFile{path: result.FilePath, progress: progress})
@@ -541,9 +541,15 @@ func sourceHost(raw string) string {
 }
 
 func (a *app) sendCachedAudio(chatID int64, entry cachedAudio, lang string, details ...downloadResult) error {
-	result := downloadResult{Title: entry.Title, Artist: entry.Artist, Duration: entry.Duration}
+	result := downloadResult{Title: entry.Title, Artist: entry.Artist, Duration: entry.Duration, Source: entry.Source, Quality: entry.Quality}
 	if len(details) > 0 {
 		result = details[0]
+		if result.Source == "" {
+			result.Source = entry.Source
+		}
+		if result.Quality == "" {
+			result.Quality = entry.Quality
+		}
 	}
 	if entry.MediaType == "document" || !telegramAudioFormat(entry.Format) {
 		document := tgbotapi.NewDocument(chatID, tgbotapi.FileID(entry.FileID))
