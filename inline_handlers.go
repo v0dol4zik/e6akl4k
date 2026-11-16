@@ -173,11 +173,34 @@ func (a *app) inlineLinkCandidates(ctx context.Context, rawURL string) ([]inline
 	}}, nil
 }
 
+// inlineAudioCaption mirrors the plain caption format of direct sends: bold title,
+// artist, duration and the source the audio file was originally fetched from.
+func inlineAudioCaption(candidate inlineCandidate) string {
+	var lines []string
+	if title := strings.TrimSpace(candidate.Title); title != "" {
+		lines = append(lines, "<b>"+html.EscapeString(shortenRunes(title, maxTitleLength))+"</b>")
+	}
+	if artist := strings.TrimSpace(candidate.Artist); artist != "" {
+		lines = append(lines, html.EscapeString(shortenRunes(artist, maxTitleLength)))
+	}
+	if duration := strings.TrimSpace(candidate.Duration); duration != "" {
+		lines = append(lines, html.EscapeString(duration))
+	}
+	if source := sourceDisplayName(candidate.URL); source != "" {
+		lines = append(lines, source)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // inlineResult shows a cached track as ready audio. Any other track is an article: its message
 // names the track, and the download turns it into the audio once it is sent.
 func inlineResult(resultID string, candidate inlineCandidate, fileID, lang string) interface{} {
 	if fileID != "" {
-		return tgbotapi.NewInlineQueryResultCachedAudio(resultID, fileID)
+		audio := tgbotapi.NewInlineQueryResultCachedAudio(resultID, fileID)
+		if caption := inlineAudioCaption(candidate); caption != "" {
+			audio.Caption = caption
+		}
+		return audio
 	}
 	markup := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData(tr("inline_cancel", lang), "inline_cancel:"+resultID),
