@@ -165,9 +165,36 @@ func (a *app) cachedResult(ctx context.Context, item pendingURL, format, quality
 	if a.store == nil {
 		return downloadResult{}, false
 	}
-	keys := []string{downloadIdentity(item.URL, format, quality), sourceCacheKey(item.Preview.Extractor, item.Preview.SourceID, format, quality), generalCacheKey(item.URL, format, quality)}
+	keys := []string{}
+	for _, key := range []string{downloadIdentity(item.URL, format, quality), sourceCacheKey(item.Preview.Extractor, item.Preview.SourceID, format, quality), generalCacheKey(item.URL, format, quality)} {
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	// Fingerprint candidates follow the exact keys: the same song reached through a
+	// different link still plays from cache when artist, title and duration agree.
+	fingerprintKeys := map[string]bool{}
+	seen := map[string]bool{}
+	for _, key := range keys {
+		seen[key] = true
+	}
+	for _, candidate := range a.store.audioFingerprintKeys(ctx, item.Preview.Artist, item.Preview.Title) {
+		if candidate.CacheKey == "" || seen[candidate.CacheKey] {
+			continue
+		}
+		seen[candidate.CacheKey] = true
+		keys = append(keys, candidate.CacheKey)
+		fingerprintKeys[candidate.CacheKey] = true
+	}
 	for _, key := range keys {
 		if entry, ok := a.store.cachedAudio(ctx, key, a.cfg.CacheTTL); ok && entry.Size <= a.fileLimit() {
+			if fingerprintKeys[key] {
+				// A fingerprint hit: verify the cut before serving it.
+				if !durationsCompatible(item.Preview.DurationSeconds, parseDurationSeconds(entry.Duration)) {
+					continue
+				}
+				a.store.increment(ctx, "fingerprint_cache_hits")
+			}
 			return downloadResult{Cached: &entry, CacheKey: key, Quality: quality, URL: item.URL, Title: entry.Title, Artist: entry.Artist, Duration: entry.Duration, DurationSeconds: inlineDurationSeconds(entry.Duration), Size: entry.Size}, true
 		}
 	}
