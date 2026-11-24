@@ -264,6 +264,8 @@ type downloader struct {
 	pluginDir      string
 	// youtubeAlternateFirst remembers that the alternate clients got the last download through.
 	youtubeAlternateFirst atomic.Bool
+	// probeCache remembers single-track probe dumps for the --load-info fast path.
+	probeCache *probeJSONCache
 	// onCookieRetry, when set, is called every time a YouTube 403 with cookies is retried without them.
 	onCookieRetry func()
 	// newgroundsHTTPClient is optional; browser checks otherwise use the resolver transport.
@@ -344,6 +346,7 @@ func newDownloader(downloadDir string, maxFileSize int64) (*downloader, error) {
 		vkCookiesFile:     strings.TrimSpace(os.Getenv("VK_COOKIES_FILE")),
 		maxFileSize:       maxFileSize,
 		maxPlaylistTracks: maxPlaylistTracks,
+		probeCache:        newProbeJSONCache(),
 	}
 	if cookiesFile != "" {
 		if _, err := d.readCookieSnapshot(); err != nil {
@@ -716,6 +719,7 @@ func (d *downloader) probe(ctx context.Context, url string, extra ...string) (*m
 		}
 		return nil, stderr, err
 	}
+	d.maybeCacheProbeJSON(url, &info, stdout)
 	return &info, stderr, nil
 }
 
@@ -735,7 +739,6 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 			"--max-sleep-interval", "3",
 			"--paths", sessionDir,
 			"--output", "%(autonumber)06d_%(id)s.%(ext)s",
-			"--extract-audio",
 			"--embed-metadata",
 			"--embed-thumbnail",
 			"--convert-thumbnails", "jpg",
@@ -743,7 +746,17 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 			"--print-to-file", template, manifest,
 			"--print-to-file", "before_dl:%(playlist_index)s", progressFile,
 		)
-		args = append(args, audioFormatArgs(format, quality)...)
+		if sourceAlreadyMp3(url, format) {
+			// VK single tracks arrive as ready mp3 files from the extractor: skipping
+			// --extract-audio saves a full LAME re-encode of the same audio.
+		} else {
+			args = append(args, "--extract-audio")
+			args = append(args, audioFormatArgs(format, quality)...)
+			if format == "m4a" {
+				// Prefer the m4a/AAC rendition so ExtractAudio remuxes without re-encoding.
+				args = append(args, "--format-sort", "ext:m4a")
+			}
+		}
 		if !playlist && singleYouTubeID(url) != "" {
 			args = append(args, "--no-playlist", "--match-filter", "!is_live & duration <= "+strconv.Itoa(d.maxDurationFor(format, quality)))
 		}
@@ -755,6 +768,23 @@ func (d *downloader) runDownload(ctx context.Context, url, format, quality, sess
 			args = append(args, "--playlist-items", strings.Join(positions, ","))
 		}
 		return append(args, "--", url)
+	}
+	// A fresh probe dump of a single non-YouTube track lets the download skip the
+	// network resolve entirely; the attempt falls back to the normal flow on any error.
+	if !playlist && !argsHaveYouTubeTarget([]string{"--", url}) {
+		if raw := d.freshProbeJSON(url); len(raw) > 0 {
+			if fastStderr, fastErr := d.runProbeJSONDownload(ctx, raw, url, argsFor, sessionDir, manifest, selected, playlist, progress, total); fastErr == nil && probeJSONDownloaded(manifest) {
+				logMediaStageContext(ctx, "source_download", sourceHost(url), time.Now(), regularFilesSize(sessionDir), true, "format", format, "quality", quality, "probe_json", "hit")
+				return fastStderr, nil
+			} else if fastErr != nil {
+				log.Printf("Загрузка из probe json не удалась, повторяю обычным путём: %v", fastErr)
+			}
+			// Whatever the fast pass left in the session is stale: start the normal run clean.
+			for _, path := range regularFilePaths(sessionDir) {
+				_ = os.Remove(path)
+			}
+			_ = os.Remove(manifest)
+		}
 	}
 	var stderr string
 	var err error

@@ -387,14 +387,36 @@ func (a *app) tryCachedDownload(ctx context.Context, chatID int64, pending pendi
 		keys = append(keys, source)
 	}
 	keys = append(keys, urlKey)
+	// The same track found through a different URL or service: exact keys stay first,
+	// fingerprint candidates only extend the lookup after they miss.
+	fingerprintKeys := map[string]bool{}
+	seen := map[string]bool{}
+	for _, key := range keys {
+		seen[key] = true
+	}
+	for _, candidate := range a.store.audioFingerprintKeys(ctx, pending.Preview.Artist, pending.Preview.Title) {
+		if candidate.CacheKey == "" || seen[candidate.CacheKey] {
+			continue
+		}
+		seen[candidate.CacheKey] = true
+		keys = append(keys, candidate.CacheKey)
+		fingerprintKeys[candidate.CacheKey] = true
+	}
 	for _, key := range keys {
 		if entry, ok := a.store.cachedAudio(ctx, key, a.cfg.CacheTTL); ok {
+			if fingerprintKeys[key] && !durationsCompatible(pending.Preview.DurationSeconds, parseDurationSeconds(entry.Duration)) {
+				// Same artist and title but a different cut (radio edit, live take): keep downloading.
+				continue
+			}
 			started := time.Now()
 			err := a.sendCachedAudio(chatID, entry, lang)
 			logMediaStageContext(ctx, "telegram_file_id_send", "telegram", started, 0, err == nil, "media_size_bytes", entry.Size, "cache_hit", true, "format", entry.Format)
 			if err == nil {
 				mediaOperationFromContext(ctx).delivered(ctx)
 				a.store.increment(a.ctx, "cache_hits")
+				if fingerprintKeys[key] {
+					a.store.increment(ctx, "fingerprint_cache_hits")
+				}
 				return true, true, false
 			} else if !invalidCachedFileError(err) {
 				a.reportError(errorReport{Stage: "cache_send", ChatID: chatID, UserID: pending.UserID, URL: pending.URL, Format: format + " " + quality, Error: err.Error()})

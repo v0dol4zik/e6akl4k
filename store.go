@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -228,6 +229,14 @@ CREATE INDEX IF NOT EXISTS media_stage_samples_created_at ON media_stage_samples
 CREATE INDEX IF NOT EXISTS media_stage_samples_stage_source ON media_stage_samples(stage,source,created_at);
 CREATE INDEX IF NOT EXISTS telegram_users_username ON telegram_users(username);
 INSERT OR IGNORE INTO metadata(name, value) VALUES ('started_at', CAST(unixepoch() AS TEXT));
+CREATE TABLE IF NOT EXISTS audio_fingerprints (
+  fingerprint TEXT NOT NULL,
+  cache_key TEXT NOT NULL,
+  duration_seconds INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(fingerprint, cache_key)
+);
+CREATE INDEX IF NOT EXISTS audio_fingerprints_fingerprint ON audio_fingerprints(fingerprint);
 CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 `)
 	if err != nil {
@@ -658,11 +667,68 @@ func (s *store) putCachedAudio(ctx context.Context, entry cachedAudio) error {
 VALUES(?,?,?,?,?,?,?,?,?,?,unixepoch()) ON CONFLICT(cache_key) DO UPDATE SET file_id=excluded.file_id,title=excluded.title,
 artist=excluded.artist,duration=excluded.duration,format=excluded.format,quality=excluded.quality,size=excluded.size,media_type=excluded.media_type,source=excluded.source,updated_at=excluded.updated_at`,
 		entry.Key, entry.FileID, entry.Title, entry.Artist, entry.Duration, entry.Format, entry.Quality, entry.Size, mediaType, entry.Source)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := s.putAudioFingerprint(ctx, entry.Key, entry.Artist, entry.Title, entry.Duration); err != nil {
+		// A failed fingerprint never blocks the main cache entry; lookups just lose the fuzzy path.
+		log.Printf("Не удалось сохранить отпечаток трека для ключа %q: %v", entry.Key, err)
+	}
+	return nil
 }
 
 func (s *store) deleteCachedAudio(ctx context.Context, key string) {
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM audio_cache WHERE cache_key=?`, key)
+}
+
+// fingerprintCandidate is one cache key registered for a track's artist+title hash.
+type fingerprintCandidate struct {
+	CacheKey        string
+	DurationSeconds int
+}
+
+// putAudioFingerprint records the artist+title hash aliasing a cache key so that the same
+// track found through another source (search, another link) reuses the cached file.
+// Failures here must never fail the download itself.
+func (s *store) putAudioFingerprint(ctx context.Context, cacheKey, artist, title, duration string) error {
+	if s == nil || s.db == nil || cacheKey == "" {
+		return nil
+	}
+	fingerprint := trackFingerprint(artist, title)
+	if fingerprint == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audio_fingerprints(fingerprint,cache_key,duration_seconds,updated_at)
+VALUES(?,?,?,unixepoch()) ON CONFLICT(fingerprint,cache_key) DO UPDATE SET duration_seconds=excluded.duration_seconds,updated_at=unixepoch()`,
+		fingerprint, cacheKey, parseDurationSeconds(duration))
+	return err
+}
+
+// audioFingerprintKeys returns cache keys registered for the artist+title hash.
+// The same track can legitimately be registered under several keys; callers verify
+// the cached entry and duration before trusting a candidate.
+func (s *store) audioFingerprintKeys(ctx context.Context, artist, title string) []fingerprintCandidate {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	fingerprint := trackFingerprint(artist, title)
+	if fingerprint == "" {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT cache_key,duration_seconds FROM audio_fingerprints WHERE fingerprint=? ORDER BY updated_at DESC LIMIT 8`, fingerprint)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var candidates []fingerprintCandidate
+	for rows.Next() {
+		var candidate fingerprintCandidate
+		if err := rows.Scan(&candidate.CacheKey, &candidate.DurationSeconds); err != nil || candidate.CacheKey == "" {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates
 }
 
 func (s *store) increment(ctx context.Context, name string) {
@@ -773,6 +839,9 @@ func (s *store) cleanup(ctx context.Context, ttl time.Duration) error {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM audio_cache WHERE updated_at < ?`, time.Now().Add(-ttl).Unix())
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `DELETE FROM audio_fingerprints WHERE updated_at < ?`, time.Now().Add(-ttl).Unix())
+	}
 	if err == nil {
 		_, err = s.db.ExecContext(ctx, `DELETE FROM download_history WHERE created_at < ?`, time.Now().Add(-90*24*time.Hour).Unix())
 	}
