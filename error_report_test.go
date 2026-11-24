@@ -119,23 +119,29 @@ func TestReportErrorPostsToCacheChannel(t *testing.T) {
 
 	var calls []struct{ method, chatID, text, markup string }
 	deadline := time.Now().Add(2 * time.Second)
-	for len(calls) < 2 && time.Now().Before(deadline) {
+	for len(calls) < 4 && time.Now().Before(deadline) {
 		calls = append(calls, telegram.snapshot()...)
 		time.Sleep(5 * time.Millisecond)
 	}
 	time.Sleep(20 * time.Millisecond)
 	calls = append(calls, telegram.snapshot()...)
-	if len(calls) != 2 {
-		t.Fatalf("want 2 posts (duplicate, cancellation and empty error skipped), got %#v", calls)
+	if len(calls) != 4 {
+		t.Fatalf("want 4 posts (2 operator, 2 admin DM copies), got %#v", calls)
 	}
 	if calls[0].chatID != "-1001" || !strings.Contains(calls[0].text, "download") || !strings.Contains(calls[0].text, "403") {
 		t.Fatalf("first post=%#v", calls[0])
 	}
-	if calls[1].chatID != "-1001" || !strings.Contains(calls[1].text, "daft punk") {
-		t.Fatalf("second post=%#v", calls[1])
+	if calls[1].chatID != "10" || !strings.Contains(calls[1].text, "403") {
+		t.Fatalf("admin DM copy of the first post=%#v", calls[1])
+	}
+	if calls[2].chatID != "-1001" || !strings.Contains(calls[2].text, "daft punk") {
+		t.Fatalf("second post=%#v", calls[2])
+	}
+	if calls[3].chatID != "10" || !strings.Contains(calls[3].text, "daft punk") {
+		t.Fatalf("admin DM copy of the second post=%#v", calls[3])
 	}
 	counters, err := state.counters(context.Background())
-	if err != nil || counters["error_reports_sent"] != 2 {
+	if err != nil || counters["error_reports_sent"] != 4 {
 		t.Fatalf("counters=%v err=%v", counters, err)
 	}
 }

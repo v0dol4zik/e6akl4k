@@ -26,6 +26,9 @@ type cachedAudio struct {
 	Quality   string
 	Size      int64
 	MediaType string
+	// Source keeps the host the audio was originally downloaded from, so cached
+	// deliveries can caption it even when the track's URL is no longer around.
+	Source    string
 	UpdatedAt time.Time
 }
 
@@ -141,6 +144,7 @@ CREATE TABLE IF NOT EXISTS audio_cache (
   quality TEXT NOT NULL DEFAULT '',
   size INTEGER NOT NULL DEFAULT 0,
   media_type TEXT NOT NULL DEFAULT 'audio',
+  source TEXT NOT NULL DEFAULT '',
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS counters (
@@ -231,6 +235,7 @@ CREATE INDEX IF NOT EXISTS audio_cache_updated_at ON audio_cache(updated_at);
 	}
 	for _, statement := range []string{
 		`ALTER TABLE audio_cache ADD COLUMN media_type TEXT NOT NULL DEFAULT 'audio'`,
+		`ALTER TABLE audio_cache ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN default_format TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN default_quality TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE download_history ADD COLUMN cache_key TEXT NOT NULL DEFAULT ''`,
@@ -628,8 +633,8 @@ ON CONFLICT(user_id,notice) DO UPDATE SET dismissed=1`, userID, notice)
 func (s *store) cachedAudio(ctx context.Context, key string, ttl time.Duration) (cachedAudio, bool) {
 	var entry cachedAudio
 	var updated int64
-	err := s.db.QueryRowContext(ctx, `SELECT cache_key,file_id,title,artist,duration,format,quality,size,media_type,updated_at
-FROM audio_cache WHERE cache_key=?`, key).Scan(&entry.Key, &entry.FileID, &entry.Title, &entry.Artist, &entry.Duration, &entry.Format, &entry.Quality, &entry.Size, &entry.MediaType, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT cache_key,file_id,title,artist,duration,format,quality,size,media_type,source,updated_at
+FROM audio_cache WHERE cache_key=?`, key).Scan(&entry.Key, &entry.FileID, &entry.Title, &entry.Artist, &entry.Duration, &entry.Format, &entry.Quality, &entry.Size, &entry.MediaType, &entry.Source, &updated)
 	if err != nil {
 		return cachedAudio{}, false
 	}
@@ -649,10 +654,10 @@ func (s *store) putCachedAudio(ctx context.Context, entry cachedAudio) error {
 	if mediaType == "" {
 		mediaType = "audio"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO audio_cache(cache_key,file_id,title,artist,duration,format,quality,size,media_type,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,unixepoch()) ON CONFLICT(cache_key) DO UPDATE SET file_id=excluded.file_id,title=excluded.title,
-artist=excluded.artist,duration=excluded.duration,format=excluded.format,quality=excluded.quality,size=excluded.size,media_type=excluded.media_type,updated_at=excluded.updated_at`,
-		entry.Key, entry.FileID, entry.Title, entry.Artist, entry.Duration, entry.Format, entry.Quality, entry.Size, mediaType)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audio_cache(cache_key,file_id,title,artist,duration,format,quality,size,media_type,source,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,unixepoch()) ON CONFLICT(cache_key) DO UPDATE SET file_id=excluded.file_id,title=excluded.title,
+artist=excluded.artist,duration=excluded.duration,format=excluded.format,quality=excluded.quality,size=excluded.size,media_type=excluded.media_type,source=excluded.source,updated_at=excluded.updated_at`,
+		entry.Key, entry.FileID, entry.Title, entry.Artist, entry.Duration, entry.Format, entry.Quality, entry.Size, mediaType, entry.Source)
 	return err
 }
 
