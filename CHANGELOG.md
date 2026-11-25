@@ -37,6 +37,7 @@ The project uses calendar-based versions in the form `vYYYY.MM.DD`; an additiona
 
 ### Changed
 
+- Pinned `yt-dlp` 2026.11.23 instead of 2026.10.21. The release reworks the YouTube default player clients (the `web` client is temporarily out of the default set), which matches the November bursts of «YouTube не отдал ни одной аудиодорожки» on download; the same binary is verified by checksum at build time, and the pinned `bgutil` plugin 2.0.0 needs no change.
 - `/healthz` now fails only below a quarter of `DISK_WARNING_BYTES`, like the status message, so a higher warning threshold does not make a working bot unhealthy.
 - Removed the Octave Streaming integration completely: private title search, inline search, and every download now go through YouTube via `yt-dlp`. The Octave API client, remote-URL fast path, circuit breaker, `search_octave` / `search_youtube_fallback` counters, and the `musicbot_octave_*` metrics are gone, and `music.octavestreaming.com` links are no longer recognized.
 - Replaced the generated project branding with the CC0 music gopher artwork.
