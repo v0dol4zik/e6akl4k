@@ -18,7 +18,19 @@ class _VKMusicBaseIE(InfoExtractor):
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     )
-    _MEDIA_DOMAINS = ("vkuseraudio.ru", "vkuseraudio.net", "userapi.com")
+    _MEDIA_DOMAINS = ("vkuseraudio.ru", "vkuseraudio.net", "userapi.com", "okcdn.ru")
+    # okcdn-style media URLs carry no filename extension, so the content type decides.
+    _AUDIO_CONTENT_TYPES = {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/aac": "aac",
+        "audio/mp4": "m4a",
+        "audio/ogg": "ogg",
+        "application/ogg": "ogg",
+        "audio/opus": "opus",
+        "application/vnd.apple.mpegurl": "m3u8",
+        "audio/x-mpegurl": "m3u8",
+    }
     _IMAGE_DOMAINS = ("userapi.com", "vkuserphoto.ru", "vkuserphoto.net")
     _MAX_TRACKS = 1000
 
@@ -44,6 +56,18 @@ class _VKMusicBaseIE(InfoExtractor):
         except ValueError:
             return None
         return raw
+
+    def _probe_media_ext(self, media_url):
+        """Ask the media server for its content type when the URL has no filename extension."""
+        import urllib.request
+        request = urllib.request.Request(
+            media_url, headers={"User-Agent": self._MOBILE_UA, "Referer": self._origin + "/"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                content_type = (response.headers.get("Content-Type") or "")
+        except Exception:
+            return ""
+        return self._AUDIO_CONTENT_TYPES.get(content_type.split(";", 1)[0].strip().lower(), "")
 
     def _bootstrap(self, media_id):
         self._origin = "https://m.vk.ru"
@@ -152,7 +176,12 @@ class _VKMusicBaseIE(InfoExtractor):
         if not media_url:
             self._fail("unsafe_url")
         path = urlsplit(media_url).path
-        if path.endswith(".m3u8"):
+        name = path.rsplit("/", 1)[-1]
+        ext = name.rsplit(".", 1)[1].lower() if "." in name else ""
+        if not ext:
+            # CDN URLs without a filename extension: the media server knows the container.
+            ext = self._probe_media_ext(media_url)
+        if ext == "m3u8":
             formats = self._extract_m3u8_formats(
                 media_url, result["id"], ext="m4a", m3u8_id="hls",
                 headers={"Referer": self._origin + "/", "User-Agent": self._MOBILE_UA},
@@ -161,8 +190,8 @@ class _VKMusicBaseIE(InfoExtractor):
                 if not self._safe_url(fmt.get("url"), self._MEDIA_DOMAINS):
                     self._fail("unsafe_url")
                 fmt["vcodec"] = "none"
-        elif path.endswith((".mp3", ".m4a", ".aac", ".ogg", ".opus")):
-            formats = [{"url": media_url, "format_id": "source", "ext": path.rsplit(".", 1)[1], "vcodec": "none"}]
+        elif ext in ("mp3", "m4a", "aac", "ogg", "opus"):
+            formats = [{"url": media_url, "format_id": "source", "ext": ext, "vcodec": "none"}]
         else:
             self._fail("protocol")
         result["formats"] = formats
