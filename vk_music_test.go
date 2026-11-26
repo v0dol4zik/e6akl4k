@@ -176,3 +176,47 @@ func TestVKMusicGateWaitCanBeCancelled(t *testing.T) {
 	}
 	clear()
 }
+
+// VK decides whether a session is signed in on the login domain as well: an export without the
+// login.vk.ru cookies (p, sua, sui) opens m.vk.ru as a guest even with a valid remixsid, so the
+// isolated jar has to keep them. Login and API hosts are cookie sources only, never link targets.
+func TestVKCookieJarKeepsLoginDomainCookies(t *testing.T) {
+	dir := t.TempDir()
+	vk := filepath.Join(dir, "vk.txt")
+	export := "# Netscape HTTP Cookie File\n" +
+		"#HttpOnly_.vk.ru\tTRUE\t/\tTRUE\t0\tremixsid\tsession\n" +
+		"#HttpOnly_login.vk.ru\tTRUE\t/\tTRUE\t0\tp\tlogin-p\n" +
+		"#HttpOnly_login.vk.ru\tTRUE\t/\tTRUE\t0\tsui\tlogin-sui\n" +
+		"#HttpOnly_api.vk.ru\tTRUE\t/\tTRUE\t0\thttoken\tstale-api\n" +
+		".example.com\tTRUE\t/\tTRUE\t0\tunrelated\tnot-vk\n"
+	if err := os.WriteFile(vk, []byte(export), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d := &downloader{downloadDir: dir, vkCookiesFile: vk}
+	path, cleanup, err := d.isolatedCookiesForArgs([]string{"--", "https://vk.ru/audio123_456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar := string(data)
+	for _, want := range []string{"remixsid\tsession", "p\tlogin-p", "sui\tlogin-sui"} {
+		if !strings.Contains(jar, want) {
+			t.Fatalf("isolated VK jar lost the session cookie %q", want)
+		}
+	}
+	for _, reject := range []string{"httoken", "example.com"} {
+		if strings.Contains(jar, reject) {
+			t.Fatalf("isolated VK jar kept %q", reject)
+		}
+	}
+	if vkMusicHost("login.vk.ru") || vkMusicHost("api.vk.ru") {
+		t.Fatal("login and API hosts must not be accepted as VK Music links")
+	}
+	if _, ok := parseVKMusicURL("https://login.vk.ru/audio123_456"); ok {
+		t.Fatal("a login-domain URL was accepted as a track")
+	}
+}

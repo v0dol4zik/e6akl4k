@@ -12,6 +12,8 @@ import (
 
 // Opt-in: real session files and links stay outside the repository. No URLs,
 // cookie values, tokens or extractor JSON are printed on this path.
+// With VK_MUSIC_LIVE_PROD_CONFIG set the file limit comes from loadConfig (MAX_FILE_SIZE,
+// TELEGRAM_API_URL), i.e. the limit production runs with; otherwise the 50 MiB default applies.
 func TestVKMusicLive(t *testing.T) {
 	input := os.Getenv("VK_MUSIC_LIVE_INPUTS")
 	if input == "" {
@@ -36,7 +38,18 @@ func TestVKMusicLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &downloader{bin: bin, ffmpegBin: ffmpeg, downloadDir: t.TempDir(), vkCookiesFile: os.Getenv("VK_COOKIES_FILE"), maxFileSize: maxFileSize}
+	// Read the limit the way the bot does: a local Bot API server raises MAX_FILE_SIZE, and the
+	// package default alone would reject long tracks that production delivers.
+	limit := maxFileSize
+	if os.Getenv("VK_MUSIC_LIVE_PROD_CONFIG") != "" {
+		cfg, err := loadConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		limit = cfg.MaxFileSize
+	}
+	t.Logf("live VK verification with max_file_size=%d (%.0f MiB)", limit, float64(limit)/(1024*1024))
+	d := &downloader{bin: bin, ffmpegBin: ffmpeg, downloadDir: t.TempDir(), vkCookiesFile: os.Getenv("VK_COOKIES_FILE"), maxFileSize: limit}
 	for i, raw := range inputs.Tracks {
 		t.Run(strconv.Itoa(i+1), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
