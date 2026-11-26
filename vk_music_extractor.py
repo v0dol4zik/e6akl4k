@@ -19,6 +19,7 @@ class _VKMusicBaseIE(InfoExtractor):
         "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     )
     _MEDIA_DOMAINS = ("vkuseraudio.ru", "vkuseraudio.net", "userapi.com", "okcdn.ru")
+    _API_DOMAINS = ("web.api.vk.ru", "web.api.vk.com")
     # okcdn-style media URLs carry no filename extension, so the content type decides.
     _AUDIO_CONTENT_TYPES = {
         "audio/mpeg": "mp3",
@@ -33,6 +34,11 @@ class _VKMusicBaseIE(InfoExtractor):
     }
     _IMAGE_DOMAINS = ("userapi.com", "vkuserphoto.ru", "vkuserphoto.net")
     _MAX_TRACKS = 1000
+    # VK serves a different page to a share of requests even for a working session: a guest page
+    # without a web token, or an authorised page that names an API domain this adapter does not
+    # talk to. Reopening the session once more usually gets the regular page, so both outcomes
+    # are retried a bounded number of times before they are reported.
+    _BOOTSTRAP_ATTEMPTS = 4
 
     @staticmethod
     def _fail(code):
@@ -76,22 +82,38 @@ class _VKMusicBaseIE(InfoExtractor):
         domain = "." + urlsplit(self._origin).hostname.removeprefix("m.")
         self._set_cookie(domain, "remixaudio_show_alert_today", "0")
         self._set_cookie(domain, "remixmdevice", "1920/1080/2/!!-!!!!")
-        page = self._download_webpage(
-            self._origin + "/", media_id, note="Opening VK Music session",
-            headers={"User-Agent": self._MOBILE_UA},
-        )
-        state = self._search_json(
-            r"\b(?:window\.)?vk\s*=", page, "VK session", media_id,
-            transform_source=js_to_json, default={},
-        )
-        token = state.get("webToken")
-        if not isinstance(token, dict) or not int_or_none(state.get("id")) or token.get("is_anonym"):
+        guest = unexpected = 0
+        for attempt in range(self._BOOTSTRAP_ATTEMPTS):
+            page = self._download_webpage(
+                self._origin + "/", media_id, note="Opening VK Music session" if attempt == 0 else "Reopening VK Music session",
+                headers={"User-Agent": self._MOBILE_UA},
+            )
+            state = self._search_json(
+                r"\b(?:window\.)?vk\s*=", page, "VK session", media_id,
+                transform_source=js_to_json, default={},
+            )
+            token = state.get("webToken")
+            if not isinstance(token, dict) or not int_or_none(state.get("id")) or token.get("is_anonym"):
+                # A guest page: the session may be missing, or VK answered with the guest variant.
+                guest += 1
+                self._token = ""
+                continue
+            token_value = token.get("access_token")
+            domain = (state.get("apiConfigDomains") or {}).get("apiDomain")
+            if domain not in self._API_DOMAINS or not isinstance(token_value, str) or not token_value:
+                # Authorised, but for an API this adapter does not speak: ask for the page again.
+                unexpected += 1
+                self._token = ""
+                continue
+            self._token = token_value
+            self._api_domain = domain
+            return
+        if guest and not unexpected:
             self._fail("session")
-        self._token = token.get("access_token")
-        domain = (state.get("apiConfigDomains") or {}).get("apiDomain")
-        if domain not in ("web.api.vk.ru", "web.api.vk.com") or not isinstance(self._token, str) or not self._token:
+        if unexpected and not guest:
             self._fail("protocol")
-        self._api_domain = domain
+        # Both variants were served: the session exists, so this is VK's inconsistency.
+        self._fail("protocol")
 
     def _api(self, method, media_id, fields, refresh=True):
         payload = self._download_json(
