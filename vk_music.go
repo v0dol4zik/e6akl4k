@@ -56,6 +56,21 @@ func vkMusicHost(host string) bool {
 	return false
 }
 
+// vkMusicCookieHost reports the origins whose cookies belong to a VK session. Besides the site
+// itself this is the login domain: VK decides whether a session is signed in there too, and an
+// export without its p, sua and sui cookies opens m.vk.ru as a guest despite a valid remixsid.
+// The cookie API host is left out on purpose: it only carries a short-lived request token.
+func vkMusicCookieHost(host string) bool {
+	if vkMusicHost(host) {
+		return true
+	}
+	switch strings.ToLower(host) {
+	case "login.vk.com", "login.vk.ru", "id.vk.com", "id.vk.ru":
+		return true
+	}
+	return false
+}
+
 func parseVKMusicURL(rawURL string) (vkMusicTarget, bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.User != nil || u.Host != u.Hostname() || !vkMusicHost(u.Hostname()) || (u.Scheme != "https" && u.Scheme != "http") {
@@ -160,8 +175,8 @@ func singleSourceURL(rawURL string) bool {
 	return ok && !target.Playlist
 }
 
-// VK sessions are never taken from the YouTube cookie file. Only cookies for
-// VK origins enter the temporary jar, even if the user exported all sites.
+// VK sessions are never taken from the YouTube cookie file. Only cookies for VK origins enter
+// the temporary jar, even if the user exported all sites.
 func (d *downloader) isolatedCookiesForArgs(args []string) (string, func(), error) {
 	if _, ok := vkMusicArgsTarget(args); !ok {
 		return d.isolatedCookieFile()
@@ -187,7 +202,7 @@ func (d *downloader) isolatedCookiesForArgs(args []string) (string, func(), erro
 			return "", func() {}, errVKMusicSessionRequired
 		}
 		domain := strings.TrimPrefix(strings.TrimPrefix(fields[0], "#HttpOnly_"), ".")
-		if !vkMusicHost(domain) {
+		if !vkMusicCookieHost(domain) {
 			continue
 		}
 		if (fields[1] != "TRUE" && fields[1] != "FALSE") || !strings.HasPrefix(fields[2], "/") ||
